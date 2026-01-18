@@ -1,7 +1,25 @@
 [project]
 name = "algo-trader"
 version = "0.1.0"
-description = "Add your description here"
+description = "Application for managing a complete trading system."
+authors = [{ name = "Raimondo Marino", email = "raimondo.marino69@gmail.com" }]
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["algo_trader"]
+
+[project.scripts]
+algo-trader = "algo_trader.main:main"
+
+[dependency-groups]
+dev = ["pytest>=7.4"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]

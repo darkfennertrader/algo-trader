@@ -1,5 +1,5 @@
 def main():
-    print("Hello from algo-trader!")
+    print("Hello from Algo-Trader!")
 
 
 if __name__ == "__main__":

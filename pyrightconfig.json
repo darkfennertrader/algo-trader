@@ -1,0 +1,8 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": ["algo_trader"],
+  "stubPath": "./typings",
+  "extraPaths": ["typings"],
+  "reportMissingTypeStubs": "warning"
+}

@@ -5,7 +5,10 @@ description = "Application for managing a complete trading system."
 authors = [{ name = "Raimondo Marino", email = "raimondo.marino69@gmail.com" }]
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "ibapi>=9.81.1.post1",
+    "pandas>=2.3.3",
+]
 
 [build-system]
 requires = ["hatchling>=1.25"]
@@ -18,7 +21,12 @@ packages = ["algo_trader"]
 algo-trader = "algo_trader.main:main"
 
 [dependency-groups]
-dev = ["pytest>=7.4"]
+dev = [
+    "pandas-stubs>=2.3.3.260113",
+    "pylint>=4.0.4",
+    "pyright>=1.1.408",
+    "pytest>=7.4",
+]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

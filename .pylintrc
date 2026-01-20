@@ -46,7 +46,7 @@ fail-under=10
 #from-stdin=
 
 # Files or directories to be skipped. They should be base names, not paths.
-ignore=CVS
+ignore=CVS,typings
 
 # Add files or directories matching the regular expressions patterns to the
 # ignore-list. The regex matches against paths and can be in Posix or Windows
@@ -57,18 +57,18 @@ ignore-paths=
 # Files or directories matching the regular expression patterns are skipped.
 # The regex matches against base names, not paths. The default value ignores
 # Emacs file locks
-ignore-patterns=^\.#
+ignore-patterns=^\.#|.*\.pyi$
 
 # List of module names for which member attributes should not be checked and
 # will not be imported (useful for modules/projects where namespaces are
 # manipulated during runtime and thus existing member attributes cannot be
 # deduced by static analysis). It supports qualified module names, as well as
 # Unix pattern matching.
-ignored-modules=
+ignored-modules=ibapi,ibapi.client,ibapi.contract,ibapi.wrapper
 
 # Python code to execute, usually for sys.path manipulation such as
 # pygtk.require().
-#init-hook=
+init-hook=import sys; sys.path.insert(0, "typings")
 
 # Use multiple processes to speed up Pylint. Specifying 0 will auto-detect the
 # number of processors available to use, and will cap the count on Windows to
@@ -89,7 +89,7 @@ persistent=yes
 
 # Resolve imports to .pyi stubs if available. May reduce no-member messages and
 # increase not-an-iterable messages.
-prefer-stubs=no
+prefer-stubs=yes
 
 # Minimum Python version to use for version dependent checks. Will default to
 # the version used to run pylint.

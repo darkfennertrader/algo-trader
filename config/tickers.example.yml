@@ -1,0 +1,16 @@
+duration: "252 D"
+bar_size: "1 hour"
+what_to_show: "ADJUSTED_LAST"
+
+defaults:
+  sec_type: "STK"
+  currency: "USD"
+  exchange: "ISLAND"
+
+tickers:
+  - symbol: "AAPL"
+  - symbol: "MSFT"
+  - symbol: "GOOG"
+  - symbol: "AMZN"
+  - symbol: "META"
+  - symbol: "NVDA"

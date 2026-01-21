@@ -6,9 +6,11 @@ authors = [{ name = "Raimondo Marino", email = "raimondo.marino69@gmail.com" }]
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "ibapi>=9.81.1.post1",
+    "ibapi",
     "pandas>=2.3.3",
     "python-dotenv>=1.2.1",
+    "pyyaml>=6.0.3",
+    "setuptools>=80.10.1",
 ]
 
 [build-system]
@@ -32,3 +34,6 @@ dev = [
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+
+[tool.uv.sources]
+ibapi = { path = "../../IBKR/twsapi_macunix.1042.01/IBJts/source/pythonclient" }

@@ -7,10 +7,14 @@
 - For third-party library features, consult documentation via Context7 before implementing to ensure alignment with upstream APIs and usage.
 
 ## Coding Workflow
-- Linting and typing: run `uv run pyright` and `uv run pylint src` before pushing changes.
+- Linting and typing: run `uv run pyright` and `uv run pylint algo_trader` before pushing changes.
 - Tests: run `uv run pytest` at minimum; add focused tests for new behaviors.
 - Logging: prefer structured logging (no ad-hoc prints); include symbols/order ids and error context for operability.
 - Error handling: fail fast on invalid input/config; catch only to add context and re-raise rather than swallowing exceptions.
+
+## Coding Rules
+- Load environment variables with `load_dotenv()` and raise an error when a required
+  variable is missing; do not set defaults.
 
 ## Principles of Modern Software Design
 - Favor composition over inheritance.

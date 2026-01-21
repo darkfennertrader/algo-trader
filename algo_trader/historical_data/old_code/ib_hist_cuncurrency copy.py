@@ -2,19 +2,27 @@ from __future__ import annotations
 
 import itertools
 import logging
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Mapping, Sequence
 
 import pandas as pd
+from dotenv import load_dotenv
 from ibapi.client import EClient
 from ibapi.common import BarData
 from ibapi.contract import Contract
 from ibapi.wrapper import EWrapper
 
+load_dotenv()
+
+
 # Maximum number of in-flight historical requests for a single client id.
-MAX_PARALLEL_REQUESTS = 20
+try:
+    MAX_PARALLEL_REQUESTS = int(os.environ["MAX_PARALLEL_REQUESTS"])
+except KeyError as exc:
+    raise ValueError("MAX_PARALLEL_REQUESTS must be set in .env") from exc
 
 logging.basicConfig(
     level=logging.INFO,

@@ -1,16 +1,55 @@
-duration: "252 D"
+start_time: ""          # optional; when set together with end_time it overrides duration
+end_time: ""            # optional; when paired with start_time it overrides duration
+duration: "252 D"       # fallback window when start_time and end_time are not both set
 bar_size: "1 hour"
-what_to_show: "ADJUSTED_LAST"
 
-defaults:
-  sec_type: "STK"
-  currency: "USD"
-  exchange: "ISLAND"
+stocks:
+  type: "CFD"
+  contract_defaults:
+    sec_type: "CFD"
+    currency: "USD"
+    exchange: "SMART"
+    what_to_show: "ADJUSTED_LAST"
+  tickers:
+    - "AAPL"
+    - "MSFT"
+    - "NVDA"
 
-tickers:
-  - symbol: "AAPL"
-  - symbol: "MSFT"
-  - symbol: "GOOG"
-  - symbol: "AMZN"
-  - symbol: "META"
-  - symbol: "NVDA"
+forex:
+  type: "CFD"
+  contract_defaults:
+    sec_type: "CASH"
+    exchange: "IDEALPRO"
+    what_to_show: "MIDPOINT"
+  tickers:
+    - "EUR.USD"
+    - "GBP.USD"
+    - "AUD.JPY"
+
+indices:
+  type: "CFD"
+  contract_defaults:
+    sec_type: "CFD"
+    exchange: "SMART"
+    what_to_show: "MIDPOINT"
+  tickers:
+    - symbol: "IBGB100"   # UK 100
+      currency: "GBP"
+    - symbol: "IBUS500"   # US 500
+      currency: "USD"
+    - symbol: "IBDE40"    # Germany 40
+      currency: "EUR"
+
+commodities:
+  type: "CFD"
+  contract_defaults:
+    sec_type: "CFD"
+    exchange: "SMART"
+    what_to_show: "MIDPOINT"
+  tickers:
+    - symbol: "XAUUSD"    # Gold
+      currency: "USD"
+    - symbol: "XAGUSD"    # Silver
+      currency: "USD"
+    - symbol: "WTI"       # Crude (CFD)
+      currency: "USD"

@@ -21,7 +21,7 @@ build-backend = "hatchling.build"
 packages = ["algo_trader"]
 
 [project.scripts]
-algo-trader = "algo_trader.main:main"
+algotrader = "algo_trader.main:main"
 
 [dependency-groups]
 dev = [

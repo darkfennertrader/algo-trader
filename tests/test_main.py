@@ -1,10 +1,14 @@
+import pytest
+
 from pytest import CaptureFixture
 
 from algo_trader.main import main
 
 
-def test_main_prints_greeting(capsys: CaptureFixture[str]) -> None:
-    """Ensure the CLI entrypoint prints the expected greeting."""
-    main()
+def test_main_help(capsys: CaptureFixture[str]) -> None:
+    """Ensure the CLI help text renders."""
+    with pytest.raises(SystemExit) as exc:
+        main(["--help"])
+    assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert captured.out.strip() == "Hello from Algo-Trader!"
+    assert "historical" in captured.out

@@ -1,5 +1,6 @@
 # Repository Agent Instructions
 
+- Maintain this file for coding workflow guidance only; keep other documentation in README.md.
 - Package management and tooling: always use `uv` for Python tasks (installs, running scripts, dependency updates). Do not use `pip`, `pipenv`, `poetry`, or `venv` directly.
 - Use `uv run` for executing project commands and `uv add` / `uv remove` for dependency changes to keep `pyproject.toml` in sync.
 - Code contributions: ensure every Python snippet follows idiomatic patterns and aligns SOLID with the modern principles below (SRP -> cohesion, DIP/ISP -> depend on abstractions and keep interfaces lean, LSP -> prefer composition over inheritance, OCP -> low coupling, decouple creation from use).
@@ -8,13 +9,19 @@
 
 ## Coding Workflow
 - Linting and typing: run `uv run pyright` and `uv run pylint algo_trader` before pushing changes.
-- Tests: run `uv run pytest` at minimum; add focused tests for new behaviors.
+- Tests: run `uv run pytest` at minimum; add focused tests for new behaviors. (No integration tests)
 - Logging: prefer structured logging (no ad-hoc prints); include symbols/order ids and error context for operability.
 - Error handling: fail fast on invalid input/config; catch only to add context and re-raise rather than swallowing exceptions.
+- Error handling conventions: define typed errors in `algo_trader/domain/errors.py`, raise them in infrastructure/providers/application with context, and catch only at CLI boundaries to log a friendly message and exit non-zero.
 
 ## Coding Rules
 - Load environment variables with `load_dotenv()` and raise an error when a required
   variable is missing; do not set defaults.
+- Imports: expose a small, explicit public API in each package `__init__.py` and import from the package, not deep submodules.
+- Imports: keep external imports to package level or at most two levels deep; avoid deeper paths unless necessary.
+- Imports: use absolute imports across package boundaries; allow one-level relative imports only within the same package (e.g., `from .foo import bar`).
+- Module layout: allow multiple submodules but keep packages cohesive; split by responsibility, not file size.
+- Naming & intent: submodules should be named by domain responsibility (e.g., `models`, `protocols`, `service`), and `__init__.py` defines what is public.
 
 ## Principles of Modern Software Design
 - Favor composition over inheritance.

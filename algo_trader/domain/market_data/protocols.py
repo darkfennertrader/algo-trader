@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from typing import Mapping, Protocol
+from typing import Protocol
 
-import pandas as pd
-
-from algo_trader.historical_data.models import HistoricalDataRequest, HistoricalDataResult
+from .models import HistoricalDataRequest, HistoricalDataResult
 
 
 class HistoricalDataProvider(Protocol):

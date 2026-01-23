@@ -14,7 +14,9 @@ from ibapi.contract import Contract
 from ibapi.wrapper import EWrapper
 from ibapi.server_versions import MAX_CLIENT_VER
 
-from algo_trader.historical_data.models import (
+from algo_trader.domain import ProviderError
+from algo_trader.domain.market_data import (
+    Bar,
     HistoricalDataRequest,
     RequestOutcome,
     TickerConfig,
@@ -66,16 +68,28 @@ class IbTradeApp(EWrapper, EClient):
         self._registry = registry
         self._data_lock = threading.Lock()
         self._outcome_lock = threading.Lock()
+        self._ready_event = threading.Event()
         self.request_outcomes: Dict[int, RequestOutcome] = {}
 
-    def historicalData(self, reqId: int, bar_data: BarData) -> None:
+    def connectAck(self) -> None:
+        logger.info("IB API connection acknowledged.")
+        self._ready_event.set()
+
+    def nextValidId(self, orderId: int) -> None:
+        logger.info("IB API next valid order id=%s", orderId)
+        self._ready_event.set()
+
+    def wait_ready(self, timeout: float) -> bool:
+        return self._ready_event.wait(timeout)
+
+    def historicalData(self, reqId: int, bar: BarData) -> None:  # pylint: disable=disallowed-name
         row = {
-            "Date": bar_data.date,
-            "Open": bar_data.open,
-            "High": bar_data.high,
-            "Low": bar_data.low,
-            "Close": bar_data.close,
-            "Volume": bar_data.volume,
+            "Date": bar.date,
+            "Open": bar.open,
+            "High": bar.high,
+            "Low": bar.low,
+            "Close": bar.close,
+            "Volume": bar.volume,
         }
         with self._data_lock:
             existing = self.data.get(reqId)
@@ -175,8 +189,9 @@ def _parse_error_args(
     args: tuple[object, ...], req_id: int
 ) -> tuple[int, int, str, str | None]:
     if len(args) < 3:
-        raise ValueError(
-            f"IB error callback missing arguments req_id={req_id} args={args}"
+        raise ProviderError(
+            f"IB error callback missing arguments req_id={req_id} args={args}",
+            context={"req_id": str(req_id)},
         )
 
     error_time = _require_int_arg(args[0], "errorTime", req_id)
@@ -192,16 +207,18 @@ def _parse_error_args(
 
 def _require_int_arg(value: object, field: str, req_id: int) -> int:
     if not isinstance(value, int):
-        raise ValueError(
-            f"IB error callback {field} must be int req_id={req_id} value={value}"
+        raise ProviderError(
+            f"IB error callback {field} must be int req_id={req_id} value={value}",
+            context={"req_id": str(req_id), "field": field},
         )
     return value
 
 
 def _require_str_arg(value: object, field: str, req_id: int) -> str:
     if not isinstance(value, str):
-        raise ValueError(
-            f"IB error callback {field} must be str req_id={req_id} value={value}"
+        raise ProviderError(
+            f"IB error callback {field} must be str req_id={req_id} value={value}",
+            context={"req_id": str(req_id), "field": field},
         )
     return value
 
@@ -210,8 +227,9 @@ def _optional_str_arg(value: object, field: str, req_id: int) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError(
-            f"IB error callback {field} must be str req_id={req_id} value={value}"
+        raise ProviderError(
+            f"IB error callback {field} must be str req_id={req_id} value={value}",
+            context={"req_id": str(req_id), "field": field},
         )
     return value
 
@@ -249,8 +267,9 @@ def _submit_historical_request(
             req_id,
             ticker.symbol,
         )
-        raise RuntimeError(
-            f"Failed to submit historical request for {ticker.symbol}"
+        raise ProviderError(
+            f"Failed to submit historical request for {ticker.symbol}",
+            context={"symbol": ticker.symbol, "req_id": str(req_id)},
         ) from exc
 
 
@@ -261,7 +280,10 @@ def request_historical_batch(
     max_parallel_requests: int,
 ) -> None:
     if max_parallel_requests < 1:
-        raise ValueError("max_parallel_requests must be at least 1")
+        raise ProviderError(
+            "max_parallel_requests must be at least 1",
+            context={"value": str(max_parallel_requests)},
+        )
     if not request.tickers:
         logger.info("No tickers supplied; skipping historical requests.")
         return
@@ -276,25 +298,46 @@ def request_historical_batch(
     worker_count = min(len(request.tickers), max_parallel_requests * 2)
     req_ids = itertools.count(1)
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = []
         for ticker in request.tickers:
-            executor.submit(
-                _submit_historical_request, context, next(req_ids), ticker
+            futures.append(
+                executor.submit(
+                    _submit_historical_request, context, next(req_ids), ticker
+                )
             )
+
+        for future in futures:
+            future.result()
 
     registry.wait_all()
 
 
-def build_symbol_frames(
+def _frame_to_bars(frame: pd.DataFrame) -> list[Bar]:
+    bars: list[Bar] = []
+    for _, row in frame.iterrows():
+        bars.append(
+            Bar(
+                timestamp=str(row["Date"]),
+                open=float(row["Open"]),
+                high=float(row["High"]),
+                low=float(row["Low"]),
+                close=float(row["Close"]),
+                volume=float(row["Volume"]),
+            )
+        )
+    return bars
+
+
+def build_symbol_bars(
     app: IbTradeApp, request_symbols: Mapping[int, str]
-) -> Dict[str, pd.DataFrame]:
-    frames: Dict[str, pd.DataFrame] = {}
+) -> Dict[str, list[Bar]]:
+    bars_by_symbol: Dict[str, list[Bar]] = {}
     for req_id, symbol in request_symbols.items():
         frame = app.snapshot(req_id)
-        if not frame.empty:
-            frame = frame.set_index("Date")
-        frames[symbol] = frame
-        app.record_bars(req_id, len(frame))
-    return frames
+        bars = _frame_to_bars(frame) if not frame.empty else []
+        bars_by_symbol[symbol] = bars
+        app.record_bars(req_id, len(bars))
+    return bars_by_symbol
 
 
 def build_symbol_outcomes(

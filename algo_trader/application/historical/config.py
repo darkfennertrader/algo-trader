@@ -8,7 +8,8 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 import yaml
 
-from algo_trader.historical_data.models import HistoricalDataRequest, TickerConfig
+from algo_trader.domain import ConfigError
+from algo_trader.domain.market_data import HistoricalDataRequest, TickerConfig
 
 DEFAULT_PROVIDER = "ib"
 FX_PAIR_PATTERN = re.compile(r"^([A-Z]{3})\.([A-Z]{3})$")
@@ -23,7 +24,7 @@ def _coerce_to_str(value: Any) -> str:
 def _require_non_empty(value: Any, field: str, config_path: Path) -> str:
     text = _coerce_to_str(value)
     if not text:
-        raise ValueError(f"{field} is required in {config_path}")
+        raise ConfigError(f"{field} is required in {config_path}")
     return text
 
 
@@ -31,9 +32,9 @@ def _parse_timestamp(value: str, field: str, config_path: Path) -> pd.Timestamp:
     try:
         timestamp = pd.to_datetime(value)
     except Exception as exc:
-        raise ValueError(f"Invalid {field} '{value}' in {config_path}") from exc
+        raise ConfigError(f"Invalid {field} '{value}' in {config_path}") from exc
     if pd.isna(timestamp):
-        raise ValueError(f"Invalid {field} '{value}' in {config_path}")
+        raise ConfigError(f"Invalid {field} '{value}' in {config_path}")
     return timestamp
 
 
@@ -51,7 +52,7 @@ def _compute_duration_from_range(
     delta = end_ts - start_ts
     seconds = int(delta.total_seconds())
     if seconds <= 0:
-        raise ValueError(
+        raise ConfigError(
             f"end_time must be after start_time in {config_path} "
             f"(difference was {seconds} seconds)"
         )
@@ -70,7 +71,7 @@ class HistoricalRequestConfig:
 
     def resolve_window(self) -> tuple[str, str]:
         if self.start_time and not self.end_time:
-            raise ValueError(
+            raise ConfigError(
                 f"start_time requires end_time in {self.config_path}; "
                 "provide both or omit start_time."
             )
@@ -108,7 +109,7 @@ class HistoricalRequestConfig:
             example_path = config_path.with_name(
                 f"{config_path.stem}.example{config_path.suffix}"
             )
-            raise FileNotFoundError(
+            raise ConfigError(
                 f"Ticker config not found at {config_path}. "
                 f"Copy {example_path} and customize tickers."
             )
@@ -116,7 +117,7 @@ class HistoricalRequestConfig:
         try:
             raw_config: Any = yaml.safe_load(raw_text) or {}
         except yaml.YAMLError as exc:
-            raise ValueError(f"Invalid YAML content in {config_path}") from exc
+            raise ConfigError(f"Invalid YAML content in {config_path}") from exc
 
         config_mapping: Mapping[str, Any] = (
             raw_config if isinstance(raw_config, Mapping) else {}
@@ -169,7 +170,9 @@ def _load_asset_tickers(
     if raw_tickers is None:
         return []
     if not isinstance(raw_tickers, list):
-        raise ValueError(f"{asset_name}.tickers must be a list in {config_path}")
+        raise ConfigError(
+            f"{asset_name}.tickers must be a list in {config_path}"
+        )
 
     parsed: list[TickerConfig] = []
     for entry in raw_tickers:
@@ -273,7 +276,7 @@ def _parse_asset_ticker_entry(
             asset_class=asset_name,
         )
 
-    raise ValueError(
+    raise ConfigError(
         f"Unsupported ticker entry in {asset_name} for {config_path}: {entry}"
     )
 
@@ -300,13 +303,13 @@ def _parse_fx_entry(
             r"^([A-Z]{3})([A-Z]{3})$", cleaned
         )
         if not match:
-            raise ValueError(
+            raise ConfigError(
                 f"{asset_name} tickers must use 'BASE.QUOTE' format (e.g., EUR.USD) "
                 f"in {config_path}"
             )
         base, quote = match.groups()
         return base, quote
 
-    raise ValueError(
+    raise ConfigError(
         f"Unsupported ticker entry in {asset_name} for {config_path}: {entry}"
     )

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Sequence
-
-import pandas as pd
+from typing import Mapping, Sequence, TypeAlias
 
 
 @dataclass(frozen=True)
@@ -22,6 +20,19 @@ class HistoricalDataRequest:
     duration: str
     bar_size: str
     end_date_time: str
+
+
+@dataclass(frozen=True)
+class Bar:
+    timestamp: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+BarSeries: TypeAlias = Sequence[Bar]
 
 
 @dataclass(frozen=True)
@@ -50,5 +61,5 @@ class RequestOutcome:
 
 @dataclass(frozen=True)
 class HistoricalDataResult:
-    frames: Mapping[str, pd.DataFrame]
+    bars_by_symbol: Mapping[str, BarSeries]
     outcomes: Mapping[str, RequestOutcome]

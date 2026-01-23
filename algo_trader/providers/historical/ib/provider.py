@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from dataclasses import dataclass
 
-from algo_trader.historical_data.env import optional_env, optional_int, require_int
-from algo_trader.historical_data.models import (
+from algo_trader.domain import ProviderError
+from algo_trader.infrastructure import log_boundary
+from algo_trader.domain.market_data import (
     HistoricalDataRequest,
     HistoricalDataResult,
 )
-from algo_trader.historical_data.providers.ib.client import (
+from .client import (
     IbRequestRegistry,
     IbTradeApp,
-    build_symbol_frames,
+    build_symbol_bars,
     build_symbol_outcomes,
     log_ib_client_version,
     request_historical_batch,
@@ -21,10 +21,7 @@ from algo_trader.historical_data.providers.ib.client import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_IB_HOST = "127.0.0.1"
-DEFAULT_IB_PORT = 7497
-DEFAULT_IB_CLIENT_ID = 23
-
+IB_CONNECT_TIMEOUT_SECONDS = 5.0
 
 @dataclass(frozen=True)
 class IbConnectionSettings:
@@ -43,6 +40,13 @@ class IbHistoricalDataProvider:
     def name(self) -> str:
         return "ib"
 
+    @log_boundary(
+        "provider.ib.fetch",
+        context=lambda self, request: {
+            "provider": self.name(),
+            "tickers": str(len(request.tickers)),
+        },
+    )
     def fetch(self, request: HistoricalDataRequest) -> HistoricalDataResult:
         registry = IbRequestRegistry(
             inflight_requests=threading.Semaphore(self._max_parallel_requests)
@@ -59,9 +63,15 @@ class IbHistoricalDataProvider:
             target=app.run, name="ib-event-loop", daemon=True
         )
         con_thread.start()
-        time.sleep(1.0)
-
         try:
+            if not app.wait_ready(timeout=IB_CONNECT_TIMEOUT_SECONDS):
+                raise ProviderError(
+                    "Timed out waiting for IB API connection.",
+                    context={
+                        "host": self._connection.host,
+                        "port": str(self._connection.port),
+                    },
+                )
             request_historical_batch(
                 app=app,
                 request=request,
@@ -72,21 +82,16 @@ class IbHistoricalDataProvider:
             app.disconnect()
             con_thread.join(timeout=5.0)
 
-        frames = build_symbol_frames(app, registry.request_symbols)
+        bars_by_symbol = build_symbol_bars(app, registry.request_symbols)
         outcomes = build_symbol_outcomes(app, registry.request_symbols)
-        return HistoricalDataResult(frames=frames, outcomes=outcomes)
+        return HistoricalDataResult(
+            bars_by_symbol=bars_by_symbol, outcomes=outcomes
+        )
 
 
-def _load_ib_connection_settings() -> IbConnectionSettings:
-    host = optional_env("IB_HOST") or DEFAULT_IB_HOST
-    port = optional_int("IB_PORT") or DEFAULT_IB_PORT
-    client_id = optional_int("IB_CLIENT_ID") or DEFAULT_IB_CLIENT_ID
-    return IbConnectionSettings(host=host, port=port, client_id=client_id)
-
-
-def build_ib_provider() -> IbHistoricalDataProvider:
-    max_parallel_requests = require_int("MAX_PARALLEL_REQUESTS")
-    connection = _load_ib_connection_settings()
+def build_ib_provider(
+    connection: IbConnectionSettings, max_parallel_requests: int
+) -> IbHistoricalDataProvider:
     logger.info(
         "Configuring IB provider host=%s port=%s client_id=%s max_parallel_requests=%s",
         connection.host,

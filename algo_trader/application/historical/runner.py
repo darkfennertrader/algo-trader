@@ -4,24 +4,23 @@ import logging
 import time
 from pathlib import Path
 
-from algo_trader.historical_data.config import HistoricalRequestConfig
-from algo_trader.historical_data.factory import build_historical_data_provider
-from algo_trader.historical_data.models import HistoricalDataResult, RequestOutcome
+from algo_trader.infrastructure import configure_logging, log_boundary
+from algo_trader.domain.market_data import HistoricalDataResult, RequestOutcome
+from .config import HistoricalRequestConfig
+from .factory import build_historical_data_provider
 
 DEFAULT_CONFIG_PATH = (
-    Path(__file__).resolve().parents[2] / "config" / "tickers.yml"
+    Path(__file__).resolve().parents[3] / "config" / "tickers.yml"
 )
 
 logger = logging.getLogger(__name__)
 
-
-def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
+def _run_context(config_path: Path | None) -> dict[str, str]:
+    resolved_path = config_path or DEFAULT_CONFIG_PATH
+    return {"config_path": str(resolved_path)}
 
 
+@log_boundary("historical.run", context=_run_context)
 def run(config_path: Path | None = None) -> HistoricalDataResult:
     config = HistoricalRequestConfig.load(
         config_path or DEFAULT_CONFIG_PATH
@@ -58,7 +57,7 @@ def _log_outcomes(
 
     logger.info(
         "Completed %s requests in %.2f seconds",
-        len(result.frames),
+        len(result.bars_by_symbol),
         elapsed,
     )
     for ticker in config.tickers:

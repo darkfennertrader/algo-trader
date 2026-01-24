@@ -8,6 +8,9 @@
 - For third-party library features, consult documentation via Context7 before implementing to ensure alignment with upstream APIs and usage.
 
 ## Coding Workflow
+- MANDATORY PRE-CHANGE CONFIRMATION: DO NOT MODIFY ANY CODE OR FILES UNTIL YOU HAVE ASKED
+  ANY NECESSARY CLARIFYING QUESTIONS AND THE USER HAS EXPLICITLY APPROVED PROCEEDING. IF
+  REQUIREMENTS ARE AMBIGUOUS, STOP AND ASK. NO EXCEPTIONS.
 - Linting and typing: run `uv run pyright` and `uv run pylint algo_trader` before pushing changes.
 - Tests: run `uv run pytest` at minimum; add focused tests for new behaviors. (No integration tests)
 - Logging: prefer structured logging (no ad-hoc prints); include symbols/order ids and error context for operability.

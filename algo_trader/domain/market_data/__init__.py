@@ -6,11 +6,12 @@ from .models import (
     RequestOutcome,
     TickerConfig,
 )
-from .protocols import HistoricalDataProvider
+from .protocols import HistoricalDataExporter, HistoricalDataProvider
 
 __all__ = [
     "Bar",
     "BarSeries",
+    "HistoricalDataExporter",
     "HistoricalDataProvider",
     "HistoricalDataRequest",
     "HistoricalDataResult",

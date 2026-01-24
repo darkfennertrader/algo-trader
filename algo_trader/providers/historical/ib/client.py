@@ -103,7 +103,7 @@ class IbTradeApp(EWrapper, EClient):
 
     def historicalDataEnd(self, reqId: int, start: str, end: str) -> None:
         super().historicalDataEnd(reqId, start, end)
-        logger.info(
+        logger.debug(
             "HistoricalDataEnd req_id=%s start=%s end=%s",
             reqId,
             start,
@@ -255,7 +255,7 @@ def _submit_historical_request(
             keepUpToDate=0,
             chartOptions=[],
         )
-        logger.info(
+        logger.debug(
             "Submitted historical request req_id=%s symbol=%s",
             req_id,
             ticker.symbol,
@@ -353,4 +353,4 @@ def build_symbol_outcomes(
 
 
 def log_ib_client_version() -> None:
-    logger.info("IB API MAX_CLIENT_VER=%s", MAX_CLIENT_VER)
+    logger.debug("IB API MAX_CLIENT_VER=%s", MAX_CLIENT_VER)

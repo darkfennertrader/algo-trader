@@ -81,10 +81,11 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
     try:
         return handler()
     except AlgoTraderError as exc:
-        if exc.context:
-            logger.error("Error: %s context=%s", exc, exc.context)
-        else:
-            logger.error("Error: %s", exc)
+        if not getattr(exc, "_logged", False):
+            if exc.context:
+                logger.error("Error: %s context=%s", exc, exc.context)
+            else:
+                logger.error("Error: %s", exc)
         return 1
 
 

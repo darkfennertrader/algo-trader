@@ -23,3 +23,7 @@ class EnvVarError(AlgoTraderError):
 
 class ProviderError(AlgoTraderError):
     pass
+
+
+class ExportError(AlgoTraderError):
+    pass

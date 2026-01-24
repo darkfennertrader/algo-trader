@@ -13,3 +13,17 @@ class HistoricalDataProvider(Protocol):
     def fetch(self, request: HistoricalDataRequest) -> HistoricalDataResult:
         """Return historical bars for the requested symbols."""
         ...
+
+
+class HistoricalDataExporter(Protocol):
+    def name(self) -> str:
+        """Identifier for the exporter implementation."""
+        ...
+
+    def export(
+        self,
+        request: HistoricalDataRequest,
+        result: HistoricalDataResult,
+    ) -> None:
+        """Persist historical bars for the requested symbols."""
+        ...

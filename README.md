@@ -12,6 +12,8 @@ Basic commands using uv:
 
 - Default pipeline (placeholder): `uv run algotrader`
 - Historical download: `uv run algotrader historical`
+- Data cleaning: `uv run algotrader data_cleaning --start YYYY-MM --end YYYY-MM
+  --return-type simple --assets EUR.USD,IBUS30`
 - Backtest (placeholder): `uv run algotrader backtest`
 
 ## Directory structure
@@ -39,3 +41,5 @@ algo_trader/
   `bar_size`, and `what_to_show` for your run.
 - Set `MAX_PARALLEL_REQUESTS`, `IB_HOST`, `IB_PORT`, and `IB_CLIENT_ID` in your `.env`
   (see `.env.example`).
+- For data cleaning, set `DATA_SOURCE` and `DATA_LAKE_SOURCE` in `.env`. Output is written
+  to `DATA_LAKE_SOURCE/YYYY-WW/returns.csv`.

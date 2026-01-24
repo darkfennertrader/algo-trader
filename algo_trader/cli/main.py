@@ -13,6 +13,7 @@ from algo_trader.application.historical import (
     configure_logging,
     run,
 )
+from algo_trader.application.data_cleaning import run as run_data_cleaning
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run backtests (not implemented yet).",
     )
 
+    data_cleaning_parser = subparsers.add_parser(
+        "data_cleaning",
+        help="Clean hourly data into daily returns.",
+    )
+    data_cleaning_parser.add_argument(
+        "--start",
+        help="Start month in YYYY-MM format (inclusive).",
+    )
+    data_cleaning_parser.add_argument(
+        "--end",
+        help="End month in YYYY-MM format (inclusive).",
+    )
+    data_cleaning_parser.add_argument(
+        "--return-type",
+        choices=["simple", "log"],
+        default="simple",
+        help="Return type to compute.",
+    )
+    data_cleaning_parser.add_argument(
+        "--assets",
+        help="Comma-separated list of assets to process.",
+    )
+
     return parser
 
 
@@ -57,6 +81,24 @@ def _run_pipeline() -> int:
     return 1
 
 
+def _run_data_cleaning(
+    *,
+    config_path: Path | None,
+    start: str | None,
+    end: str | None,
+    return_type: str,
+    assets: str | None,
+) -> int:
+    run_data_cleaning(
+        config_path=config_path,
+        start=start,
+        end=end,
+        return_type=return_type,
+        assets=assets,
+    )
+    return 0
+
+
 def _cli_context(argv: Sequence[str] | None) -> dict[str, str]:
     if not argv:
         return {}
@@ -73,6 +115,14 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
         None: _run_pipeline,
         "historical": partial(_run_historical, config_path),
         "backtest": _run_backtest,
+        "data_cleaning": partial(
+            _run_data_cleaning,
+            config_path=config_path,
+            start=getattr(args, "start", None),
+            end=getattr(args, "end", None),
+            return_type=getattr(args, "return_type", "simple"),
+            assets=getattr(args, "assets", None),
+        ),
     }
     handler = handlers.get(args.command)
     if handler is None:

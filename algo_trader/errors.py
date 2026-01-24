@@ -1,6 +1,9 @@
+# pylint: disable=duplicate-code
 from algo_trader.domain import (
     AlgoTraderError,
     ConfigError,
+    DataProcessingError,
+    DataSourceError,
     EnvVarError,
     ProviderError,
 )
@@ -9,6 +12,8 @@ from algo_trader.domain import (
 __all__ = [
     "AlgoTraderError",
     "ConfigError",
+    "DataProcessingError",
+    "DataSourceError",
     "EnvVarError",
     "ProviderError",
 ]

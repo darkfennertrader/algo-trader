@@ -9,6 +9,7 @@ source = { editable = "." }
 dependencies = [
     { name = "ibapi" },
     { name = "pandas" },
+    { name = "pytest" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "setuptools" },
@@ -26,6 +27,7 @@ dev = [
 requires-dist = [
     { name = "ibapi", directory = "../../IBKR/twsapi_macunix.1042.01/IBJts/source/pythonclient" },
     { name = "pandas", specifier = ">=2.3.3" },
+    { name = "pytest", specifier = ">=9.0.2" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "setuptools", specifier = ">=80.10.1" },

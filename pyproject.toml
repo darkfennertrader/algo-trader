@@ -8,6 +8,7 @@ requires-python = ">=3.13"
 dependencies = [
     "ibapi",
     "pandas>=2.3.3",
+    "pytest>=9.0.2",
     "python-dotenv>=1.2.1",
     "pyyaml>=6.0.3",
     "setuptools>=80.10.1",

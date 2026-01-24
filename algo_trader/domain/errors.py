@@ -27,3 +27,11 @@ class ProviderError(AlgoTraderError):
 
 class ExportError(AlgoTraderError):
     pass
+
+
+class DataSourceError(AlgoTraderError):
+    pass
+
+
+class DataProcessingError(AlgoTraderError):
+    pass

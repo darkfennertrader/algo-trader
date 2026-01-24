@@ -1,6 +1,8 @@
 from .errors import (
     AlgoTraderError,
     ConfigError,
+    DataProcessingError,
+    DataSourceError,
     EnvVarError,
     ExportError,
     ProviderError,
@@ -9,6 +11,8 @@ from .errors import (
 __all__ = (
     "AlgoTraderError",
     "ConfigError",
+    "DataProcessingError",
+    "DataSourceError",
     "EnvVarError",
     "ExportError",
     "ProviderError",

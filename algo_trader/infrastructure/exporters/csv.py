@@ -13,6 +13,7 @@ from algo_trader.domain.market_data import (
     HistoricalDataResult,
     TickerConfig,
 )
+from algo_trader.infrastructure.data import symbol_directory
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class CsvHistoricalDataExporter:
             ) from exc
 
     def _export_symbol(self, ticker: TickerConfig, bars: BarSeries) -> None:
-        symbol_dir = _symbol_directory(ticker)
+        symbol_dir = symbol_directory(ticker)
         year_dir = (
             self._settings.output_root
             / symbol_dir
@@ -110,20 +111,3 @@ def _bars_to_frame(bars: BarSeries) -> pd.DataFrame:
         "Volume": [bar_item.volume for bar_item in bars],
     }
     return pd.DataFrame(data)
-
-
-def _symbol_directory(ticker: TickerConfig) -> str:
-    if ticker.asset_class in {"forex", "commodities"}:
-        return _join_symbol_currency(ticker.symbol, ticker.currency)
-    return ticker.symbol
-
-
-def _join_symbol_currency(symbol: str, currency: str) -> str:
-    if "." in symbol:
-        return symbol
-    if currency and symbol.endswith(currency) and len(symbol) > len(currency):
-        base = symbol[: -len(currency)]
-        return f"{base}.{currency}"
-    if currency:
-        return f"{symbol}.{currency}"
-    return symbol

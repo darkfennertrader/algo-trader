@@ -49,21 +49,46 @@
 
 ## Function and class sizing
 - Focus first on clarity and single responsibility; length is a symptom, not the goal.
-- Functions: target small-to-moderate size (roughly 5–40 lines). Once past ~50–80 lines, look to split clear substeps into helpers and trim deep nesting; avoid trivial one-line wrappers that hurt readability.
-- Classes: keep them cohesive with one clear concept; if methods feel unrelated or attributes balloon (≈10+ fields), consider splitting and using composition instead of a “god object.”
-- Python habits: prefer small, well-named functions; group related logic into modules over huge classes; use dataclasses or lean classes for data containers; keep public APIs small and push complexity into underscore-prefixed helpers.
-- Linters (pylint) with rules like too-many-locals/branches/statements/instance-attributes help flag overgrown code.
-- Quick check: can you explain it in one sentence, view it on one screen, see a single reason to change, and make it clearer by extracting a helper? If not, refactor.
+- Functions: target small-to-moderate size (roughly 5–40 lines). Once past ~50–80 lines,
+  look to split clear substeps into helpers and trim deep nesting; avoid trivial one-line
+  wrappers that hurt readability.
+- Classes: keep them cohesive with one clear concept; if methods feel unrelated or
+  attributes balloon (≈10+ fields), consider splitting and using composition instead of a
+  “god object.”
+- Python habits: prefer small, well-named functions; group related logic into modules over
+  huge classes; use dataclasses or lean classes for data containers; keep public APIs
+  small and push complexity into underscore-prefixed helpers.
+- Linters (pylint) with rules like too-many-locals/branches/statements/instance-attributes
+  help flag overgrown code.
+- Quick check: can you explain it in one sentence, view it on one screen, see a single
+  reason to change, and make it clearer by extracting a helper? If not, refactor.
 
 ## Architecture & patterns for trading
-- Strategy: define a strategy interface/protocol and pluggable concrete strategies (engine calls `strategy.on_bar(...)`) so you can swap mean reversion, momentum, etc. without touching the engine.
-- Observer / Pub-Sub: event bus for ticks, fills, risk alerts; subjects publish (`market_data`, `order_filled`, etc.) and observers (strategies, risk, UI, logger, PnL) react.
-- Adapter + Facade: wrap each broker/feed API to a unified interface (`send_order`, `cancel_order`, `positions`) and expose a simple Broker facade so strategies stay broker-agnostic.
-- Factory / Abstract Factory: build brokers, feeds, strategies, storage from config (YAML/env); central composition keeps creation separate from use.
-- State: model order lifecycle (NEW → SUBMITTED → PARTIALLY_FILLED → FILLED/CANCELED/REJECTED) with explicit states and transitions to avoid scattered status checks.
-- Command: encapsulate actions (`PlaceOrderCommand`, `CancelOrderCommand`) so they can be queued, logged, replayed (backtests) and dispatched by an executor.
-- Decorator: layer cross-cutting concerns around broker/strategy (risk checks, logging, throttling) without bloating core classes.
-- Template Method: shared trading loop skeleton with hooks; `BacktestEngine` vs `LiveTradingEngine` override data/execution steps only.
-- Pipeline: compose transformations from raw ticks → cleaned → bars → indicators → signals using chained functions/generators or async stages.
-- Concurrency: use producer-consumer or async I/O (`queue.Queue`/`asyncio.Queue`) for feeds and order streams to keep processing non-blocking.
-- Architecture style: layered + event-driven; domain (orders/positions/strategies), infrastructure (brokers/feeds/storage/bus), application (engine/orchestration/API), all reacting to events. SOLID + low coupling guide boundaries; abstractions allow swapping implementations.
+- Strategy: define a strategy interface/protocol and pluggable concrete strategies (engine
+  calls `strategy on_bar(...)`) so you can swap mean reversion, momentum, etc. without
+  touching the engine.
+- Observer / Pub-Sub: event bus for ticks, fills, risk alerts; subjects publish
+  (`market_data`, `order_filled`, etc.) and observers (strategies, risk, UI, logger, PnL)
+  react.
+- Adapter + Facade: wrap each broker/feed API to a unified interface (`send_order`,
+  `cancel_order`, `positions`) and expose a simple Broker facade so strategies stay
+  broker-agnostic.
+- Factory / Abstract Factory: build brokers, feeds, strategies, storage from config
+  (YAML/env); central composition keeps creation separate from use.
+- State: model order lifecycle (NEW → SUBMITTED → PARTIALLY_FILLED →
+  FILLED/CANCELED/REJECTED) with explicit states and transitions to avoid scattered status
+  checks.
+- Command: encapsulate actions (`PlaceOrderCommand`, `CancelOrderCommand`) so they can be
+  queued, logged, replayed (backtests) and dispatched by an executor.
+- Decorator: layer cross-cutting concerns around broker/strategy (risk checks, logging,
+  throttling) without bloating core classes.
+- Template Method: shared trading loop skeleton with hooks; `BacktestEngine` vs
+  `LiveTradingEngine` override data/execution steps only.
+- Pipeline: compose transformations from raw ticks → cleaned → bars → indicators → signals
+  using chained functions/generators or async stages.
+- Concurrency: use producer-consumer or async I/O (`queue.Queue`/`asyncio.Queue`) for
+  feeds and order streams to keep processing non-blocking.
+- Architecture style: layered + event-driven; domain (orders/positions/strategies),
+  infrastructure (brokers feeds/storage/bus), application (engine/orchestration/API), all
+  reacting to events. SOLID + low coupling guide boundaries; abstractions allow swapping
+  implementations.

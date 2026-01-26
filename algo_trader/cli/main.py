@@ -14,6 +14,8 @@ from algo_trader.application.historical import (
     run,
 )
 from algo_trader.application.data_cleaning import run as run_data_cleaning
+from algo_trader.application.data_processing import run as run_data_processing
+from algo_trader.cli.wizard import run as run_wizard
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated list of assets to process.",
     )
 
+    data_processing_parser = subparsers.add_parser(
+        "data_processing",
+        help="Preprocess returns data.",
+    )
+    data_processing_parser.add_argument(
+        "--preprocessor",
+        default="identity",
+        help="Name of the preprocessor to apply.",
+    )
+    data_processing_parser.add_argument(
+        "--preprocessor-arg",
+        action="append",
+        help="Preprocessor argument in key=value format (repeatable).",
+    )
+
+    subparsers.add_parser(
+        "wizard",
+        help="Interactive wizard to build CLI commands.",
+    )
+
     return parser
 
 
@@ -99,6 +121,21 @@ def _run_data_cleaning(
     return 0
 
 
+def _run_data_processing(
+    *,
+    preprocessor: str,
+    preprocessor_args: list[str] | None,
+) -> int:
+    run_data_processing(
+        preprocessor_name=preprocessor, preprocessor_args=preprocessor_args
+    )
+    return 0
+
+
+def _run_wizard() -> int:
+    return run_wizard()
+
+
 def _cli_context(argv: Sequence[str] | None) -> dict[str, str]:
     if not argv:
         return {}
@@ -123,6 +160,12 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
             return_type=getattr(args, "return_type", "simple"),
             assets=getattr(args, "assets", None),
         ),
+        "data_processing": partial(
+            _run_data_processing,
+            preprocessor=getattr(args, "preprocessor", ""),
+            preprocessor_args=getattr(args, "preprocessor_arg", None),
+        ),
+        "wizard": _run_wizard,
     }
     handler = handlers.get(args.command)
     if handler is None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 import json
 from collections import OrderedDict
 from pathlib import Path
@@ -95,7 +95,9 @@ def _resolve_asset_list(
     assets_override = _parse_assets(assets)
     tickers: Iterable[TickerConfig] = []
     if assets_override is None:
-        config = HistoricalRequestConfig.load(config_path or DEFAULT_CONFIG_PATH)
+        config = HistoricalRequestConfig.load(
+            config_path or DEFAULT_CONFIG_PATH
+        )
         tickers = config.tickers
     return _resolve_assets(assets_override, tickers)
 
@@ -271,8 +273,13 @@ def _build_metadata(
             ("start_date", start_date),
             ("end_date", end_date),
             ("missing_by_asset", missing_by_asset),
+            ("run_at", _format_run_at(datetime.now(timezone.utc))),
         ]
     )
+
+
+def _format_run_at(timestamp: datetime) -> str:
+    return timestamp.isoformat(timespec="seconds").replace("T", "_")
 
 
 def _normalize_index_dates(index: pd.Index) -> list[str]:
@@ -289,8 +296,8 @@ def _versioned_output_dir(root: Path, run_date: date) -> Path:
 
 
 def _year_week(run_date: date) -> tuple[int, int]:
-    week = (run_date.timetuple().tm_yday - 1) // 7 + 1
-    return run_date.year, min(week, 52)
+    iso = run_date.isocalendar()
+    return iso.year, iso.week
 
 
 def _normalize_return_type(raw: str) -> ReturnType:

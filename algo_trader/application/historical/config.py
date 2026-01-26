@@ -242,7 +242,11 @@ def _load_yaml_mapping(config_path: Path) -> Mapping[str, Any]:
     except yaml.YAMLError as exc:
         raise ConfigError(f"Invalid YAML content in {config_path}") from exc
 
-    return raw_config if isinstance(raw_config, Mapping) else {}
+    if not isinstance(raw_config, Mapping):
+        raise ConfigError(
+            f"Ticker config must be a mapping in {config_path}"
+        )
+    return raw_config
 
 
 def _load_provider(config_mapping: Mapping[str, Any]) -> str:

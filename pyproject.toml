@@ -12,6 +12,11 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "pyyaml>=6.0.3",
     "setuptools>=80.10.1",
+    # PyTorch CUDA 12.6 wheels (driver provides CUDA runtime compatibility).
+    "torch==2.10.0",
+    "torchvision==0.25.0",
+    "torchaudio==2.10.0",
+    "pyro-ppl>=1.9.1",
 ]
 
 [build-system]
@@ -38,3 +43,11 @@ testpaths = ["tests"]
 
 [tool.uv.sources]
 ibapi = { path = "../../IBKR/twsapi_macunix.1042.01/IBJts/source/pythonclient" }
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+torchaudio = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

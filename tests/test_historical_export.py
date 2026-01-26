@@ -73,6 +73,13 @@ def test_load_rejects_start_end_keys(tmp_path: Path) -> None:
         HistoricalRequestConfig.load(config_path)
 
 
+def test_load_rejects_non_mapping_yaml(tmp_path: Path) -> None:
+    config_path = tmp_path / "tickers.yml"
+    config_path.write_text("- foo\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        HistoricalRequestConfig.load(config_path)
+
+
 def test_load_accepts_month_only(tmp_path: Path) -> None:
     config_path = tmp_path / "tickers.yml"
     config_path.write_text(

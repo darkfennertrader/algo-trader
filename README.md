@@ -12,9 +12,38 @@ Basic commands using uv:
 
 - Default pipeline (placeholder): `uv run algotrader`
 - Historical download: `uv run algotrader historical`
-- Data cleaning: `uv run algotrader data_cleaning --start YYYY-MM --end YYYY-MM
-  --return-type simple --assets EUR.USD,IBUS30`
+- Data cleaning: `uv run algotrader data_cleaning --start YYYY-MM --end YYYY-MM --return-type simple --assets EUR.USD,IBUS30`
+- Data processing: `uv run algotrader data_processing` (defaults to `identity`; add `--preprocessor <name>` to override)
 - Backtest (placeholder): `uv run algotrader backtest`
+- Wizard (interactive command builder): `uv run algotrader wizard`
+
+### Preprocessors
+
+**Identity** (no-op, optional copy):
+
+```bash
+uv run algotrader data_processing --preprocessor identity
+uv run algotrader data_processing --preprocessor identity --preprocessor-arg copy=true
+```
+
+Args and defaults:
+- `copy`: `true` or `false` (optional, default = `false`)
+
+**Z-score** (per-column normalization over a date range, defaults missing=zero):
+
+```bash
+uv run algotrader data_processing --preprocessor zscore \
+  --preprocessor-arg start_date=YYYY-MM-DD \
+  --preprocessor-arg end_date=YYYY-MM-DD \
+  --preprocessor-arg missing=drop \
+  --preprocessor-arg pipeline=my_pipeline
+```
+
+Args and defaults:
+- `start_date`: `YYYY-MM-DD` (optional, default = full range)
+- `end_date`: `YYYY-MM-DD` (optional, default = full range)
+- `missing`: `zero` or `drop` (optional, default = `zero`)
+- `pipeline`: `A-Za-z0-9._-` (optional, default = `debug`)
 
 ## Directory structure
 
@@ -22,8 +51,12 @@ Basic commands using uv:
 algo_trader/
   cli/
   application/
+    data_cleaning/
+    data_processing/
+    historical/
   domain/
   infrastructure/
+  preprocessing/
   providers/
   pipeline/
 ```
@@ -43,3 +76,12 @@ algo_trader/
   (see `.env.example`).
 - For data cleaning, set `DATA_SOURCE` and `DATA_LAKE_SOURCE` in `.env`. Output is written
   to `DATA_LAKE_SOURCE/YYYY-WW/returns.csv`.
+- For data processing, set `DATA_LAKE_SOURCE` in `.env`. The command selects the latest
+  `YYYY-WW` directory, reads `returns.csv`, and writes `processed.csv` alongside it.
+
+## Adding a new preprocessor
+
+1) Implement `Preprocessor` in `algo_trader/preprocessing` and return a pandas `DataFrame`
+   with a UTC datetime index.
+2) Register the implementation in `algo_trader/preprocessing/registry.py` by adding it to `default_registry()`.
+3) Invoke it via CLI: `uv run algotrader data_processing --preprocessor <name> --preprocessor-arg key=value`.

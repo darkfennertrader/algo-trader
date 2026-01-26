@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
+from algo_trader.application.data_cleaning import runner as data_cleaning_runner
 from algo_trader.infrastructure.data import ReturnsSource, ReturnsSourceConfig
 
 
@@ -70,3 +72,8 @@ def test_returns_source_month_filter_is_inclusive(tmp_path: Path) -> None:
 
     assert returns.index.equals(pd.DatetimeIndex([pd.Timestamp("2024-02-02")]))
     assert returns.iloc[0, 0] == pytest.approx(0.1)
+
+
+def test_year_week_uses_iso_week_53() -> None:
+    year, week = data_cleaning_runner._year_week(date(2020, 12, 31))
+    assert (year, week) == (2020, 53)

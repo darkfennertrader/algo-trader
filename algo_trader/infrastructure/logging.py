@@ -4,7 +4,7 @@ import functools
 import logging
 from typing import Callable, Mapping, ParamSpec, TypeVar
 
-from algo_trader.domain import AlgoTraderError, EnvVarError
+from algo_trader.domain import EnvVarError
 from .env import optional_env, require_env
 
 LogContext = Mapping[str, str]
@@ -72,11 +72,7 @@ def log_boundary(
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             resolved = _resolve_context(context, *args, **kwargs)
             _log_event(log, logging.INFO, "start", name, resolved)
-            try:
-                result = func(*args, **kwargs)
-            except Exception as exc:
-                _log_exception(log, name, resolved, exc)
-                raise
+            result = func(*args, **kwargs)
             _log_event(log, logging.INFO, "complete", name, resolved)
             return result
 
@@ -108,27 +104,3 @@ def _log_event(
         log.log(level, "event=%s boundary=%s context=%s", event, name, context)
     else:
         log.log(level, "event=%s boundary=%s", event, name)
-
-
-def _log_exception(
-    log: logging.Logger,
-    name: str,
-    context: LogContext | None,
-    exc: Exception,
-) -> None:
-    if isinstance(exc, AlgoTraderError):
-        if getattr(exc, "_logged", False):
-            return
-        setattr(exc, "_logged", True)
-        error_line = (
-            f"Error: {exc} context={exc.context}"
-            if exc.context
-            else f"Error: {exc}"
-        )
-        separator = "*" * 80
-        log.error("\n%s\n%s\n%s\n", separator, error_line, separator)
-        return
-    if context:
-        log.exception("event=error boundary=%s context=%s", name, context)
-    else:
-        log.exception("event=error boundary=%s", name)

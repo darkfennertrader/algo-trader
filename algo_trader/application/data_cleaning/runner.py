@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime, timezone
-import json
 from collections import OrderedDict
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable, cast
 
@@ -16,7 +16,19 @@ from algo_trader.application.historical import (
 )
 from algo_trader.domain import ConfigError, DataProcessingError, DataSourceError
 from algo_trader.domain.market_data import TickerConfig
-from algo_trader.infrastructure import log_boundary, require_env
+from algo_trader.infrastructure import (
+    ErrorPolicy,
+    FileOutputWriter,
+    OutputNames,
+    OutputPaths,
+    OutputWriter,
+    build_weekly_output_paths,
+    ensure_directory,
+    format_run_at,
+    log_boundary,
+    require_env,
+)
+from algo_trader.infrastructure.paths import format_tilde_path
 from algo_trader.infrastructure.data import (
     ReturnType,
     ReturnsSource,
@@ -29,6 +41,19 @@ YearMonth = tuple[int, int]
 logger = logging.getLogger(__name__)
 
 _MONTH_PATTERN = re.compile(r"^(?P<year>\d{4})-(?P<month>0[1-9]|1[0-2])$")
+_OUTPUT_NAMES = OutputNames(
+    output_name="returns.csv",
+    metadata_name="returns_meta.json",
+)
+
+
+@dataclass(frozen=True)
+class MetadataContext:
+    returns: pd.DataFrame
+    assets: list[str]
+    return_type: ReturnType
+    source_dir: Path
+    destination_dir: Path
 
 
 def _run_context(
@@ -73,12 +98,21 @@ def run(
         start=start_month,
         end=end_month,
     )
-    output_path = _write_returns(returns, data_lake)
+    output_paths = _prepare_output_paths(data_lake, date.today())
+    writer = _build_output_writer()
+    output_path = _write_returns(
+        returns, output_paths.output_path, writer
+    )
     _write_metadata(
-        returns=returns,
-        data_lake=data_lake,
-        assets=asset_list,
-        return_type=return_type_value,
+        MetadataContext(
+            returns=returns,
+            assets=asset_list,
+            return_type=return_type_value,
+            source_dir=data_source,
+            destination_dir=output_paths.output_dir,
+        ),
+        metadata_path=output_paths.metadata_path,
+        writer=writer,
     )
     logger.info(
         "Saved returns CSV path=%s rows=%s assets=%s",
@@ -201,61 +235,67 @@ def _load_returns(
     return source.get_returns_frame()
 
 
-def _write_returns(returns: pd.DataFrame, data_lake: Path) -> Path:
-    output_dir = _versioned_output_dir(data_lake, date.today())
-    output_path = output_dir / "returns.csv"
-    try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        returns.to_csv(output_path)
-    except Exception as exc:
-        raise DataProcessingError(
-            "Failed to write returns CSV",
-            context={"path": str(output_path)},
-        ) from exc
+def _prepare_output_paths(data_lake: Path, run_date: date) -> OutputPaths:
+    output_paths = build_weekly_output_paths(
+        data_lake, run_date, _OUTPUT_NAMES
+    )
+    ensure_directory(
+        output_paths.output_dir,
+        error_type=DataProcessingError,
+        invalid_message="Data cleaning output path must be a directory",
+        create_message="Failed to prepare data cleaning output directory",
+    )
+    return output_paths
+
+
+def _build_output_writer() -> OutputWriter:
+    return FileOutputWriter(
+        data_policy=ErrorPolicy(
+            error_type=DataProcessingError,
+            message="Failed to write returns CSV",
+        ),
+        metadata_policy=ErrorPolicy(
+            error_type=DataProcessingError,
+            message="Failed to write returns metadata",
+        ),
+    )
+
+
+def _write_returns(
+    returns: pd.DataFrame,
+    output_path: Path,
+    writer: OutputWriter,
+) -> Path:
+    writer.write_frame(returns, output_path)
     return output_path
 
 
 def _write_metadata(
+    context: MetadataContext,
     *,
-    returns: pd.DataFrame,
-    data_lake: Path,
-    assets: list[str],
-    return_type: ReturnType,
+    metadata_path: Path,
+    writer: OutputWriter,
 ) -> Path:
-    output_dir = _versioned_output_dir(data_lake, date.today())
-    output_path = output_dir / "returns_meta.json"
-    metadata = _build_metadata(returns, assets, return_type)
-    try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(
-            json.dumps(metadata, indent=2),
-            encoding="utf-8",
-        )
-    except Exception as exc:
-        raise DataProcessingError(
-            "Failed to write returns metadata",
-            context={"path": str(output_path)},
-        ) from exc
-    return output_path
+    metadata = _build_metadata(context)
+    writer.write_metadata(metadata, metadata_path)
+    return metadata_path
 
 
 def _build_metadata(
-    returns: pd.DataFrame,
-    assets: list[str],
-    return_type: ReturnType,
+    context: MetadataContext,
 ) -> OrderedDict[str, object]:
-    index = _normalize_index_dates(returns.index)
+    index = _normalize_index_dates(context.returns.index)
     start_date = index[0] if index else ""
     end_date = index[-1] if index else ""
     missing_by_asset: dict[str, dict[str, object]] = {}
-    for asset in assets:
-        if asset not in returns.columns:
+    for asset in context.assets:
+        if asset not in context.returns.columns:
             missing_by_asset[asset] = {
                 "missing_dates": index,
                 "missing_count": len(index),
             }
             continue
-        series = returns[asset]
+        series = context.returns[asset]
         missing_mask = series.isna()
         missing_dates = [
             date_str
@@ -268,18 +308,16 @@ def _build_metadata(
         }
     return OrderedDict(
         [
-            ("assets", assets),
-            ("return_type", return_type),
+            ("assets", context.assets),
+            ("return_type", context.return_type),
             ("start_date", start_date),
             ("end_date", end_date),
             ("missing_by_asset", missing_by_asset),
-            ("run_at", _format_run_at(datetime.now(timezone.utc))),
+            ("run_at", format_run_at(datetime.now(timezone.utc))),
+            ("source", format_tilde_path(context.source_dir)),
+            ("destination", format_tilde_path(context.destination_dir)),
         ]
     )
-
-
-def _format_run_at(timestamp: datetime) -> str:
-    return timestamp.isoformat(timespec="seconds").replace("T", "_")
 
 
 def _normalize_index_dates(index: pd.Index) -> list[str]:
@@ -290,16 +328,6 @@ def _normalize_index_dates(index: pd.Index) -> list[str]:
     return [str(item) for item in index]
 
 
-def _versioned_output_dir(root: Path, run_date: date) -> Path:
-    year, week = _year_week(run_date)
-    return root / f"{year:04d}-{week:02d}"
-
-
-def _year_week(run_date: date) -> tuple[int, int]:
-    iso = run_date.isocalendar()
-    return iso.year, iso.week
-
-
 def _normalize_return_type(raw: str) -> ReturnType:
     normalized = raw.strip().lower()
     if normalized not in {"simple", "log"}:
@@ -307,3 +335,8 @@ def _normalize_return_type(raw: str) -> ReturnType:
             f"return_type must be 'simple' or 'log' (received '{raw}')"
         )
     return cast(ReturnType, normalized)
+
+
+def _year_week(run_date: date) -> tuple[int, int]:
+    iso = run_date.isocalendar()
+    return iso.year, iso.week

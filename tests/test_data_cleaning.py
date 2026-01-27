@@ -77,3 +77,31 @@ def test_returns_source_month_filter_is_inclusive(tmp_path: Path) -> None:
 def test_year_week_uses_iso_week_53() -> None:
     year, week = data_cleaning_runner._year_week(date(2020, 12, 31))
     assert (year, week) == (2020, 53)
+
+
+def test_build_metadata_includes_source_destination_after_run_at() -> None:
+    frame = pd.DataFrame(
+        {"EUR.USD": [0.1, 0.2]},
+        index=pd.DatetimeIndex(
+            [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")]
+        ),
+    )
+    source_dir = Path.home() / "data_source"
+    destination_dir = Path.home() / "data_lake" / "2024-01"
+
+    metadata = data_cleaning_runner._build_metadata(
+        data_cleaning_runner.MetadataContext(
+            returns=frame,
+            assets=["EUR.USD"],
+            return_type="simple",
+            source_dir=source_dir,
+            destination_dir=destination_dir,
+        )
+    )
+
+    keys = list(metadata.keys())
+    run_at_index = keys.index("run_at")
+    assert keys[run_at_index + 1] == "source"
+    assert keys[run_at_index + 2] == "destination"
+    assert metadata["source"].startswith("~")
+    assert metadata["destination"].startswith("~")

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from algo_trader.domain import ConfigError
 from .identity import IdentityPreprocessor
+from .pca import PCAPreprocessor
 from .zscore import ZScorePreprocessor
 from .protocols import Preprocessor
 
@@ -39,6 +40,7 @@ def default_registry() -> PreprocessorRegistry:
     registry = PreprocessorRegistry()
     # Register new preprocessors here so the CLI can discover them.
     registry.register("identity", IdentityPreprocessor())
+    registry.register("pca", PCAPreprocessor())
     registry.register("zscore", ZScorePreprocessor())
     return registry
 

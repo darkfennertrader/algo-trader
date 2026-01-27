@@ -51,10 +51,10 @@ def _historical_command() -> WizardCommand:
 
 def _data_cleaning_command() -> WizardCommand:
     args: list[str] = ["algotrader", "data_cleaning"]
-    start = _prompt_optional("Start month YYYY-MM (blank for default)")
+    start = _prompt_optional("Start month YYYY-MM (blank for full range)")
     if start:
         args.extend(["--start", start])
-    end = _prompt_optional("End month YYYY-MM (blank for default)")
+    end = _prompt_optional("End month YYYY-MM (blank for full range)")
     if end:
         args.extend(["--end", end])
     return_type = _prompt_choice(
@@ -79,9 +79,7 @@ def _data_processing_command() -> WizardCommand:
 def _prompt_preprocessor() -> str:
     registry = default_registry()
     names = registry.list_names()
-    return _prompt_choice(
-        "preprocessor", names, default="identity"
-    )
+    return _prompt_choice("preprocessor", names, default="identity")
 
 
 def _prompt_preprocessor_args(preprocessor: str) -> list[str]:
@@ -110,6 +108,7 @@ def _workflow_builders() -> dict[str, Callable[[], WizardCommand]]:
 def _preprocessor_arg_builders() -> dict[str, Callable[[], list[str]]]:
     return {
         "identity": _identity_preprocessor_args,
+        "pca": _pca_preprocessor_args,
         "zscore": _zscore_preprocessor_args,
     }
 
@@ -119,7 +118,7 @@ def _identity_preprocessor_args() -> list[str]:
         [
             PromptSpec(
                 key="copy",
-                label="copy (true/false, blank for default)",
+                label="copy (true/false, blank for 'false')",
                 kind="optional",
             ),
             PromptSpec(
@@ -136,12 +135,51 @@ def _zscore_preprocessor_args() -> list[str]:
         [
             PromptSpec(
                 key="start_date",
-                label="start_date YYYY-MM-DD (blank for full)",
+                label="start_date YYYY-MM-DD (blank for full range)",
                 kind="optional",
             ),
             PromptSpec(
                 key="end_date",
-                label="end_date YYYY-MM-DD (blank for full)",
+                label="end_date YYYY-MM-DD (blank for full range)",
+                kind="optional",
+            ),
+            PromptSpec(
+                key="missing",
+                label="missing",
+                kind="choice",
+                choices=("zero", "drop"),
+                default="zero",
+            ),
+            PromptSpec(
+                key="pipeline",
+                label="pipeline (blank for default debug)",
+                kind="optional",
+            ),
+        ]
+    )
+
+
+def _pca_preprocessor_args() -> list[str]:
+    return _build_preprocessor_args(
+        [
+            PromptSpec(
+                key="k",
+                label="k (number of factors, blank if using variance)",
+                kind="optional",
+            ),
+            PromptSpec(
+                key="variance",
+                label="variance target (0-1, blank if using k)",
+                kind="optional",
+            ),
+            PromptSpec(
+                key="start_date",
+                label="start_date YYYY-MM-DD (blank for full range)",
+                kind="optional",
+            ),
+            PromptSpec(
+                key="end_date",
+                label="end_date YYYY-MM-DD (blank for full range)",
                 kind="optional",
             ),
             PromptSpec(

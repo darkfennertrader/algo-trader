@@ -9,13 +9,13 @@ Basic commands using uv:
 - Add dev deps (lint/type/etc.): `uv add <package> --group dev`.
 
 ## CLI
-
+- Wizard (interactive command builder): `uv run algotrader wizard`
 - Default pipeline (placeholder): `uv run algotrader`
 - Historical download: `uv run algotrader historical`
 - Data cleaning: `uv run algotrader data_cleaning --start YYYY-MM --end YYYY-MM --return-type simple --assets EUR.USD,IBUS30`
 - Data processing: `uv run algotrader data_processing` (defaults to `identity`; add `--preprocessor <name>` to override)
 - Backtest (placeholder): `uv run algotrader backtest`
-- Wizard (interactive command builder): `uv run algotrader wizard`
+
 
 ### Preprocessors
 
@@ -44,6 +44,36 @@ Args and defaults:
 - `end_date`: `YYYY-MM-DD` (optional, default = full range)
 - `missing`: `zero` or `drop` (optional, default = `zero`)
 - `pipeline`: `A-Za-z0-9._-` (optional, default = `debug`)
+
+**PCA** (z-score + PCA factors; choose k or variance, not both):
+
+```bash
+uv run algotrader data_processing --preprocessor pca \
+  --preprocessor-arg k=5 \
+  --preprocessor-arg missing=zero \
+  --preprocessor-arg pipeline=my_pipeline
+```
+
+```bash
+uv run algotrader data_processing --preprocessor pca \
+  --preprocessor-arg variance=0.9 \
+  --preprocessor-arg missing=drop
+```
+
+Args and defaults:
+- `k`: positive integer (required if `variance` is not set)
+- `variance`: float in `(0, 1]` (required if `k` is not set)
+- `start_date`: `YYYY-MM-DD` (optional, default = full range)
+- `end_date`: `YYYY-MM-DD` (optional, default = full range)
+- `missing`: `zero` or `drop` (optional, default = `zero`)
+- `pipeline`: `A-Za-z0-9._-` (optional, default = `debug`)
+
+Outputs:
+- `factors.csv` (main output)
+- `factors.pt`
+- `loadings.csv`, `loadings.pt`
+- `eigenvalues.csv`
+- `metadata.json`
 
 ## Directory structure
 

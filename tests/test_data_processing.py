@@ -66,8 +66,38 @@ def test_run_writes_processed_csv(
     )
     assert metadata_path.exists()
     metadata = json.loads(metadata_path.read_text())
-    assert metadata["input_path"] == str(input_path)
-    assert metadata["output_path"] == str(output_path)
+    assert metadata["source"] == str(input_path)
+    assert metadata["destination"] == str(output_path)
     output_frame = data_processing_runner._load_returns(output_path)
     input_frame = data_processing_runner._load_returns(input_path)
     pd.testing.assert_frame_equal(output_frame, input_frame)
+
+
+def test_build_metadata_includes_source_destination_after_run_at() -> None:
+    frame = pd.DataFrame(
+        {"EUR.USD": [0.1, 0.2]},
+        index=pd.DatetimeIndex(
+            [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")]
+        ),
+    )
+    source_path = Path.home() / "data_source" / "returns.csv"
+    destination_path = (
+        Path.home() / "feature_store" / "processed.csv"
+    )
+    metadata = data_processing_runner._build_metadata(
+        data_processing_runner.MetadataContext(
+            input_path=source_path,
+            output_path=destination_path,
+            preprocessor_name="identity",
+            pipeline="debug",
+            params={},
+            frame=frame,
+        )
+    )
+
+    keys = list(metadata.keys())
+    run_at_index = keys.index("run_at")
+    assert keys[run_at_index + 1] == "source"
+    assert keys[run_at_index + 2] == "destination"
+    assert metadata["source"].startswith("~")
+    assert metadata["destination"].startswith("~")

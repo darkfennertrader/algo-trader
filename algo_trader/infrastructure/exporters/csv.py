@@ -13,6 +13,7 @@ from algo_trader.domain.market_data import (
     HistoricalDataResult,
     TickerConfig,
 )
+from algo_trader.infrastructure import ErrorPolicy, ensure_directory, write_csv
 from algo_trader.infrastructure.data import symbol_directory
 
 logger = logging.getLogger(__name__)
@@ -47,19 +48,12 @@ class CsvHistoricalDataExporter:
             self._export_symbol(ticker, bars)
 
     def _ensure_output_root(self) -> None:
-        path = self._settings.output_root
-        if path.exists() and not path.is_dir():
-            raise ExportError(
-                "DATA_SOURCE must be a directory",
-                context={"path": str(path)},
-            )
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            raise ExportError(
-                "Failed to prepare DATA_SOURCE directory",
-                context={"path": str(path)},
-            ) from exc
+        ensure_directory(
+            self._settings.output_root,
+            error_type=ExportError,
+            invalid_message="DATA_SOURCE must be a directory",
+            create_message="Failed to prepare DATA_SOURCE directory",
+        )
 
     def _export_symbol(self, ticker: TickerConfig, bars: BarSeries) -> None:
         symbol_dir = symbol_directory(ticker)
@@ -71,19 +65,29 @@ class CsvHistoricalDataExporter:
         file_path = year_dir / (
             f"hist_data_{self._settings.year:04d}-{self._settings.month:02d}.csv"
         )
-        try:
-            year_dir.mkdir(parents=True, exist_ok=True)
-            frame = _bars_to_frame(bars)
-            frame.to_csv(file_path, index=False)
-        except Exception as exc:
-            raise ExportError(
-                "Failed to export CSV",
-                context={
-                    "symbol": ticker.symbol,
-                    "symbol_dir": symbol_dir,
-                    "path": str(file_path),
-                },
-            ) from exc
+        context = {
+            "symbol": ticker.symbol,
+            "symbol_dir": symbol_dir,
+            "path": str(file_path),
+        }
+        ensure_directory(
+            year_dir,
+            error_type=ExportError,
+            invalid_message="Failed to export CSV",
+            create_message="Failed to export CSV",
+            context=context,
+        )
+        frame = _bars_to_frame(bars)
+        write_csv(
+            frame,
+            file_path,
+            error_policy=ErrorPolicy(
+                error_type=ExportError,
+                message="Failed to export CSV",
+                context=context,
+            ),
+            include_index=False,
+        )
 
         logger.info(
             "Saved CSV symbol=%s downloaded_bars=%s",

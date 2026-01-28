@@ -25,6 +25,10 @@ class ProviderError(AlgoTraderError):
     pass
 
 
+class ProviderConnectionError(ProviderError):
+    pass
+
+
 class ExportError(AlgoTraderError):
     pass
 
@@ -34,4 +38,8 @@ class DataSourceError(AlgoTraderError):
 
 
 class DataProcessingError(AlgoTraderError):
+    pass
+
+
+class InferenceError(AlgoTraderError):
     pass

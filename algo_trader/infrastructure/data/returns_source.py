@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import tzinfo as TzInfo
 from pathlib import Path
@@ -16,6 +17,9 @@ YearMonth = tuple[int, int]
 
 logger = logging.getLogger(__name__)
 
+_FILE_MONTH_PATTERN = re.compile(
+    r"^hist_data_(?P<year>\d{4})-(?P<month>0[1-9]|1[0-2])\.csv$"
+)
 
 TimeZone = str | TzInfo
 
@@ -34,20 +38,10 @@ class ReturnsSourceConfig:
 class ReturnsSource:
     def __init__(self, config: ReturnsSourceConfig) -> None:
         self._config = config
+        self._asset_data: dict[str, pd.Series] | None = None
 
     def get_returns_frame(self) -> pd.DataFrame:
-        asset_data: dict[str, pd.Series] = {}
-        for asset in self._config.assets:
-            series = self._load_asset_series(asset)
-            if series is None:
-                logger.warning(
-                    "No data found for asset=%s base_dir=%s",
-                    asset,
-                    self._config.base_dir,
-                )
-                series = pd.Series(dtype=float, name=asset)
-            asset_data[asset] = series
-
+        asset_data = self.get_daily_price_series()
         price_matrix = self._align_and_trim(asset_data)
         if price_matrix.empty:
             raise DataProcessingError(
@@ -59,6 +53,23 @@ class ReturnsSource:
         if returns.index.name is None:
             returns.index.name = self._config.time_col
         return returns
+
+    def get_daily_price_series(self) -> dict[str, pd.Series]:
+        if self._asset_data is not None:
+            return self._asset_data
+        asset_data: dict[str, pd.Series] = {}
+        for asset in self._config.assets:
+            series = self._load_asset_series(asset)
+            if series is None:
+                logger.warning(
+                    "No data found for asset=%s base_dir=%s",
+                    asset,
+                    self._config.base_dir,
+                )
+                series = pd.Series(dtype=float, name=asset)
+            asset_data[asset] = series
+        self._asset_data = asset_data
+        return asset_data
 
     def _load_asset_series(self, asset: str) -> pd.Series | None:
         asset_dir = self._config.base_dir / asset
@@ -75,7 +86,11 @@ class ReturnsSource:
 
         frames: list[pd.DataFrame] = []
         for path in csv_paths:
-            frames.append(self._read_csv(path))
+            frame = self._read_csv(path)
+            frame = _filter_frame_to_month(
+                frame, path, self._config.time_col, asset
+            )
+            frames.append(frame)
 
         combined = pd.concat(frames, ignore_index=True)
         if combined.empty:
@@ -217,6 +232,42 @@ def _ensure_datetime_index(
         ) from exc
     frame.index = index
     return index
+
+
+def _extract_month_from_path(path: Path) -> YearMonth:
+    match = _FILE_MONTH_PATTERN.match(path.name)
+    if not match:
+        raise DataSourceError(
+            "Historical CSV filename must match hist_data_YYYY-MM.csv",
+            context={"path": str(path)},
+        )
+    return int(match.group("year")), int(match.group("month"))
+
+
+def _filter_frame_to_month(
+    frame: pd.DataFrame, path: Path, time_col: str, asset: str
+) -> pd.DataFrame:
+    year, month = _extract_month_from_path(path)
+    if time_col not in frame.columns:
+        raise DataSourceError(
+            "CSV missing time column",
+            context={"path": str(path), "column": time_col},
+        )
+    if frame.empty:
+        return frame
+    month_mask = (frame[time_col].dt.year == year) & (
+        frame[time_col].dt.month == month
+    )
+    if not month_mask.all():
+        dropped = len(frame) - int(month_mask.sum())
+        if dropped:
+            logger.debug(
+                "Found out-of-month rows asset=%s path=%s count=%s",
+                asset,
+                path,
+                dropped,
+            )
+    return frame
 
 
 def _log_frame(frame: pd.DataFrame) -> pd.DataFrame:

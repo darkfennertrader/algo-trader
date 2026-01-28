@@ -14,6 +14,7 @@ Basic commands using uv:
 - Historical download: `uv run algotrader historical`
 - Data cleaning: `uv run algotrader data_cleaning --start YYYY-MM --end YYYY-MM --return-type simple --assets EUR.USD,IBUS30`
 - Data processing: `uv run algotrader data_processing` (defaults to `identity`; add `--preprocessor <name>` to override)
+- Modeling (Pyro inference): `uv run algotrader modeling --model normal --guide normal_mean_field`
 - Backtest (placeholder): `uv run algotrader backtest`
 
 
@@ -106,8 +107,12 @@ algo_trader/
   (see `.env.example`).
 - For data cleaning, set `DATA_SOURCE` and `DATA_LAKE_SOURCE` in `.env`. Output is written
   to `DATA_LAKE_SOURCE/YYYY-WW/returns.csv`.
-- For data processing, set `DATA_LAKE_SOURCE` in `.env`. The command selects the latest
-  `YYYY-WW` directory, reads `returns.csv`, and writes `processed.csv` alongside it.
+- For data processing, set `DATA_LAKE_SOURCE` and `FEATURE_STORE_SOURCE` in `.env`. The
+  command selects the latest `YYYY-WW` directory, reads `returns.csv`, and writes
+  `processed.csv` to the feature store.
+- For modeling/inference, set `FEATURE_STORE_SOURCE` (input) and `MODEL_STORE_SOURCE`
+  (outputs) in `.env`. The command reads the latest prepared data from the feature store
+  (or `--input`), then writes parameter outputs to the model store.
 
 ## Adding a new preprocessor
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Mapping
 
 import pandas as pd
@@ -16,7 +17,7 @@ _ALLOWED_PARAMS = {"k", "variance", "start_date", "end_date", "missing"}
 @dataclass(frozen=True)
 class PCAConfig:
     k: int | None
-    variance: float | None
+    variance: Decimal | None
     zscore_params: Mapping[str, str]
 
 
@@ -26,7 +27,7 @@ class PCAResult:
     loadings: pd.DataFrame
     eigenvalues: pd.DataFrame
     selected_k: int
-    variance_target: float | None
+    variance_target: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -97,17 +98,17 @@ def _parse_k(value: str | None) -> int | None:
     return parsed
 
 
-def _parse_variance(value: str | None) -> float | None:
+def _parse_variance(value: str | None) -> Decimal | None:
     if value is None or not value.strip():
         return None
     try:
-        parsed = float(value)
-    except (TypeError, ValueError) as exc:
+        parsed = Decimal(value.strip())
+    except (InvalidOperation, TypeError, ValueError) as exc:
         raise ConfigError(
             "variance must be a number between 0 and 1",
             context={"value": value},
         ) from exc
-    if parsed <= 0 or parsed > 1:
+    if parsed <= Decimal("0") or parsed > Decimal("1"):
         raise ConfigError(
             "variance must be between 0 and 1",
             context={"value": value},
@@ -171,7 +172,7 @@ def _build_pca_result(
     tensor: torch.Tensor,
     eigen: EigenDecomposition,
     selected_k: int,
-    variance_target: float | None,
+    variance_target: Decimal | None,
 ) -> PCAResult:
     factor_columns = _factor_columns(selected_k)
     loadings = eigen.vectors[:, :selected_k]
@@ -205,7 +206,10 @@ def _select_k(
     target = config.variance
     if target is None:
         raise ConfigError("variance is required when k is not provided")
-    meets = torch.nonzero(cumulative >= target, as_tuple=False)
+    meets = torch.nonzero(
+        cumulative >= float(target),
+        as_tuple=False,
+    )
     if meets.numel() == 0:
         return max_components
     return int(meets[0].item()) + 1

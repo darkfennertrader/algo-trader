@@ -5,6 +5,8 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
+from numbers import Real
 from typing import Dict, Mapping
 
 import pandas as pd
@@ -21,6 +23,7 @@ from algo_trader.domain.market_data import (
     RequestOutcome,
     TickerConfig,
 )
+from algo_trader.infrastructure.data import symbol_directory
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +50,22 @@ class IbRequestRegistry:
             done_event.set()
             self.inflight_requests.release()
 
-    def wait_all(self) -> None:
-        for event in list(self.done_events.values()):
-            event.wait()
+    def get_symbol(self, req_id: int) -> str | None:
+        with self._lock:
+            return self.request_symbols.get(req_id)
+
+    def wait_all(
+        self,
+        abort_event: threading.Event | None = None,
+        check_interval: float = 1.0,
+    ) -> bool:
+        events = list(self.done_events.values())
+        for event in events:
+            while not event.is_set():
+                if abort_event and abort_event.is_set():
+                    return False
+                event.wait(timeout=check_interval)
+        return True
 
 
 @dataclass(frozen=True)
@@ -59,6 +75,7 @@ class IbHistoricalRequestContext:
     duration: str
     bar_size: str
     end_date_time: str
+    abort_event: threading.Event | None
 
 
 class IbTradeApp(EWrapper, EClient):
@@ -69,6 +86,7 @@ class IbTradeApp(EWrapper, EClient):
         self._data_lock = threading.Lock()
         self._outcome_lock = threading.Lock()
         self._ready_event = threading.Event()
+        self._disconnect_event = threading.Event()
         self.request_outcomes: Dict[int, RequestOutcome] = {}
 
     def connectAck(self) -> None:
@@ -79,8 +97,15 @@ class IbTradeApp(EWrapper, EClient):
         logger.info("IB API next valid order id=%s", orderId)
         self._ready_event.set()
 
+    def connectClosed(self) -> None:
+        logger.warning("IB API connection closed.")
+        self._disconnect_event.set()
+
     def wait_ready(self, timeout: float) -> bool:
         return self._ready_event.wait(timeout)
+
+    def disconnect_event(self) -> threading.Event:
+        return self._disconnect_event
 
     def historicalData(self, reqId: int, bar: BarData) -> None:  # pylint: disable=disallowed-name
         row = {
@@ -144,6 +169,13 @@ class IbTradeApp(EWrapper, EClient):
             error_string,
             advanced,
             error_time,
+        )
+        symbol = self._registry.get_symbol(reqId) or "unknown"
+        logger.warning(
+            "Historical data request aborted req_id=%s symbol=%s code=%s",
+            reqId,
+            symbol,
+            error_code,
         )
         self.record_error(reqId, error_code, error_string)
         self._registry.mark_done(reqId)
@@ -237,10 +269,28 @@ def _optional_str_arg(value: object, field: str, req_id: int) -> str | None:
 def _submit_historical_request(
     context: IbHistoricalRequestContext, req_id: int, ticker: TickerConfig
 ) -> None:
-    context.registry.register(req_id, ticker.symbol)
-    context.app.register_outcome(req_id, ticker.symbol)
+    symbol_key = symbol_directory(ticker)
+    context.registry.register(req_id, symbol_key)
+    context.app.register_outcome(req_id, symbol_key)
 
-    context.registry.inflight_requests.acquire()
+    while True:
+        if context.abort_event and context.abort_event.is_set():
+            logger.warning(
+                "Skipping historical request due to disconnect req_id=%s symbol=%s",
+                req_id,
+                symbol_key,
+            )
+            return
+        if context.registry.inflight_requests.acquire(timeout=0.5):
+            break
+    if context.abort_event and context.abort_event.is_set():
+        context.registry.inflight_requests.release()
+        logger.warning(
+            "Aborting historical request due to disconnect req_id=%s symbol=%s",
+            req_id,
+            symbol_key,
+        )
+        return
     try:
         contract = build_contract(ticker)
         context.app.reqHistoricalData(
@@ -258,18 +308,18 @@ def _submit_historical_request(
         logger.debug(
             "Submitted historical request req_id=%s symbol=%s",
             req_id,
-            ticker.symbol,
+            symbol_key,
         )
     except Exception as exc:
         context.registry.mark_done(req_id)
         logger.exception(
             "Failed to submit historical request req_id=%s symbol=%s",
             req_id,
-            ticker.symbol,
+            symbol_key,
         )
         raise ProviderError(
-            f"Failed to submit historical request for {ticker.symbol}",
-            context={"symbol": ticker.symbol, "req_id": str(req_id)},
+            f"Failed to submit historical request for {symbol_key}",
+            context={"symbol": symbol_key, "req_id": str(req_id)},
         ) from exc
 
 
@@ -278,7 +328,8 @@ def request_historical_batch(
     request: HistoricalDataRequest,
     registry: IbRequestRegistry,
     max_parallel_requests: int,
-) -> None:
+    abort_event: threading.Event | None = None,
+) -> bool:
     if max_parallel_requests < 1:
         raise ProviderError(
             "max_parallel_requests must be at least 1",
@@ -286,7 +337,7 @@ def request_historical_batch(
         )
     if not request.tickers:
         logger.info("No tickers supplied; skipping historical requests.")
-        return
+        return True
 
     context = IbHistoricalRequestContext(
         app=app,
@@ -294,6 +345,7 @@ def request_historical_batch(
         duration=request.duration,
         bar_size=request.bar_size,
         end_date_time=request.end_date_time,
+        abort_event=abort_event,
     )
     worker_count = min(len(request.tickers), max_parallel_requests * 2)
     req_ids = itertools.count(1)
@@ -309,7 +361,7 @@ def request_historical_batch(
         for future in futures:
             future.result()
 
-    registry.wait_all()
+    return registry.wait_all(abort_event=abort_event)
 
 
 def _frame_to_bars(frame: pd.DataFrame) -> list[Bar]:
@@ -318,14 +370,33 @@ def _frame_to_bars(frame: pd.DataFrame) -> list[Bar]:
         bars.append(
             Bar(
                 timestamp=str(row["Date"]),
-                open=float(row["Open"]),
-                high=float(row["High"]),
-                low=float(row["Low"]),
-                close=float(row["Close"]),
-                volume=float(row["Volume"]),
+                open=_to_decimal(row["Open"], field="Open"),
+                high=_to_decimal(row["High"], field="High"),
+                low=_to_decimal(row["Low"], field="Low"),
+                close=_to_decimal(row["Close"], field="Close"),
+                volume=_to_decimal(row["Volume"], field="Volume"),
             )
         )
     return bars
+
+
+def _to_decimal(value: object, *, field: str) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, Real):
+        return Decimal(str(value))
+    if isinstance(value, str):
+        try:
+            return Decimal(value)
+        except InvalidOperation as exc:
+            raise ProviderError(
+                f"Invalid decimal value for {field}",
+                context={"field": field, "value": value},
+            ) from exc
+    raise ProviderError(
+        f"Unsupported value type for {field}",
+        context={"field": field, "type": type(value).__name__},
+    )
 
 
 def build_symbol_bars(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pandas as pd
 import pytest
 
@@ -46,7 +48,7 @@ def test_pca_returns_factors_and_artifacts() -> None:
     assert processed.shape[0] == len(frame)
     assert list(processed.columns) == ["factor_1"]
     assert result.selected_k == 1
-    assert result.variance_target == 0.9
+    assert result.variance_target == Decimal("0.9")
     assert result.loadings.shape == (2, 1)
     assert list(result.loadings.columns) == ["factor_1"]
     assert len(result.eigenvalues) == len(frame.columns)

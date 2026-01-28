@@ -4,6 +4,7 @@ import argparse
 import logging
 from pathlib import Path
 from functools import partial
+from decimal import Decimal
 from typing import Sequence
 
 from algo_trader.domain import AlgoTraderError
@@ -15,6 +16,7 @@ from algo_trader.application.historical import (
 )
 from algo_trader.application.data_cleaning import run as run_data_cleaning
 from algo_trader.application.data_processing import run as run_data_processing
+from algo_trader.application import modeling
 from algo_trader.cli.wizard import run as run_wizard
 
 logger = logging.getLogger(__name__)
@@ -80,6 +82,53 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Preprocessor argument in key=value format (repeatable).",
     )
 
+    modeling_parser = subparsers.add_parser(
+        "modeling",
+        help="Run Pyro inference on prepared data.",
+    )
+    modeling_parser.add_argument(
+        "--model",
+        default="normal",
+        help="Registered model name.",
+    )
+    modeling_parser.add_argument(
+        "--guide",
+        default="normal_mean_field",
+        help="Registered guide name.",
+    )
+    modeling_parser.add_argument(
+        "--steps",
+        type=int,
+        default=200,
+        help="Number of SVI steps to run.",
+    )
+    modeling_parser.add_argument(
+        "--learning-rate",
+        type=Decimal,
+        default=Decimal("0.01"),
+        help="Learning rate for SVI optimizer.",
+    )
+    modeling_parser.add_argument(
+        "--seed",
+        type=int,
+        help="Random seed for Pyro.",
+    )
+    modeling_parser.add_argument(
+        "--preprocessor",
+        default="identity",
+        help="Preprocessor name used to locate prepared data.",
+    )
+    modeling_parser.add_argument(
+        "--pipeline",
+        default="debug",
+        help="Pipeline name used to locate prepared data.",
+    )
+    modeling_parser.add_argument(
+        "--input",
+        type=Path,
+        help="Path to prepared CSV (overrides feature store lookup).",
+    )
+
     subparsers.add_parser(
         "wizard",
         help="Interactive wizard to build CLI commands.",
@@ -136,6 +185,22 @@ def _run_wizard() -> int:
     return run_wizard()
 
 
+def _run_modeling(
+    *,
+    model: str,
+    guide: str,
+    options: modeling.InferenceOptions,
+    data: modeling.DataSelection,
+) -> int:
+    modeling.run(
+        model_name=model,
+        guide_name=guide,
+        options=options,
+        data=data,
+    )
+    return 0
+
+
 def _cli_context(argv: Sequence[str] | None) -> dict[str, str]:
     if not argv:
         return {}
@@ -164,6 +229,21 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
             _run_data_processing,
             preprocessor=getattr(args, "preprocessor", ""),
             preprocessor_args=getattr(args, "preprocessor_arg", None),
+        ),
+        "modeling": partial(
+            _run_modeling,
+            model=getattr(args, "model", ""),
+            guide=getattr(args, "guide", ""),
+            options=modeling.InferenceOptions(
+                steps=getattr(args, "steps", 200),
+                learning_rate=getattr(args, "learning_rate", Decimal("0.01")),
+                seed=getattr(args, "seed", None),
+            ),
+            data=modeling.DataSelection(
+                preprocessor_name=getattr(args, "preprocessor", "identity"),
+                pipeline=getattr(args, "pipeline", "debug"),
+                input_path=getattr(args, "input", None),
+            ),
         ),
         "wizard": _run_wizard,
     }

@@ -4,8 +4,21 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 CONFIG_PATH="${REPO_ROOT}/config/tickers.yml"
-BACKUP_PATH="${CONFIG_PATH}.bak"
 RUN_CMD=(uv run algotrader historical)
+START_TIME_EPOCH="$(date +%s)"
+START_TIME_FMT="$(date '+%Y-%m-%d_%H:%M:%S')"
+
+print_timing() {
+  local end_time_epoch
+  local end_time_fmt
+  local elapsed_seconds
+  end_time_epoch="$(date +%s)"
+  end_time_fmt="$(date '+%Y-%m-%d_%H:%M:%S')"
+  elapsed_seconds=$((end_time_epoch - START_TIME_EPOCH))
+  echo "Start: ${START_TIME_FMT}"
+  echo "End: ${end_time_fmt}"
+  echo "Elapsed seconds: ${elapsed_seconds}"
+}
 
 usage() {
   echo "Usage: $0 <start_year> <end_year>" >&2
@@ -43,21 +56,6 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
   exit 1
 fi
 
-if [[ -f "${BACKUP_PATH}" ]]; then
-  echo "Backup already exists: ${BACKUP_PATH}" >&2
-  echo "Remove it or move it aside before running this script." >&2
-  exit 1
-fi
-
-cp "${CONFIG_PATH}" "${BACKUP_PATH}"
-
-restore_config() {
-  if [[ -f "${BACKUP_PATH}" ]]; then
-    cp "${BACKUP_PATH}" "${CONFIG_PATH}"
-  fi
-}
-trap restore_config EXIT
-
 update_month() {
   local month_value="$1"
   local tmp_file
@@ -94,7 +92,7 @@ failures=0
 for ((year=start_year_num; year<=end_year_num; year++)); do
   for month in 01 02 03 04 05 06 07 08 09 10 11 12; do
     current="${year}-${month}"
-    echo "Starting ${current} at $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "Downloading ${current} at $(date '+%Y-%m-%d %H:%M:%S')"
     if ! update_month "${current}"; then
       echo "Failed to update month in ${CONFIG_PATH}" >&2
       failures=$((failures + 1))
@@ -104,8 +102,10 @@ for ((year=start_year_num; year<=end_year_num; year++)); do
       echo "Download failed for ${current}" >&2
       failures=$((failures + 1))
     fi
-  done
 done
+done
+
+print_timing
 
 if [[ "${failures}" -gt 0 ]]; then
   echo "Completed with ${failures} failure(s)." >&2

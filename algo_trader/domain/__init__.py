@@ -5,6 +5,8 @@ from .errors import (
     DataSourceError,
     EnvVarError,
     ExportError,
+    InferenceError,
+    ProviderConnectionError,
     ProviderError,
 )
 
@@ -15,5 +17,7 @@ __all__ = (
     "DataSourceError",
     "EnvVarError",
     "ExportError",
+    "InferenceError",
+    "ProviderConnectionError",
     "ProviderError",
 )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Mapping, Sequence, TypeAlias
 
 
@@ -20,16 +21,17 @@ class HistoricalDataRequest:
     duration: str
     bar_size: str
     end_date_time: str
+    window_label: str | None = None
 
 
 @dataclass(frozen=True)
 class Bar:
     timestamp: str
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
 
 
 BarSeries: TypeAlias = Sequence[Bar]

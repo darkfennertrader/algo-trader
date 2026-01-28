@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Mapping, Protocol
 
@@ -155,11 +156,19 @@ def write_json(
 ) -> None:
     try:
         path.write_text(
-            json.dumps(payload, indent=2),
+            json.dumps(payload, indent=2, default=_json_default),
             encoding="utf-8",
         )
     except Exception as exc:
         _raise_with_policy(error_policy, path, exc)
+
+
+def _json_default(value: object) -> object:
+    if isinstance(value, Decimal):
+        return str(value)
+    raise TypeError(
+        f"Object of type {type(value).__name__} is not JSON serializable"
+    )
 
 
 def _versioned_week_dir(root: Path, run_date: date) -> Path:

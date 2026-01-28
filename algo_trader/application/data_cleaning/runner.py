@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import re
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Iterable, cast
 
@@ -54,6 +55,9 @@ class MetadataContext:
     return_type: ReturnType
     source_dir: Path
     destination_dir: Path
+    monthly_avg_close_by_asset: dict[str, dict[str, Decimal]] = field(
+        default_factory=dict
+    )
 
 
 def _run_context(
@@ -98,6 +102,13 @@ def run(
         start=start_month,
         end=end_month,
     )
+    monthly_avg_close_by_asset = _load_monthly_avg_closes(
+        base_dir=data_source,
+        assets=asset_list,
+        return_type=return_type_value,
+        start=start_month,
+        end=end_month,
+    )
     output_paths = _prepare_output_paths(data_lake, date.today())
     writer = _build_output_writer()
     output_path = _write_returns(
@@ -110,6 +121,7 @@ def run(
             return_type=return_type_value,
             source_dir=data_source,
             destination_dir=output_paths.output_dir,
+            monthly_avg_close_by_asset=monthly_avg_close_by_asset,
         ),
         metadata_path=output_paths.metadata_path,
         writer=writer,
@@ -223,7 +235,44 @@ def _load_returns(
     start: YearMonth | None,
     end: YearMonth | None,
 ) -> pd.DataFrame:
-    source = ReturnsSource(
+    source = _build_returns_source(
+        base_dir=base_dir,
+        assets=assets,
+        return_type=return_type,
+        start=start,
+        end=end,
+    )
+    return source.get_returns_frame()
+
+
+def _load_monthly_avg_closes(
+    *,
+    base_dir: Path,
+    assets: list[str],
+    return_type: ReturnType,
+    start: YearMonth | None,
+    end: YearMonth | None,
+) -> dict[str, dict[str, Decimal]]:
+    source = _build_returns_source(
+        base_dir=base_dir,
+        assets=assets,
+        return_type=return_type,
+        start=start,
+        end=end,
+    )
+    daily_prices = source.get_daily_price_series()
+    return _monthly_average_closes(daily_prices)
+
+
+def _build_returns_source(
+    *,
+    base_dir: Path,
+    assets: list[str],
+    return_type: ReturnType,
+    start: YearMonth | None,
+    end: YearMonth | None,
+) -> ReturnsSource:
+    return ReturnsSource(
         ReturnsSourceConfig(
             base_dir=base_dir,
             assets=assets,
@@ -232,7 +281,6 @@ def _load_returns(
             end=end,
         )
     )
-    return source.get_returns_frame()
 
 
 def _prepare_output_paths(data_lake: Path, run_date: date) -> OutputPaths:
@@ -288,11 +336,16 @@ def _build_metadata(
     start_date = index[0] if index else ""
     end_date = index[-1] if index else ""
     missing_by_asset: dict[str, dict[str, object]] = {}
+    zero_returns_by_asset: dict[str, dict[str, object]] = {}
     for asset in context.assets:
         if asset not in context.returns.columns:
             missing_by_asset[asset] = {
                 "missing_dates": index,
                 "missing_count": len(index),
+            }
+            zero_returns_by_asset[asset] = {
+                "zero_dates": [],
+                "zero_count": 0,
             }
             continue
         series = context.returns[asset]
@@ -306,6 +359,16 @@ def _build_metadata(
             "missing_dates": missing_dates,
             "missing_count": len(missing_dates),
         }
+        zero_mask = series.eq(0) & series.notna()
+        zero_dates = [
+            date_str
+            for date_str, is_zero in zip(index, zero_mask, strict=False)
+            if is_zero
+        ]
+        zero_returns_by_asset[asset] = {
+            "zero_dates": zero_dates,
+            "zero_count": len(zero_dates),
+        }
     return OrderedDict(
         [
             ("assets", context.assets),
@@ -313,11 +376,43 @@ def _build_metadata(
             ("start_date", start_date),
             ("end_date", end_date),
             ("missing_by_asset", missing_by_asset),
+            ("zero_returns_by_asset", zero_returns_by_asset),
+            (
+                "monthly_avg_close_by_asset",
+                context.monthly_avg_close_by_asset,
+            ),
             ("run_at", format_run_at(datetime.now(timezone.utc))),
             ("source", format_tilde_path(context.source_dir)),
             ("destination", format_tilde_path(context.destination_dir)),
         ]
     )
+
+
+def _monthly_average_closes(
+    daily_prices: dict[str, pd.Series],
+) -> dict[str, dict[str, Decimal]]:
+    monthly_averages: dict[str, dict[str, Decimal]] = {}
+    for asset, series in daily_prices.items():
+        if series.empty:
+            monthly_averages[asset] = {}
+            continue
+        cleaned = series.dropna()
+        if cleaned.empty:
+            monthly_averages[asset] = {}
+            continue
+        monthly = cleaned.resample("MS").mean()
+        monthly_averages[asset] = {}
+        for timestamp, value in monthly.items():
+            if pd.notna(value):
+                month_key = cast(pd.Timestamp, timestamp).strftime("%Y-%m")
+                monthly_averages[asset][month_key] = _to_decimal(value)
+    return monthly_averages
+
+
+def _to_decimal(value: object) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
 
 
 def _normalize_index_dates(index: pd.Index) -> list[str]:

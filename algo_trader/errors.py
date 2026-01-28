@@ -5,6 +5,7 @@ from algo_trader.domain import (
     DataProcessingError,
     DataSourceError,
     EnvVarError,
+    ProviderConnectionError,
     ProviderError,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "DataProcessingError",
     "DataSourceError",
     "EnvVarError",
+    "ProviderConnectionError",
     "ProviderError",
 ]

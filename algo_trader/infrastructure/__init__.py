@@ -14,6 +14,7 @@ from .output import (
     write_csv,
     write_json,
 )
+from .paths import format_tilde_path
 
 __all__ = [
     "configure_logging",
@@ -30,6 +31,7 @@ __all__ = [
     "build_weekly_output_paths",
     "ensure_directory",
     "format_run_at",
+    "format_tilde_path",
     "resolve_latest_week_dir",
     "write_csv",
     "write_json",

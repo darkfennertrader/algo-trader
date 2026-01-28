@@ -206,11 +206,13 @@ class HistoricalRequestConfig:
 
     def to_request(self) -> HistoricalDataRequest:
         end_date_time, duration = self.resolve_window()
+        window_label = self.window.month or None
         return HistoricalDataRequest(
             tickers=self.tickers,
             duration=duration,
             bar_size=self.window.bar_size,
             end_date_time=end_date_time,
+            window_label=window_label,
         )
 
     @classmethod

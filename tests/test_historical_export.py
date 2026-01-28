@@ -1,3 +1,4 @@
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -189,19 +190,19 @@ def test_csv_exporter_writes_csv(tmp_path: Path) -> None:
             "AUD": [
                 Bar(
                     timestamp="2023-01-02 00:00:00",
-                    open=1.0,
-                    high=1.2,
-                    low=0.9,
-                    close=1.1,
-                    volume=10.0,
+                    open=Decimal("1.0"),
+                    high=Decimal("1.2"),
+                    low=Decimal("0.9"),
+                    close=Decimal("1.1"),
+                    volume=Decimal("10.0"),
                 ),
                 Bar(
                     timestamp="2023-01-02 00:01:00",
-                    open=1.1,
-                    high=1.3,
-                    low=1.0,
-                    close=1.2,
-                    volume=11.0,
+                    open=Decimal("1.1"),
+                    high=Decimal("1.3"),
+                    low=Decimal("1.0"),
+                    close=Decimal("1.2"),
+                    volume=Decimal("11.0"),
                 ),
             ]
         },
@@ -244,11 +245,11 @@ def test_csv_exporter_writes_commodities_pair_dir(
             "XAGUSD": [
                 Bar(
                     timestamp="2023-01-02 00:00:00",
-                    open=20.0,
-                    high=20.2,
-                    low=19.9,
-                    close=20.1,
-                    volume=5.0,
+                    open=Decimal("20.0"),
+                    high=Decimal("20.2"),
+                    low=Decimal("19.9"),
+                    close=Decimal("20.1"),
+                    volume=Decimal("5.0"),
                 )
             ]
         },

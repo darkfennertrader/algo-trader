@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -28,10 +27,11 @@ from algo_trader.infrastructure import (
 )
 from algo_trader.pipeline import modeling
 from algo_trader.preprocessing import normalize_datetime_index
+from ..data_io import read_indexed_csv
+from ..pipeline_utils import parse_pipeline_name
 
 logger = logging.getLogger(__name__)
 
-_PIPELINE_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 _DEFAULT_OUTPUT_NAMES = OutputNames(
     output_name="params.csv",
     metadata_name="metadata.json",
@@ -177,7 +177,7 @@ def _normalize_data_selection(
     selection: DataSelection | None,
 ) -> DataSelection:
     resolved = selection or DataSelection()
-    pipeline = _parse_pipeline(resolved.pipeline)
+    pipeline = parse_pipeline_name(resolved.pipeline)
     preprocessor_name = _normalize_name(
         resolved.preprocessor_name, label="preprocessor"
     )
@@ -251,18 +251,11 @@ def _input_name_for_preprocessor(preprocessor_name: str) -> str:
 
 
 def _load_frame(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        raise DataSourceError(
-            "Prepared data file not found",
-            context={"path": str(path)},
-        )
-    try:
-        frame = pd.read_csv(path, index_col=0, parse_dates=[0])
-    except Exception as exc:
-        raise DataSourceError(
-            "Failed to read prepared data CSV",
-            context={"path": str(path)},
-        ) from exc
+    frame = read_indexed_csv(
+        path,
+        missing_message="Prepared data file not found",
+        read_message="Failed to read prepared data CSV",
+    )
     frame = normalize_datetime_index(
         frame, label="input", preprocessor_name="modeling"
     )
@@ -311,6 +304,7 @@ def _run_inference(
     if options.seed is not None:
         pyro.set_rng_seed(options.seed)
     pyro.clear_param_store()
+    # pylint: disable=no-member
     optimizer = pyro.optim.Adam({"lr": float(options.learning_rate)})  # type: ignore
     svi = pyro.infer.SVI(model, guide, optimizer, loss=pyro.infer.Trace_ELBO())  # type: ignore
     final_loss = Decimal("0")
@@ -469,18 +463,6 @@ def _resolve_model_store() -> Path:
         create_message="MODEL_STORE_SOURCE cannot be created",
     )
     return model_store
-
-
-def _parse_pipeline(raw: str) -> str:
-    normalized = raw.strip()
-    if not normalized:
-        return "debug"
-    if not _PIPELINE_PATTERN.match(normalized):
-        raise ConfigError(
-            "pipeline contains invalid characters",
-            context={"pipeline": raw},
-        )
-    return normalized
 
 
 def _normalize_name(raw: str, *, label: str) -> str:

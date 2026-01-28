@@ -9,7 +9,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Iterable, cast
 
+import numpy as np
 import pandas as pd
+import torch
 
 from algo_trader.application.historical import (
     DEFAULT_CONFIG_PATH,
@@ -46,6 +48,14 @@ _OUTPUT_NAMES = OutputNames(
     output_name="returns.csv",
     metadata_name="returns_meta.json",
 )
+_RETURN_TENSOR_NAME = "return_tensor.pt"
+_CHECK_AVERAGE_NAME = "check_average.json"
+_TENSOR_METADATA_NAME = "tensor_metadata.json"
+_TENSOR_SCALE = 1_000_000
+_TENSOR_TIMESTAMP_UNIT = "epoch_hours"
+_TENSOR_TIMEZONE = "UTC"
+_TENSOR_VALUE_DTYPE = "int64"
+_NANOSECONDS_PER_HOUR = 3_600_000_000_000
 
 
 @dataclass(frozen=True)
@@ -58,6 +68,51 @@ class MetadataContext:
     monthly_avg_close_by_asset: dict[str, dict[str, Decimal]] = field(
         default_factory=dict
     )
+    tensor_info: ReturnTensorInfo | None = None
+
+
+@dataclass(frozen=True)
+class ReturnTensorBundle:
+    values: torch.Tensor
+    timestamps: torch.Tensor
+    missing_mask: torch.Tensor
+    assets: list[str]
+
+
+@dataclass(frozen=True)
+class ReturnTensorInfo:
+    path: Path
+    assets: list[str]
+    scale: int
+    timestamp_unit: str
+    timezone: str
+    dtype: str
+    missing_mask: bool = True
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    assets: list[str]
+    data_source: Path
+    data_lake: Path
+    start: YearMonth | None
+    end: YearMonth | None
+    return_type: ReturnType
+
+
+@dataclass(frozen=True)
+class RunRequest:
+    config_path: Path | None
+    start: str | None
+    end: str | None
+    return_type: str
+    assets: str | None
+
+
+@dataclass(frozen=True)
+class ReturnData:
+    returns: pd.DataFrame
+    monthly_avg_close_by_asset: dict[str, dict[str, Decimal]]
 
 
 def _run_context(
@@ -86,53 +141,104 @@ def run(
     return_type: str,
     assets: str | None,
 ) -> Path:
-    asset_list = _resolve_asset_list(config_path, assets)
-    if not asset_list:
-        raise ConfigError("No assets available for data_cleaning")
-    logger.info("Using %s assets for data_cleaning", len(asset_list))
-
-    data_source, data_lake = _resolve_data_paths()
-    start_month, end_month = _parse_month_range(start, end)
-    return_type_value = _normalize_return_type(return_type)
-
-    returns = _load_returns(
-        base_dir=data_source,
-        assets=asset_list,
-        return_type=return_type_value,
-        start=start_month,
-        end=end_month,
+    request = _build_run_request(
+        config_path, start, end, return_type, assets
     )
-    monthly_avg_close_by_asset = _load_monthly_avg_closes(
-        base_dir=data_source,
-        assets=asset_list,
-        return_type=return_type_value,
-        start=start_month,
-        end=end_month,
-    )
-    output_paths = _prepare_output_paths(data_lake, date.today())
+    config = _resolve_run_config(request)
+    logger.info("Using %s assets for data_cleaning", len(config.assets))
+
+    return_data = _load_return_data(config)
+    output_paths = _prepare_output_paths(config.data_lake, date.today())
     writer = _build_output_writer()
     output_path = _write_returns(
-        returns, output_paths.output_path, writer
+        return_data.returns, output_paths.output_path, writer
+    )
+    tensor_info = _write_return_tensor(
+        return_data.returns, output_paths.output_dir
+    )
+    metadata_context = MetadataContext(
+        returns=return_data.returns,
+        assets=config.assets,
+        return_type=config.return_type,
+        source_dir=config.data_source,
+        destination_dir=output_paths.output_dir,
+        monthly_avg_close_by_asset=return_data.monthly_avg_close_by_asset,
+        tensor_info=tensor_info,
+    )
+    _write_check_average(
+        metadata_context,
+        output_dir=output_paths.output_dir,
+        writer=writer,
+    )
+    _write_tensor_metadata(
+        metadata_context,
+        output_dir=output_paths.output_dir,
+        writer=writer,
     )
     _write_metadata(
-        MetadataContext(
-            returns=returns,
-            assets=asset_list,
-            return_type=return_type_value,
-            source_dir=data_source,
-            destination_dir=output_paths.output_dir,
-            monthly_avg_close_by_asset=monthly_avg_close_by_asset,
-        ),
+        metadata_context,
         metadata_path=output_paths.metadata_path,
         writer=writer,
     )
     logger.info(
         "Saved returns CSV path=%s rows=%s assets=%s",
         output_path,
-        len(returns),
-        len(returns.columns),
+        len(return_data.returns),
+        len(return_data.returns.columns),
     )
     return output_path
+
+
+def _build_run_request(
+    config_path: Path | None,
+    start: str | None,
+    end: str | None,
+    return_type: str,
+    assets: str | None,
+) -> RunRequest:
+    return RunRequest(config_path, start, end, return_type, assets)
+
+
+def _resolve_run_config(request: RunRequest) -> RunConfig:
+    asset_list = _resolve_asset_list(
+        request.config_path, request.assets
+    )
+    if not asset_list:
+        raise ConfigError("No assets available for data_cleaning")
+    data_source, data_lake = _resolve_data_paths()
+    start_month, end_month = _parse_month_range(
+        request.start, request.end
+    )
+    return_type_value = _normalize_return_type(request.return_type)
+    return RunConfig(
+        assets=asset_list,
+        data_source=data_source,
+        data_lake=data_lake,
+        start=start_month,
+        end=end_month,
+        return_type=return_type_value,
+    )
+
+
+def _load_return_data(config: RunConfig) -> ReturnData:
+    returns = _load_returns(
+        base_dir=config.data_source,
+        assets=config.assets,
+        return_type=config.return_type,
+        start=config.start,
+        end=config.end,
+    )
+    monthly_avg_close_by_asset = _load_monthly_avg_closes(
+        base_dir=config.data_source,
+        assets=config.assets,
+        return_type=config.return_type,
+        start=config.start,
+        end=config.end,
+    )
+    return ReturnData(
+        returns=returns,
+        monthly_avg_close_by_asset=monthly_avg_close_by_asset,
+    )
 
 
 def _resolve_asset_list(
@@ -377,13 +483,58 @@ def _build_metadata(
             ("end_date", end_date),
             ("missing_by_asset", missing_by_asset),
             ("zero_returns_by_asset", zero_returns_by_asset),
+            ("run_at", format_run_at(datetime.now(timezone.utc))),
+            ("source", format_tilde_path(context.source_dir)),
+            ("destination", format_tilde_path(context.destination_dir)),
+        ]
+    )
+
+
+def _write_check_average(
+    context: MetadataContext,
+    *,
+    output_dir: Path,
+    writer: OutputWriter,
+) -> Path:
+    payload = _build_check_average(context)
+    path = output_dir / _CHECK_AVERAGE_NAME
+    writer.write_metadata(payload, path)
+    return path
+
+
+def _build_check_average(
+    context: MetadataContext,
+) -> OrderedDict[str, object]:
+    return OrderedDict(
+        [
             (
                 "monthly_avg_close_by_asset",
                 context.monthly_avg_close_by_asset,
             ),
             ("run_at", format_run_at(datetime.now(timezone.utc))),
-            ("source", format_tilde_path(context.source_dir)),
-            ("destination", format_tilde_path(context.destination_dir)),
+        ]
+    )
+
+
+def _write_tensor_metadata(
+    context: MetadataContext,
+    *,
+    output_dir: Path,
+    writer: OutputWriter,
+) -> Path:
+    payload = _build_tensor_metadata(context)
+    path = output_dir / _TENSOR_METADATA_NAME
+    writer.write_metadata(payload, path)
+    return path
+
+
+def _build_tensor_metadata(
+    context: MetadataContext,
+) -> OrderedDict[str, object]:
+    return OrderedDict(
+        [
+            ("tensor", _tensor_metadata(context)),
+            ("run_at", format_run_at(datetime.now(timezone.utc))),
         ]
     )
 
@@ -435,3 +586,123 @@ def _normalize_return_type(raw: str) -> ReturnType:
 def _year_week(run_date: date) -> tuple[int, int]:
     iso = run_date.isocalendar()
     return iso.year, iso.week
+
+
+def _write_return_tensor(
+    returns: pd.DataFrame, output_dir: Path
+) -> ReturnTensorInfo:
+    bundle = _build_return_tensor_bundle(returns, scale=_TENSOR_SCALE)
+    tensor_path = output_dir / _RETURN_TENSOR_NAME
+    _write_tensor_bundle(bundle, tensor_path)
+    return ReturnTensorInfo(
+        path=tensor_path,
+        assets=bundle.assets,
+        scale=_TENSOR_SCALE,
+        timestamp_unit=_TENSOR_TIMESTAMP_UNIT,
+        timezone=_TENSOR_TIMEZONE,
+        dtype=_TENSOR_VALUE_DTYPE,
+        missing_mask=True,
+    )
+
+
+def _build_return_tensor_bundle(
+    returns: pd.DataFrame, *, scale: int
+) -> ReturnTensorBundle:
+    if returns.empty:
+        raise DataProcessingError(
+            "Returns frame is empty",
+            context={"rows": "0"},
+        )
+    index = _require_utc_hourly_index(returns.index)
+    assets = [str(asset) for asset in returns.columns]
+    values = returns.to_numpy(dtype=float)
+    missing_mask = np.isnan(values)
+    safe_values = np.where(missing_mask, 0.0, values)
+    scaled = np.rint(safe_values * scale).astype("int64")
+    timestamps = _timestamps_to_epoch_hours(index)
+    return ReturnTensorBundle(
+        values=torch.as_tensor(scaled, dtype=torch.int64),
+        timestamps=torch.as_tensor(timestamps, dtype=torch.int64),
+        missing_mask=torch.as_tensor(missing_mask, dtype=torch.bool),
+        assets=assets,
+    )
+
+
+def _require_utc_hourly_index(
+    index: pd.Index,
+) -> pd.DatetimeIndex:
+    if not isinstance(index, pd.DatetimeIndex):
+        raise DataProcessingError(
+            "Returns index must be datetime",
+            context={"index_type": type(index).__name__},
+        )
+    if index.tz is None:
+        raise DataProcessingError(
+            "Returns index must be timezone-aware",
+            context={"timezone": _TENSOR_TIMEZONE},
+        )
+    if str(index.tz) != _TENSOR_TIMEZONE:
+        raise DataProcessingError(
+            "Returns index must be UTC",
+            context={"timezone": str(index.tz)},
+        )
+    if index.hasnans:
+        raise DataProcessingError(
+            "Returns index contains NaT values",
+            context={"timezone": str(index.tz)},
+        )
+    if (
+        (index.minute != 0).any()
+        or (index.second != 0).any()
+        or (index.microsecond != 0).any()
+        or (index.nanosecond != 0).any()
+    ):
+        raise DataProcessingError(
+            "Returns index must be hourly",
+            context={"timezone": str(index.tz)},
+        )
+    return index
+
+
+def _timestamps_to_epoch_hours(
+    index: pd.DatetimeIndex,
+) -> np.ndarray:
+    epoch_ns = index.view("int64")
+    return (epoch_ns // _NANOSECONDS_PER_HOUR).astype("int64")
+
+
+def _write_tensor_bundle(
+    bundle: ReturnTensorBundle, path: Path
+) -> None:
+    payload = {
+        "values": bundle.values,
+        "timestamps": bundle.timestamps,
+        "missing_mask": bundle.missing_mask,
+    }
+    try:
+        torch.save(payload, path)
+    except Exception as exc:
+        raise DataProcessingError(
+            "Failed to write return tensor",
+            context={"path": str(path)},
+        ) from exc
+
+
+def _tensor_metadata(
+    context: MetadataContext,
+) -> dict[str, object] | None:
+    if context.tensor_info is None:
+        return None
+    rows, cols = context.returns.shape
+    return {
+        "path": format_tilde_path(context.tensor_info.path),
+        "assets": context.tensor_info.assets,
+        "scale": context.tensor_info.scale,
+        "dtype": context.tensor_info.dtype,
+        "timestamp_unit": context.tensor_info.timestamp_unit,
+        "timezone": context.tensor_info.timezone,
+        "missing_mask": context.tensor_info.missing_mask,
+        "values_shape": [rows, cols],
+        "timestamps_shape": [rows],
+        "missing_mask_shape": [rows, cols],
+    }

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from algo_trader.application.data_cleaning import runner as data_cleaning_runner
+from algo_trader.domain import DataProcessingError
 from algo_trader.infrastructure.data import ReturnsSource, ReturnsSourceConfig
 
 
@@ -83,11 +85,15 @@ def test_build_metadata_includes_source_destination_after_run_at() -> None:
     frame = pd.DataFrame(
         {"EUR.USD": [0.1, 0.2]},
         index=pd.DatetimeIndex(
-            [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")]
+            [
+                pd.Timestamp("2024-01-01 00:00:00", tz="UTC"),
+                pd.Timestamp("2024-01-02 00:00:00", tz="UTC"),
+            ]
         ),
     )
     source_dir = Path.home() / "data_source"
     destination_dir = Path.home() / "data_lake" / "2024-01"
+    tensor_path = destination_dir / "return_tensor.pt"
 
     metadata = data_cleaning_runner._build_metadata(
         data_cleaning_runner.MetadataContext(
@@ -96,6 +102,14 @@ def test_build_metadata_includes_source_destination_after_run_at() -> None:
             return_type="simple",
             source_dir=source_dir,
             destination_dir=destination_dir,
+            tensor_info=data_cleaning_runner.ReturnTensorInfo(
+                path=tensor_path,
+                assets=["EUR.USD"],
+                scale=1_000_000,
+                timestamp_unit="epoch_hours",
+                timezone="UTC",
+                dtype="int64",
+            ),
         )
     )
 
@@ -105,3 +119,104 @@ def test_build_metadata_includes_source_destination_after_run_at() -> None:
     assert keys[run_at_index + 2] == "destination"
     assert metadata["source"].startswith("~")
     assert metadata["destination"].startswith("~")
+    assert "tensor" not in metadata
+
+
+def test_build_check_average_payload() -> None:
+    frame = pd.DataFrame(
+        {"EUR.USD": [0.1]},
+        index=pd.DatetimeIndex(
+            [pd.Timestamp("2024-01-01 00:00:00", tz="UTC")]
+        ),
+    )
+    context = data_cleaning_runner.MetadataContext(
+        returns=frame,
+        assets=["EUR.USD"],
+        return_type="simple",
+        source_dir=Path.home(),
+        destination_dir=Path.home(),
+        monthly_avg_close_by_asset={"EUR.USD": {"2024-01": Decimal("1.1")}},
+    )
+
+    payload = data_cleaning_runner._build_check_average(context)
+
+    assert list(payload.keys()) == [
+        "monthly_avg_close_by_asset",
+        "run_at",
+    ]
+    assert payload["monthly_avg_close_by_asset"] == {
+        "EUR.USD": {"2024-01": Decimal("1.1")}
+    }
+
+
+def test_build_tensor_metadata_payload() -> None:
+    frame = pd.DataFrame(
+        {"EUR.USD": [0.1]},
+        index=pd.DatetimeIndex(
+            [pd.Timestamp("2024-01-01 00:00:00", tz="UTC")]
+        ),
+    )
+    context = data_cleaning_runner.MetadataContext(
+        returns=frame,
+        assets=["EUR.USD"],
+        return_type="simple",
+        source_dir=Path.home(),
+        destination_dir=Path.home(),
+        tensor_info=data_cleaning_runner.ReturnTensorInfo(
+            path=Path.home() / "return_tensor.pt",
+            assets=["EUR.USD"],
+            scale=1_000_000,
+            timestamp_unit="epoch_hours",
+            timezone="UTC",
+            dtype="int64",
+        ),
+    )
+
+    payload = data_cleaning_runner._build_tensor_metadata(context)
+
+    assert list(payload.keys()) == ["tensor", "run_at"]
+    assert payload["tensor"] is not None
+
+
+def test_build_return_tensor_bundle_scales_and_masks() -> None:
+    frame = pd.DataFrame(
+        {"EUR.USD": [0.1, 0.2], "GBP.USD": [float("nan"), 0.3]},
+        index=pd.DatetimeIndex(
+            [
+                pd.Timestamp("2024-01-01 00:00:00", tz="UTC"),
+                pd.Timestamp("2024-01-01 01:00:00", tz="UTC"),
+            ]
+        ),
+    )
+
+    bundle = data_cleaning_runner._build_return_tensor_bundle(
+        frame, scale=1_000_000
+    )
+
+    assert bundle.values.tolist() == [
+        [100000, 0],
+        [200000, 300000],
+    ]
+    assert bundle.missing_mask.tolist() == [
+        [False, True],
+        [False, False],
+    ]
+    epoch_hours = [
+        pd.Timestamp("2024-01-01 00:00:00", tz="UTC").value
+        // 3_600_000_000_000,
+        pd.Timestamp("2024-01-01 01:00:00", tz="UTC").value
+        // 3_600_000_000_000,
+    ]
+    assert bundle.timestamps.tolist() == epoch_hours
+
+
+def test_build_return_tensor_bundle_rejects_naive_index() -> None:
+    frame = pd.DataFrame(
+        {"EUR.USD": [0.1]},
+        index=pd.DatetimeIndex([pd.Timestamp("2024-01-01 00:00:00")]),
+    )
+
+    with pytest.raises(DataProcessingError):
+        data_cleaning_runner._build_return_tensor_bundle(
+            frame, scale=1_000_000
+        )

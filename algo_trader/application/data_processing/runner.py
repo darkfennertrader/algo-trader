@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,13 +30,14 @@ from algo_trader.preprocessing import (
     default_registry,
     normalize_datetime_index,
 )
+from ..data_io import read_indexed_csv
+from ..pipeline_utils import parse_pipeline_name
 
 if TYPE_CHECKING:
     from algo_trader.preprocessing import PCAResult
 
 logger = logging.getLogger(__name__)
 
-_PIPELINE_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 _INPUT_NAME = "returns.csv"
 _DEFAULT_OUTPUT_NAMES = OutputNames(
     output_name="processed.csv",
@@ -167,18 +167,11 @@ def _resolve_latest_directory(base_dir: Path) -> Path:
 
 
 def _load_returns(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        raise DataSourceError(
-            "Input returns.csv not found",
-            context={"path": str(path)},
-        )
-    try:
-        frame = pd.read_csv(path, index_col=0, parse_dates=[0])
-    except Exception as exc:
-        raise DataSourceError(
-            "Failed to read returns CSV",
-            context={"path": str(path)},
-        ) from exc
+    frame = read_indexed_csv(
+        path,
+        missing_message="Input returns.csv not found",
+        read_message="Failed to read returns CSV",
+    )
     return normalize_datetime_index(
         frame, label="input", preprocessor_name=""
     )
@@ -267,15 +260,7 @@ def _parse_preprocessor_args(
 
 def _parse_pipeline(params: dict[str, str]) -> str:
     raw = params.pop("pipeline", "")
-    normalized = raw.strip()
-    if not normalized:
-        return "debug"
-    if not _PIPELINE_PATTERN.match(normalized):
-        raise ConfigError(
-            "pipeline contains invalid characters",
-            context={"pipeline": raw},
-        )
-    return normalized
+    return parse_pipeline_name(raw)
 
 
 def _normalize_preprocessor_name(name: str) -> str:

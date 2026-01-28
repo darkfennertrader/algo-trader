@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-from pathlib import Path
 from functools import partial
+from pathlib import Path
 from decimal import Decimal
 from typing import Sequence
 

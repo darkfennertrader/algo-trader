@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 import torch
 
@@ -23,10 +24,16 @@ from algo_trader.infrastructure import (
     require_env,
     resolve_latest_week_dir,
 )
+from algo_trader.infrastructure.data import (
+    require_utc_hourly_index,
+    timestamps_to_epoch_hours,
+    write_tensor_bundle,
+)
 from algo_trader.infrastructure.paths import format_tilde_path
 from algo_trader.preprocessing import (
     Preprocessor,
     PCAPreprocessor,
+    ZScorePreprocessor,
     default_registry,
     normalize_datetime_index,
 )
@@ -34,7 +41,7 @@ from ..data_io import read_indexed_csv
 from ..pipeline_utils import parse_pipeline_name
 
 if TYPE_CHECKING:
-    from algo_trader.preprocessing import PCAResult
+    from algo_trader.preprocessing import PCAResult, ZScoreResult
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +54,12 @@ _PCA_OUTPUT_NAMES = OutputNames(
     output_name="factors.csv",
     metadata_name="metadata.json",
 )
+_ZSCORE_TENSOR_NAME = "processed_tensor.pt"
+_MEAN_REF_TENSOR_NAME = "mean_ref.pt"
+_STD_REF_TENSOR_NAME = "std_ref.pt"
+_TENSOR_TIMESTAMP_UNIT = "epoch_hours"
+_TENSOR_TIMEZONE = "UTC"
+_TENSOR_VALUE_DTYPE = "float64"
 
 
 @dataclass(frozen=True)
@@ -65,6 +78,20 @@ class PCAOutputPaths:
     loadings_csv: Path
     loadings_pt: Path
     eigenvalues_csv: Path
+
+
+@dataclass(frozen=True)
+class ZScoreOutputPaths:
+    processed_pt: Path
+    mean_ref_pt: Path
+    std_ref_pt: Path
+
+
+@dataclass(frozen=True)
+class ZScoreTensorBundle:
+    values: torch.Tensor
+    timestamps: torch.Tensor
+    missing_mask: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -206,12 +233,23 @@ def _write_outputs(
     )
     writer = _build_output_writer()
     writer.write_frame(state.processed, output_paths.output_path)
-    artifact_payload = _maybe_write_pca_artifacts(
-        state.preprocessor_name,
-        state.preprocessor,
-        state.processed,
-        output_paths.output_dir,
-        writer,
+    artifact_payload: dict[str, object] = {}
+    artifact_payload.update(
+        _maybe_write_pca_artifacts(
+            state.preprocessor_name,
+            state.preprocessor,
+            state.processed,
+            output_paths.output_dir,
+            writer,
+        )
+    )
+    artifact_payload.update(
+        _maybe_write_zscore_artifacts(
+            state.preprocessor_name,
+            state.preprocessor,
+            state.processed,
+            output_paths.output_dir,
+        )
     )
     metadata_params = _metadata_params(state.preprocessor_name, params)
     metadata_payload = _build_metadata(
@@ -322,12 +360,50 @@ def _maybe_write_pca_artifacts(
     return _pca_metadata(paths, result)
 
 
+def _maybe_write_zscore_artifacts(
+    preprocessor_name: str,
+    preprocessor: Preprocessor,
+    frame: pd.DataFrame,
+    output_dir: Path,
+) -> dict[str, object]:
+    if preprocessor_name != "zscore":
+        return {}
+    if not isinstance(preprocessor, ZScorePreprocessor):
+        raise DataProcessingError(
+            "Z-score preprocessor is unavailable",
+            context={"preprocessor": preprocessor_name},
+        )
+    result = preprocessor.result()
+    paths = _zscore_output_paths(output_dir)
+    bundle = _build_zscore_tensor_bundle(frame, result.missing_mask)
+    write_tensor_bundle(
+        paths.processed_pt,
+        values=bundle.values,
+        timestamps=bundle.timestamps,
+        missing_mask=bundle.missing_mask,
+        error_message="Failed to write tensor output",
+    )
+    mean_ref = _series_to_tensor(result.mean, frame.columns)
+    std_ref = _series_to_tensor(result.std, frame.columns)
+    _write_tensor(mean_ref, paths.mean_ref_pt)
+    _write_tensor(std_ref, paths.std_ref_pt)
+    return _zscore_metadata(paths, frame, result)
+
+
 def _pca_output_paths(output_dir: Path) -> PCAOutputPaths:
     return PCAOutputPaths(
         factors_pt=output_dir / "factors.pt",
         loadings_csv=output_dir / "loadings.csv",
         loadings_pt=output_dir / "loadings.pt",
         eigenvalues_csv=output_dir / "eigenvalues.csv",
+    )
+
+
+def _zscore_output_paths(output_dir: Path) -> ZScoreOutputPaths:
+    return ZScoreOutputPaths(
+        processed_pt=output_dir / _ZSCORE_TENSOR_NAME,
+        mean_ref_pt=output_dir / _MEAN_REF_TENSOR_NAME,
+        std_ref_pt=output_dir / _STD_REF_TENSOR_NAME,
     )
 
 
@@ -360,6 +436,109 @@ def _write_tensor(tensor: torch.Tensor, path: Path) -> None:
             "Failed to write tensor output",
             context={"path": str(path)},
         ) from exc
+
+
+def _build_zscore_tensor_bundle(
+    frame: pd.DataFrame, missing_mask: np.ndarray
+) -> ZScoreTensorBundle:
+    if frame.empty:
+        raise DataProcessingError(
+            "Z-score frame is empty",
+            context={"rows": "0"},
+        )
+    index = require_utc_hourly_index(
+        frame.index, label="Z-score", timezone=_TENSOR_TIMEZONE
+    )
+    values = frame.to_numpy(dtype=float)
+    if missing_mask.shape != values.shape:
+        raise DataProcessingError(
+            "Missing mask shape does not match z-score frame",
+            context={
+                "mask_shape": str(missing_mask.shape),
+                "frame_shape": str(values.shape),
+            },
+        )
+    timestamps = timestamps_to_epoch_hours(index)
+    return ZScoreTensorBundle(
+        values=torch.as_tensor(values, dtype=torch.float64),
+        timestamps=torch.as_tensor(timestamps, dtype=torch.int64),
+        missing_mask=torch.as_tensor(missing_mask, dtype=torch.bool),
+    )
+
+
+def _series_to_tensor(
+    series: pd.Series, columns: pd.Index
+) -> torch.Tensor:
+    assets = [str(asset) for asset in columns]
+    values = [_series_value(series, asset) for asset in assets]
+    return torch.as_tensor(values, dtype=torch.float64)
+
+
+def _series_value(series: pd.Series, asset: str) -> float:
+    if asset not in series.index:
+        raise DataProcessingError(
+            "Z-score stats missing for asset",
+            context={"asset": asset},
+        )
+    return float(series[asset])
+
+
+def _zscore_metadata(
+    paths: ZScoreOutputPaths,
+    frame: pd.DataFrame,
+    result: "ZScoreResult",
+) -> dict[str, object]:
+    assets = [str(asset) for asset in frame.columns]
+    mean_by_asset = {
+        asset: _series_value(result.mean, asset) for asset in assets
+    }
+    std_by_asset = {
+        asset: _series_value(result.std, asset) for asset in assets
+    }
+    rows, cols = frame.shape
+    return {
+        "zscore": {
+            "asset_order": assets,
+            "m_i": mean_by_asset,
+            "s_i": std_by_asset,
+            "time_range": {
+                "start": _format_timestamp(result.start_timestamp),
+                "end": _format_timestamp(result.end_timestamp),
+            },
+        },
+        "artifacts": {
+            "processed_tensor_pt": format_tilde_path(paths.processed_pt),
+            "mean_ref_pt": format_tilde_path(paths.mean_ref_pt),
+            "std_ref_pt": format_tilde_path(paths.std_ref_pt),
+        },
+        "tensor": {
+            "processed": {
+                "path": format_tilde_path(paths.processed_pt),
+                "dtype": _TENSOR_VALUE_DTYPE,
+                "timestamp_unit": _TENSOR_TIMESTAMP_UNIT,
+                "timezone": _TENSOR_TIMEZONE,
+                "values_shape": [rows, cols],
+                "timestamps_shape": [rows],
+                "missing_mask_shape": [rows, cols],
+            },
+            "mean_ref": {
+                "path": format_tilde_path(paths.mean_ref_pt),
+                "dtype": _TENSOR_VALUE_DTYPE,
+                "shape": [cols],
+            },
+            "std_ref": {
+                "path": format_tilde_path(paths.std_ref_pt),
+                "dtype": _TENSOR_VALUE_DTYPE,
+                "shape": [cols],
+            },
+        },
+    }
+
+
+def _format_timestamp(value: pd.Timestamp | None) -> str:
+    if value is None:
+        return ""
+    return value.isoformat(timespec="seconds")
 
 
 def _metadata_params(

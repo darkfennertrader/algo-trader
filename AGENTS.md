@@ -6,6 +6,7 @@
 - Code contributions: ensure every Python snippet follows idiomatic patterns and aligns SOLID with the modern principles below (SRP -> cohesion, DIP/ISP -> depend on abstractions and keep interfaces lean, LSP -> prefer composition over inheritance, OCP -> low coupling, decouple creation from use).
 - Type checking: write Python code with complete and correct type hints, and ensure it passes static type checking with both Pyright/Pylance and Pylint (with type checking enabled), fixing any type or lint issues they would report.
 - For third-party library features, consult documentation via Context7 before implementing to ensure alignment with upstream APIs and usage.
+- Pyro: review guidance in `docs/pyro` before implementing or modifying models/guides.
 
 ## Coding Workflow
 - MANDATORY PRE-CHANGE CONFIRMATION: DO NOT MODIFY ANY CODE OR FILES UNTIL YOU HAVE ASKED

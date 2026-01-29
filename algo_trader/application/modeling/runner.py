@@ -22,7 +22,9 @@ from algo_trader.infrastructure import (
     format_run_at,
     format_tilde_path,
     log_boundary,
+    move_tensor_to_device,
     require_env,
+    resolve_torch_device,
     resolve_latest_week_dir,
 )
 from algo_trader.pipeline import modeling
@@ -301,6 +303,9 @@ def _run_inference(
     data: torch.Tensor,
     options: InferenceOptions,
 ) -> InferenceResult:
+    device = resolve_torch_device()
+    data = move_tensor_to_device(data, device)
+    logger.info("Using torch device=%s", device)
     if options.seed is not None:
         pyro.set_rng_seed(options.seed)
     pyro.clear_param_store()

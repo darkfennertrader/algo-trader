@@ -46,6 +46,12 @@ Args and defaults:
 - `missing`: `zero` or `drop` (optional, default = `zero`)
 - `pipeline`: `A-Za-z0-9._-` (optional, default = `debug`)
 
+Outputs:
+- `processed.csv` (main output)
+- `processed_tensor.pt` (values + timestamps + missing_mask)
+- `mean_ref.pt`, `std_ref.pt`
+- `metadata.json`
+
 **PCA** (z-score + PCA factors; choose k or variance, not both):
 
 ```bash
@@ -120,3 +126,16 @@ algo_trader/
    with a UTC datetime index.
 2) Register the implementation in `algo_trader/preprocessing/registry.py` by adding it to `default_registry()`.
 3) Invoke it via CLI: `uv run algotrader data_processing --preprocessor <name> --preprocessor-arg key=value`.
+
+## Adding a new model/guide (Pyro)
+
+1) Implement a Pyro model and guide in `algo_trader/pipeline/stages/modeling/`.
+   - Model must implement `PyroModel` and define `__call__(self, data: torch.Tensor) -> None`.
+   - Guide must implement `PyroGuide` and define `__call__(self, data: torch.Tensor) -> None`.
+   - See `algo_trader/pipeline/stages/modeling/dummy.py` for the current example.
+2) Register both in `algo_trader/pipeline/stages/modeling/registry.py`:
+   - Add `registry.register("<model_name>", YourModel())` in `default_model_registry()`.
+   - Add `registry.register("<guide_name>", YourGuide())` in `default_guide_registry()`.
+3) Expose the new classes in `algo_trader/pipeline/stages/modeling/__init__.py`.
+4) Run it via CLI:
+   - `uv run algotrader modeling --model <model_name> --guide <guide_name>`

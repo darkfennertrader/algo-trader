@@ -39,6 +39,7 @@ def test_run_writes_params_csv(
 
     monkeypatch.setenv("FEATURE_STORE_SOURCE", str(feature_store))
     monkeypatch.setenv("MODEL_STORE_SOURCE", str(model_store))
+    monkeypatch.setenv("TORCH_DEVICE", "cpu")
 
     output_path = modeling.run(
         model_name="normal",

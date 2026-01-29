@@ -15,6 +15,7 @@ from .output import (
     write_json,
 )
 from .paths import format_tilde_path
+from .torch_device import move_tensor_to_device, resolve_torch_device
 
 __all__ = [
     "configure_logging",
@@ -35,4 +36,6 @@ __all__ = [
     "resolve_latest_week_dir",
     "write_csv",
     "write_json",
+    "move_tensor_to_device",
+    "resolve_torch_device",
 ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Mapping
 
+import numpy as np
 import pandas as pd
 
 from algo_trader.domain import ConfigError, DataProcessingError
@@ -18,7 +19,19 @@ class ZScorePreprocessorConfig:
     missing: MissingPolicy
 
 
+@dataclass(frozen=True)
+class ZScoreResult:
+    mean: pd.Series
+    std: pd.Series
+    missing_mask: np.ndarray
+    start_timestamp: pd.Timestamp | None
+    end_timestamp: pd.Timestamp | None
+
+
 class ZScorePreprocessor:
+    def __init__(self) -> None:
+        self._result: ZScoreResult | None = None
+
     def process(
         self, data: pd.DataFrame, *, params: Mapping[str, str]
     ) -> pd.DataFrame:
@@ -29,8 +42,27 @@ class ZScorePreprocessor:
         filtered = _filter_by_date(
             normalized, start_date=config.start_date, end_date=config.end_date
         )
-        cleaned = _handle_missing(filtered, config.missing)
-        return _zscore(cleaned)
+        cleaned, missing_mask = _handle_missing_with_mask(
+            filtered, config.missing
+        )
+        zscored, mean, std = _zscore_with_stats(cleaned)
+        start_timestamp, end_timestamp = _timestamp_range(cleaned.index)
+        self._result = ZScoreResult(
+            mean=mean,
+            std=std,
+            missing_mask=missing_mask,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+        return zscored
+
+    def result(self) -> ZScoreResult:
+        if self._result is None:
+            raise DataProcessingError(
+                "Z-score artifacts are not available before processing",
+                context={"preprocessor": "zscore"},
+            )
+        return self._result
 
 
 def _parse_config(params: Mapping[str, str]) -> ZScorePreprocessorConfig:
@@ -124,7 +156,21 @@ def _handle_missing(
     return frame.fillna(0)
 
 
-def _zscore(frame: pd.DataFrame) -> pd.DataFrame:
+def _handle_missing_with_mask(
+    frame: pd.DataFrame, missing: MissingPolicy
+) -> tuple[pd.DataFrame, np.ndarray]:
+    if missing == "drop":
+        cleaned = _handle_missing(frame, missing)
+        missing_mask = np.zeros(cleaned.shape, dtype=bool)
+        return cleaned, missing_mask
+    missing_mask = frame.isna().to_numpy()
+    cleaned = _handle_missing(frame, missing)
+    return cleaned, missing_mask
+
+
+def _zscore_with_stats(
+    frame: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
     mean = frame.mean(axis=0)
     std = frame.std(axis=0, ddof=0)
     zero_std = std[std == 0]
@@ -133,4 +179,17 @@ def _zscore(frame: pd.DataFrame) -> pd.DataFrame:
             "Z-score requires non-zero standard deviation",
             context={"columns": ", ".join(zero_std.index)},
         )
-    return frame.sub(mean, axis=1).div(std, axis=1)
+    return frame.sub(mean, axis=1).div(std, axis=1), mean, std
+
+
+def _timestamp_range(
+    index: pd.Index,
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    if not isinstance(index, pd.DatetimeIndex):
+        raise DataProcessingError(
+            "Z-score index must be datetime",
+            context={"index_type": type(index).__name__},
+        )
+    if index.empty:
+        return None, None
+    return index[0], index[-1]

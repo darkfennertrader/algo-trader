@@ -36,7 +36,10 @@ from algo_trader.infrastructure.data import (
     ReturnType,
     ReturnsSource,
     ReturnsSourceConfig,
+    require_utc_hourly_index,
     symbol_directory,
+    timestamps_to_epoch_hours,
+    write_tensor_bundle,
 )
 
 YearMonth = tuple[int, int]
@@ -55,7 +58,6 @@ _TENSOR_SCALE = 1_000_000
 _TENSOR_TIMESTAMP_UNIT = "epoch_hours"
 _TENSOR_TIMEZONE = "UTC"
 _TENSOR_VALUE_DTYPE = "int64"
-_NANOSECONDS_PER_HOUR = 3_600_000_000_000
 
 
 @dataclass(frozen=True)
@@ -593,7 +595,13 @@ def _write_return_tensor(
 ) -> ReturnTensorInfo:
     bundle = _build_return_tensor_bundle(returns, scale=_TENSOR_SCALE)
     tensor_path = output_dir / _RETURN_TENSOR_NAME
-    _write_tensor_bundle(bundle, tensor_path)
+    write_tensor_bundle(
+        tensor_path,
+        values=bundle.values,
+        timestamps=bundle.timestamps,
+        missing_mask=bundle.missing_mask,
+        error_message="Failed to write return tensor",
+    )
     return ReturnTensorInfo(
         path=tensor_path,
         assets=bundle.assets,
@@ -613,13 +621,15 @@ def _build_return_tensor_bundle(
             "Returns frame is empty",
             context={"rows": "0"},
         )
-    index = _require_utc_hourly_index(returns.index)
+    index = require_utc_hourly_index(
+        returns.index, label="Returns", timezone=_TENSOR_TIMEZONE
+    )
     assets = [str(asset) for asset in returns.columns]
     values = returns.to_numpy(dtype=float)
     missing_mask = np.isnan(values)
     safe_values = np.where(missing_mask, 0.0, values)
     scaled = np.rint(safe_values * scale).astype("int64")
-    timestamps = _timestamps_to_epoch_hours(index)
+    timestamps = timestamps_to_epoch_hours(index)
     return ReturnTensorBundle(
         values=torch.as_tensor(scaled, dtype=torch.int64),
         timestamps=torch.as_tensor(timestamps, dtype=torch.int64),
@@ -628,64 +638,6 @@ def _build_return_tensor_bundle(
     )
 
 
-def _require_utc_hourly_index(
-    index: pd.Index,
-) -> pd.DatetimeIndex:
-    if not isinstance(index, pd.DatetimeIndex):
-        raise DataProcessingError(
-            "Returns index must be datetime",
-            context={"index_type": type(index).__name__},
-        )
-    if index.tz is None:
-        raise DataProcessingError(
-            "Returns index must be timezone-aware",
-            context={"timezone": _TENSOR_TIMEZONE},
-        )
-    if str(index.tz) != _TENSOR_TIMEZONE:
-        raise DataProcessingError(
-            "Returns index must be UTC",
-            context={"timezone": str(index.tz)},
-        )
-    if index.hasnans:
-        raise DataProcessingError(
-            "Returns index contains NaT values",
-            context={"timezone": str(index.tz)},
-        )
-    if (
-        (index.minute != 0).any()
-        or (index.second != 0).any()
-        or (index.microsecond != 0).any()
-        or (index.nanosecond != 0).any()
-    ):
-        raise DataProcessingError(
-            "Returns index must be hourly",
-            context={"timezone": str(index.tz)},
-        )
-    return index
-
-
-def _timestamps_to_epoch_hours(
-    index: pd.DatetimeIndex,
-) -> np.ndarray:
-    epoch_ns = index.view("int64")
-    return (epoch_ns // _NANOSECONDS_PER_HOUR).astype("int64")
-
-
-def _write_tensor_bundle(
-    bundle: ReturnTensorBundle, path: Path
-) -> None:
-    payload = {
-        "values": bundle.values,
-        "timestamps": bundle.timestamps,
-        "missing_mask": bundle.missing_mask,
-    }
-    try:
-        torch.save(payload, path)
-    except Exception as exc:
-        raise DataProcessingError(
-            "Failed to write return tensor",
-            context={"path": str(path)},
-        ) from exc
 
 
 def _tensor_metadata(

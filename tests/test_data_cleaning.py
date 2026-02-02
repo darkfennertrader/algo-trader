@@ -7,7 +7,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from algo_trader.application.data_cleaning import runner as data_cleaning_runner
+from algo_trader.application.data_cleaning import (
+    build_missing_data_summary,
+    runner as data_cleaning_runner,
+)
 from algo_trader.domain import DataProcessingError
 from algo_trader.infrastructure.data import ReturnsSource, ReturnsSourceConfig
 
@@ -112,6 +115,100 @@ def test_returns_source_weekly_uses_week_bounds(tmp_path: Path) -> None:
     )
     assert returns.iloc[0, 0] == pytest.approx(0.2)
     assert returns.iloc[1, 0] == pytest.approx(0.1)
+
+
+def test_returns_source_daily_ohlc_uses_day_end(
+    tmp_path: Path,
+) -> None:
+    asset_dir = tmp_path / "EUR.USD" / "2024"
+    asset_dir.mkdir(parents=True)
+    _write_ohlc_csv(
+        asset_dir / "hist_data_2024-01.csv",
+        [
+            ("2024-01-01 09:00:00", 100.0, 105.0, 99.0, 104.0),
+            ("2024-01-01 16:00:00", 110.0, 115.0, 108.0, 112.0),
+            ("2024-01-02 09:00:00", 120.0, 125.0, 119.0, 121.0),
+            ("2024-01-02 16:00:00", 130.0, 135.0, 128.0, 132.0),
+        ],
+    )
+
+    source = ReturnsSource(
+        ReturnsSourceConfig(
+            base_dir=tmp_path,
+            assets=["EUR.USD"],
+            return_type="simple",
+        )
+    )
+    daily_ohlc = source.get_daily_ohlc_frame()
+
+    assert daily_ohlc.index.equals(
+        pd.DatetimeIndex(
+            [
+                pd.Timestamp("2024-01-01 16:00:00"),
+                pd.Timestamp("2024-01-02 16:00:00"),
+            ]
+        )
+    )
+    assert daily_ohlc.loc[
+        pd.Timestamp("2024-01-01 16:00:00"), ("EUR.USD", "Open")
+    ] == pytest.approx(100.0)
+    assert daily_ohlc.loc[
+        pd.Timestamp("2024-01-01 16:00:00"), ("EUR.USD", "High")
+    ] == pytest.approx(115.0)
+    assert daily_ohlc.loc[
+        pd.Timestamp("2024-01-01 16:00:00"), ("EUR.USD", "Low")
+    ] == pytest.approx(99.0)
+    assert daily_ohlc.loc[
+        pd.Timestamp("2024-01-01 16:00:00"), ("EUR.USD", "Close")
+    ] == pytest.approx(112.0)
+
+
+def test_build_missing_data_summary_tracks_missing_days() -> None:
+    index_a = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2024-01-01 09:00:00", tz="UTC"),
+            pd.Timestamp("2024-01-01 10:00:00", tz="UTC"),
+            pd.Timestamp("2024-01-03 12:00:00", tz="UTC"),
+        ]
+    )
+    frame_a = pd.DataFrame(
+        {
+            "Open": [100.0, 101.0, 102.0],
+            "High": [100.0, 101.0, 102.0],
+            "Low": [100.0, 101.0, 102.0],
+            "Close": [100.0, 101.0, 102.0],
+        },
+        index=index_a,
+    )
+    index_b = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2024-01-01 09:00:00", tz="UTC"),
+            pd.Timestamp("2024-01-02 10:00:00", tz="UTC"),
+            pd.Timestamp("2024-01-02 16:00:00", tz="UTC"),
+            pd.Timestamp("2024-01-03 12:00:00", tz="UTC"),
+        ]
+    )
+    frame_b = pd.DataFrame(
+        {
+            "Open": [200.0, 201.0, 202.0, 203.0],
+            "High": [200.0, 201.0, 202.0, 203.0],
+            "Low": [200.0, 201.0, 202.0, 203.0],
+            "Close": [200.0, 201.0, 202.0, 203.0],
+        },
+        index=index_b,
+    )
+
+    summary = build_missing_data_summary(
+        {"EUR.USD": frame_a, "GBP.USD": frame_b},
+        assets=["EUR.USD", "GBP.USD"],
+    )
+
+    assert summary.missing_by_asset["EUR.USD"] == [
+        pd.Timestamp("2024-01-02 16:00:00", tz="UTC")
+    ]
+    assert summary.missing_by_asset["GBP.USD"] == []
+    assert summary.missing_counts_by_month["EUR.USD"] == {"2024-01": 1}
+    assert summary.missing_counts_by_month["GBP.USD"] == {"2024-01": 0}
 
 
 def test_year_week_uses_iso_week_53() -> None:

@@ -11,6 +11,11 @@ import numpy as np
 import pandas as pd
 
 from algo_trader.domain import DataProcessingError, DataSourceError
+from .indexing import (
+    combine_hourly_indexes,
+    require_datetime_index,
+    weekday_only_index,
+)
 
 ReturnType = Literal["log", "simple"]
 ReturnFrequency = Literal["weekly"]
@@ -88,8 +93,8 @@ class ReturnsSource:
             columns=self._config.columns,
             expected_weeks=expected_weeks,
         )
-        combined_index = _combine_hourly_indexes(asset_data)
-        combined_index = _weekday_only_index(combined_index)
+        combined_index = combine_hourly_indexes(asset_data)
+        combined_index = weekday_only_index(combined_index)
         week_end_by_week = _week_end_by_start(combined_index)
         weekly_ohlc = _apply_week_end_index(
             weekly_ohlc, week_end_by_week
@@ -100,6 +105,32 @@ class ReturnsSource:
         if weekly_ohlc.index.name is None:
             weekly_ohlc.index.name = self._config.columns.time_col
         return weekly_ohlc, time_meta
+
+    def get_daily_ohlc_frame(self) -> pd.DataFrame:
+        asset_data = self._get_hourly_ohlc_data()
+        if not asset_data:
+            raise DataProcessingError(
+                "No OHLC data available",
+                context={"assets": ",".join(self._config.assets)},
+            )
+        daily_by_asset: dict[str, pd.DataFrame] = {}
+        for asset, frame in asset_data.items():
+            daily_by_asset[asset] = _daily_ohlc_frame(
+                frame, columns=self._config.columns
+            )
+        if not daily_by_asset:
+            return pd.DataFrame()
+        daily_ohlc = pd.concat(daily_by_asset, axis=1)
+        combined_index = combine_hourly_indexes(asset_data)
+        combined_index = weekday_only_index(combined_index)
+        day_end_by_day = _day_end_by_start(combined_index)
+        daily_ohlc = _apply_day_end_index(daily_ohlc, day_end_by_day)
+        if daily_ohlc.index.name is None:
+            daily_ohlc.index.name = self._config.columns.time_col
+        return daily_ohlc
+
+    def get_hourly_ohlc_data(self) -> dict[str, pd.DataFrame]:
+        return self._get_hourly_ohlc_data()
 
     def _get_asset_data(
         self, *, resample_daily: bool
@@ -304,8 +335,8 @@ class ReturnsSource:
             return_type=self._config.return_type,
         )
         weekly_returns = self._align_and_trim_frame(weekly_returns)
-        combined_index = _combine_hourly_indexes(asset_data)
-        combined_index = _weekday_only_index(combined_index)
+        combined_index = combine_hourly_indexes(asset_data)
+        combined_index = weekday_only_index(combined_index)
         week_end_by_week = _week_end_by_start(combined_index)
         weekly_returns = _apply_week_end_index(
             weekly_returns, week_end_by_week
@@ -411,11 +442,11 @@ def _weekly_return_series_from_ohlc(
     if frame.empty:
         return pd.Series(dtype=float, name=name)
     frame = frame.sort_index()
-    index = _require_datetime_index(frame.index, label="ohlc returns")
-    frame = frame.loc[_weekday_only_index(index)]
+    index = require_datetime_index(frame.index, label="ohlc returns")
+    frame = frame.loc[weekday_only_index(index)]
     if frame.empty:
         return pd.Series(dtype=float, name=name)
-    index = _require_datetime_index(frame.index, label="ohlc returns")
+    index = require_datetime_index(frame.index, label="ohlc returns")
     week_start = _week_start_index(index)
     grouped = frame.groupby(week_start, sort=False)
     week_keys: list[pd.Timestamp] = []
@@ -475,11 +506,11 @@ def _weekly_ohlc_frame(
     if frame.empty:
         return _empty_weekly_frames(columns)
     frame = frame.sort_index()
-    index = _require_datetime_index(frame.index, label="ohlc")
-    frame = frame.loc[_weekday_only_index(index)]
+    index = require_datetime_index(frame.index, label="ohlc")
+    frame = frame.loc[weekday_only_index(index)]
     if frame.empty:
         return _empty_weekly_frames(columns)
-    index = _require_datetime_index(frame.index, label="ohlc")
+    index = require_datetime_index(frame.index, label="ohlc")
     week_start = _week_start_index(index)
     grouped = frame.groupby(week_start, sort=False)
     week_keys: list[pd.Timestamp] = []
@@ -496,10 +527,74 @@ def _weekly_ohlc_frame(
     return weekly, time_meta
 
 
+def _daily_ohlc_frame(
+    frame: pd.DataFrame, *, columns: PriceColumns
+) -> pd.DataFrame:
+    if frame.empty:
+        return _empty_daily_frame(columns)
+    frame = frame.sort_index()
+    index = require_datetime_index(frame.index, label="daily ohlc")
+    frame = frame.loc[weekday_only_index(index)]
+    if frame.empty:
+        return _empty_daily_frame(columns)
+    index = require_datetime_index(frame.index, label="daily ohlc")
+    day_start = _day_start_index(index)
+    grouped = frame.groupby(day_start, sort=False)
+    day_keys: list[pd.Timestamp] = []
+    ohlc_rows: list[dict[str, float]] = []
+    for day, group in grouped:
+        day_keys.append(day)
+        ohlc_rows.append(_daily_ohlc_row(group, columns))
+    return pd.DataFrame(ohlc_rows, index=pd.Index(day_keys))
+
+
+def _daily_ohlc_row(
+    group: pd.DataFrame, columns: PriceColumns
+) -> dict[str, float]:
+    open_value = _daily_open_value(group, open_col=columns.open_col)
+    close_value = _daily_close_value(group, close_col=columns.close_col)
+    high_value = _daily_high_value(group, high_col=columns.high_col)
+    low_value = _daily_low_value(group, low_col=columns.low_col)
+    return {
+        columns.open_col: open_value,
+        columns.high_col: high_value,
+        columns.low_col: low_value,
+        columns.close_col: close_value,
+    }
+
+
+def _daily_open_value(group: pd.DataFrame, *, open_col: str) -> float:
+    values = group[open_col].dropna()
+    if values.empty:
+        return float("nan")
+    return float(values.iloc[0])
+
+
+def _daily_close_value(group: pd.DataFrame, *, close_col: str) -> float:
+    values = group[close_col].dropna()
+    if values.empty:
+        return float("nan")
+    return float(values.iloc[-1])
+
+
+def _daily_high_value(group: pd.DataFrame, *, high_col: str) -> float:
+    values = group[high_col].dropna()
+    if values.empty:
+        return float("nan")
+    return float(values.max())
+
+
+def _daily_low_value(group: pd.DataFrame, *, low_col: str) -> float:
+    values = group[low_col].dropna()
+    if values.empty:
+        return float("nan")
+    return float(values.min())
+
+
 def _weekly_open_value(
     group: pd.DataFrame, *, open_col: str
 ) -> tuple[float, pd.Timestamp | None]:
-    index = _require_datetime_index(group.index, label="weekly ohlc")
+    index = require_datetime_index(group.index, label="weekly ohlc")
     monday_mask = index.dayofweek == 0
     monday_values = group.loc[monday_mask, open_col].dropna()
     if not monday_values.empty:
@@ -545,7 +640,7 @@ def _weekly_ohlc_rows(
 def _weekly_close_value(
     group: pd.DataFrame, *, close_col: str
 ) -> tuple[float, pd.Timestamp | None]:
-    index = _require_datetime_index(group.index, label="weekly ohlc")
+    index = require_datetime_index(group.index, label="weekly ohlc")
     friday_mask = index.dayofweek == 4
     friday_values = group.loc[friday_mask, close_col].dropna()
     if not friday_values.empty:
@@ -597,10 +692,25 @@ def _empty_weekly_frames(
     return weekly, time_meta
 
 
+def _empty_daily_frame(columns: PriceColumns) -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            columns.open_col,
+            columns.high_col,
+            columns.low_col,
+            columns.close_col,
+        ]
+    )
+
+
 def _week_start_index(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
     normalized = index.normalize()
     offsets = pd.to_timedelta(normalized.dayofweek, unit="D")
     return normalized - offsets
+
+
+def _day_start_index(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    return index.normalize()
 
 
 def _expected_week_starts(
@@ -634,7 +744,7 @@ def _resolve_week_range(
     end: YearMonth | None,
 ) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
     indexes = [
-        _require_datetime_index(frame.index, label="ohlc")
+        require_datetime_index(frame.index, label="ohlc")
         for frame in asset_data.values()
         if not frame.empty
     ]
@@ -652,34 +762,18 @@ def _resolve_week_range(
     return range_start, range_end
 
 
-def _combine_hourly_indexes(
-    asset_data: dict[str, pd.DataFrame],
-) -> pd.DatetimeIndex:
-    indexes = [
-        _require_datetime_index(frame.index, label="ohlc")
-        for frame in asset_data.values()
-        if not frame.empty
-    ]
-    if not indexes:
-        return pd.DatetimeIndex([])
-    combined = indexes[0]
-    if len(indexes) > 1:
-        combined = combined.append(indexes[1:])
-    return pd.DatetimeIndex(combined)
-
-
-def _weekday_only_index(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    if index.empty:
-        return index
-    mask = index.dayofweek <= 4
-    return pd.DatetimeIndex(index[mask])
-
-
 def _week_end_by_start(index: pd.DatetimeIndex) -> pd.Series:
     if index.empty:
         return pd.Series(dtype="datetime64[ns]")
     week_start = _week_start_index(index)
     return pd.Series(index, index=week_start).groupby(level=0).max()
+
+
+def _day_end_by_start(index: pd.DatetimeIndex) -> pd.Series:
+    if index.empty:
+        return pd.Series(dtype="datetime64[ns]")
+    day_start = _day_start_index(index)
+    return pd.Series(index, index=day_start).groupby(level=0).max()
 
 
 def _apply_week_end_index(
@@ -696,6 +790,22 @@ def _apply_week_end_index(
         )
     adjusted = weekly_returns.copy()
     adjusted.index = pd.DatetimeIndex(week_end)
+    return adjusted
+
+def _apply_day_end_index(
+    daily_ohlc: pd.DataFrame, day_end_by_day: pd.Series
+) -> pd.DataFrame:
+    if daily_ohlc.empty:
+        return daily_ohlc
+    day_end = day_end_by_day.reindex(daily_ohlc.index)
+    if day_end.isna().any():
+        missing = day_end.isna()
+        raise DataProcessingError(
+            "Daily timestamps missing day end values",
+            context={"missing_days": str(list(daily_ohlc.index[missing]))},
+        )
+    adjusted = daily_ohlc.copy()
+    adjusted.index = pd.DatetimeIndex(day_end)
     return adjusted
 
 
@@ -725,14 +835,3 @@ def _apply_week_end_index_by_asset(
         updated.index = pd.DatetimeIndex(week_end)
         adjusted[asset] = updated
     return adjusted
-
-
-def _require_datetime_index(
-    index: pd.Index, *, label: str
-) -> pd.DatetimeIndex:
-    if isinstance(index, pd.DatetimeIndex):
-        return index
-    raise DataProcessingError(
-        f"{label} index must be datetime",
-        context={"index_type": type(index).__name__},
-    )

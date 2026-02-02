@@ -42,6 +42,7 @@ from algo_trader.infrastructure.data import (
     timestamps_to_epoch_hours,
     write_tensor_bundle,
 )
+from .missing_data import MissingDataSummary, build_missing_data_summary
 
 YearMonth = tuple[int, int]
 
@@ -55,6 +56,8 @@ _OUTPUT_NAMES = OutputNames(
 _RETURN_FREQUENCY: ReturnFrequency = "weekly"
 _WEEKLY_OHLC_NAME = "weekly_ohlc.csv"
 _WEEKLY_OHLC_META_NAME = "weekly_ohlc_meta.json"
+_DAILY_OHLC_NAME = "daily_ohlc.csv"
+_DAILY_OHLC_META_NAME = "daily_ohlc_meta.json"
 _RETURN_TENSOR_NAME = "return_tensor.pt"
 _CHECK_AVERAGE_NAME = "check_average.json"
 _TENSOR_METADATA_NAME = "tensor_metadata.json"
@@ -127,6 +130,8 @@ class ReturnData:
     monthly_avg_close_by_asset: dict[str, dict[str, Decimal]]
     weekly_ohlc: pd.DataFrame
     weekly_ohlc_time_meta: dict[str, pd.DataFrame]
+    daily_ohlc: pd.DataFrame
+    missing_summary: MissingDataSummary
 
 
 def _run_context(request: RunRequest) -> dict[str, str]:
@@ -157,8 +162,18 @@ def run(
     weekly_ohlc_path = _write_weekly_ohlc(
         return_data.weekly_ohlc, output_paths.output_dir
     )
+    daily_ohlc_path = _write_daily_ohlc(
+        return_data.daily_ohlc, output_paths.output_dir
+    )
     _write_weekly_ohlc_metadata(
         return_data.weekly_ohlc_time_meta,
+        output_dir=output_paths.output_dir,
+        writer=writer,
+    )
+    _write_daily_ohlc_metadata(
+        return_data.missing_summary,
+        source_dir=config.data_source,
+        destination_dir=output_paths.output_dir,
         output_dir=output_paths.output_dir,
         writer=writer,
     )
@@ -204,6 +219,12 @@ def run(
         len(return_data.weekly_ohlc),
         len(return_data.weekly_ohlc.columns),
     )
+    logger.info(
+        "Saved daily OHLC CSV path=%s rows=%s assets=%s",
+        daily_ohlc_path,
+        len(return_data.daily_ohlc),
+        len(return_data.daily_ohlc.columns),
+    )
     return output_path
 
 
@@ -234,11 +255,18 @@ def _load_return_data(config: RunConfig) -> ReturnData:
     daily_prices = source.get_daily_price_series()
     monthly_avg_close_by_asset = _monthly_average_closes(daily_prices)
     weekly_ohlc, weekly_ohlc_time_meta = source.get_weekly_ohlc_bundle()
+    hourly_ohlc = source.get_hourly_ohlc_data()
+    daily_ohlc = source.get_daily_ohlc_frame()
+    missing_summary = build_missing_data_summary(
+        hourly_ohlc, assets=config.assets
+    )
     return ReturnData(
         returns=returns,
         monthly_avg_close_by_asset=monthly_avg_close_by_asset,
         weekly_ohlc=weekly_ohlc,
         weekly_ohlc_time_meta=weekly_ohlc_time_meta,
+        daily_ohlc=daily_ohlc,
+        missing_summary=missing_summary,
     )
 
 
@@ -400,6 +428,27 @@ def _write_weekly_ohlc(
     return path
 
 
+def _write_daily_ohlc(
+    daily_ohlc: pd.DataFrame,
+    output_dir: Path,
+) -> Path:
+    if not isinstance(daily_ohlc.index, pd.DatetimeIndex):
+        raise DataProcessingError(
+            "daily_ohlc index must be datetime",
+            context={"index_type": type(daily_ohlc.index).__name__},
+        )
+    path = output_dir / _DAILY_OHLC_NAME
+    write_csv(
+        daily_ohlc,
+        path,
+        error_policy=ErrorPolicy(
+            error_type=DataProcessingError,
+            message="Failed to write daily OHLC CSV",
+        ),
+    )
+    return path
+
+
 def _write_weekly_ohlc_metadata(
     time_meta_by_asset: dict[str, pd.DataFrame],
     *,
@@ -410,6 +459,41 @@ def _write_weekly_ohlc_metadata(
     path = output_dir / _WEEKLY_OHLC_META_NAME
     writer.write_metadata(payload, path)
     return path
+
+
+def _write_daily_ohlc_metadata(
+    missing_summary: MissingDataSummary,
+    *,
+    source_dir: Path,
+    destination_dir: Path,
+    output_dir: Path,
+    writer: OutputWriter,
+) -> Path:
+    payload = _build_daily_ohlc_metadata(
+        missing_summary,
+        source_dir=source_dir,
+        destination_dir=destination_dir,
+    )
+    path = output_dir / _DAILY_OHLC_META_NAME
+    writer.write_metadata(payload, path)
+    return path
+
+
+def _build_daily_ohlc_metadata(
+    missing_summary: MissingDataSummary,
+    *,
+    source_dir: Path,
+    destination_dir: Path,
+) -> OrderedDict[str, object]:
+    missing_by_asset = _build_missing_by_asset_payload(missing_summary)
+    return OrderedDict(
+        [
+            ("run_at", _format_run_at_local(datetime.now(timezone.utc))),
+            ("source", format_tilde_path(source_dir)),
+            ("destination", format_tilde_path(destination_dir)),
+            ("missing_by_asset", missing_by_asset),
+        ]
+    )
 
 
 def _build_weekly_ohlc_metadata(
@@ -445,6 +529,26 @@ def _build_weekly_ohlc_metadata(
                 asset_records.append(record)
         metadata[asset] = asset_records
     return metadata
+
+
+def _build_missing_by_asset_payload(
+    missing_summary: MissingDataSummary,
+) -> OrderedDict[str, object]:
+    payload: OrderedDict[str, object] = OrderedDict()
+    for asset, missing_timestamps in missing_summary.missing_by_asset.items():
+        missing_data = [
+            _format_timestamp(timestamp) for timestamp in missing_timestamps
+        ]
+        month_counts = missing_summary.missing_counts_by_month.get(
+            asset, {}
+        )
+        payload[asset] = OrderedDict(
+            [
+                ("missing_data", missing_data),
+                ("missing_count_by_month", month_counts),
+            ]
+        )
+    return payload
 
 
 def _format_timestamp(value: object) -> str:

@@ -7,6 +7,11 @@ from .returns_source import (
     ReturnsSource,
     ReturnsSourceConfig,
 )
+from .indexing import (
+    combine_hourly_indexes,
+    require_datetime_index,
+    weekday_only_index,
+)
 from .symbols import join_symbol_currency, symbol_directory
 from .tensors import (
     require_utc_hourly_index,
@@ -20,6 +25,9 @@ __all__ = [
     "PriceColumns",
     "ReturnsSource",
     "ReturnsSourceConfig",
+    "combine_hourly_indexes",
+    "require_datetime_index",
+    "weekday_only_index",
     "join_symbol_currency",
     "require_utc_hourly_index",
     "symbol_directory",

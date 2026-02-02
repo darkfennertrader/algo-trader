@@ -118,7 +118,8 @@ algo_trader/
   (see `.env.example`).
 - For data cleaning, set `DATA_SOURCE` and `DATA_LAKE_SOURCE` in `.env`. Output is
   located at `DATA_LAKE_SOURCE` under `.env` and is written to
-  `DATA_LAKE_SOURCE/YYYY-WW/returns.csv`.
+  `DATA_LAKE_SOURCE/YYYY-WW/` (includes `returns.csv`, `weekly_ohlc.csv`,
+  `weekly_ohlc_meta.json`, `daily_ohlc.csv`, `daily_ohlc_meta.json`).
 - For data processing, set `DATA_LAKE_SOURCE` and `FEATURE_STORE_SOURCE` in `.env`.
   Output is located at `FEATURE_STORE_SOURCE` under `.env`. The command selects the
   latest `YYYY-WW` directory, reads `returns.csv`, and writes `processed.csv` to the

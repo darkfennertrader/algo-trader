@@ -12,26 +12,24 @@ from algo_trader.domain import DataProcessingError
 from algo_trader.infrastructure.data import ReturnsSource, ReturnsSourceConfig
 
 
-def _write_csv(path: Path, rows: list[tuple[str, float]]) -> None:
-    frame = pd.DataFrame(rows, columns=["Datetime", "Close"])
+def _write_ohlc_csv(
+    path: Path, rows: list[tuple[str, float, float, float, float]]
+) -> None:
+    frame = pd.DataFrame(
+        rows, columns=["Datetime", "Open", "High", "Low", "Close"]
+    )
     frame.to_csv(path, index=False)
 
 
 def test_returns_source_dedup_keeps_last(tmp_path: Path) -> None:
     asset_dir = tmp_path / "EUR.USD" / "2024"
     asset_dir.mkdir(parents=True)
-    _write_csv(
+    _write_ohlc_csv(
         asset_dir / "hist_data_2024-01.csv",
         [
-            ("2024-01-01 00:00:00", 100.0),
-            ("2024-01-01 23:00:00", 110.0),
-        ],
-    )
-    _write_csv(
-        asset_dir / "hist_data_2024-02.csv",
-        [
-            ("2024-01-01 23:00:00", 120.0),
-            ("2024-01-02 23:00:00", 130.0),
+            ("2024-01-01 09:00:00", 100.0, 100.0, 100.0, 100.0),
+            ("2024-01-01 09:00:00", 120.0, 120.0, 120.0, 120.0),
+            ("2024-01-05 16:00:00", 130.0, 130.0, 130.0, 130.0),
         ],
     )
 
@@ -45,19 +43,21 @@ def test_returns_source_dedup_keeps_last(tmp_path: Path) -> None:
     returns = source.get_returns_frame()
 
     assert list(returns.columns) == ["EUR.USD"]
-    assert returns.index.equals(pd.DatetimeIndex([pd.Timestamp("2024-01-02")]))
+    assert returns.index.equals(
+        pd.DatetimeIndex([pd.Timestamp("2024-01-05 16:00:00")])
+    )
     assert returns.iloc[0, 0] == pytest.approx((130.0 / 120.0) - 1.0)
 
 
 def test_returns_source_month_filter_is_inclusive(tmp_path: Path) -> None:
     asset_dir = tmp_path / "EUR.USD" / "2024"
     asset_dir.mkdir(parents=True)
-    _write_csv(
-        asset_dir / "hist_data_2024-01.csv",
+    _write_ohlc_csv(
+        asset_dir / "hist_data_2024-02.csv",
         [
-            ("2024-01-31 23:00:00", 100.0),
-            ("2024-02-01 23:00:00", 110.0),
-            ("2024-02-02 23:00:00", 121.0),
+            ("2024-01-31 23:00:00", 100.0, 100.0, 100.0, 100.0),
+            ("2024-02-01 09:00:00", 110.0, 110.0, 110.0, 110.0),
+            ("2024-02-02 16:00:00", 121.0, 121.0, 121.0, 121.0),
         ],
     )
 
@@ -72,8 +72,46 @@ def test_returns_source_month_filter_is_inclusive(tmp_path: Path) -> None:
     )
     returns = source.get_returns_frame()
 
-    assert returns.index.equals(pd.DatetimeIndex([pd.Timestamp("2024-02-02")]))
+    assert returns.index.equals(
+        pd.DatetimeIndex([pd.Timestamp("2024-02-02 16:00:00")])
+    )
     assert returns.iloc[0, 0] == pytest.approx(0.1)
+
+
+def test_returns_source_weekly_uses_week_bounds(tmp_path: Path) -> None:
+    asset_dir = tmp_path / "EUR.USD" / "2024"
+    asset_dir.mkdir(parents=True)
+    _write_ohlc_csv(
+        asset_dir / "hist_data_2024-01.csv",
+        [
+            ("2024-01-01 09:00:00", 100.0, 100.0, 100.0, 100.0),
+            ("2024-01-03 12:00:00", 115.0, 115.0, 115.0, 115.0),
+            ("2024-01-05 16:00:00", 120.0, 120.0, 120.0, 120.0),
+            ("2024-01-08 09:00:00", 130.0, 130.0, 130.0, 130.0),
+            ("2024-01-09 10:00:00", 125.0, 125.0, 125.0, 125.0),
+            ("2024-01-12 16:00:00", 143.0, 143.0, 143.0, 143.0),
+        ],
+    )
+
+    source = ReturnsSource(
+        ReturnsSourceConfig(
+            base_dir=tmp_path,
+            assets=["EUR.USD"],
+            return_type="simple",
+        )
+    )
+    returns = source.get_returns_frame()
+
+    assert returns.index.equals(
+        pd.DatetimeIndex(
+            [
+                pd.Timestamp("2024-01-05 16:00:00"),
+                pd.Timestamp("2024-01-12 16:00:00"),
+            ]
+        )
+    )
+    assert returns.iloc[0, 0] == pytest.approx(0.2)
+    assert returns.iloc[1, 0] == pytest.approx(0.1)
 
 
 def test_year_week_uses_iso_week_53() -> None:
@@ -99,7 +137,10 @@ def test_build_metadata_includes_source_destination_after_run_at() -> None:
         data_cleaning_runner.MetadataContext(
             returns=frame,
             assets=["EUR.USD"],
-            return_type="simple",
+            return_profile=data_cleaning_runner.ReturnProfile(
+                return_type="simple",
+                return_frequency="weekly",
+            ),
             source_dir=source_dir,
             destination_dir=destination_dir,
             tensor_info=data_cleaning_runner.ReturnTensorInfo(
@@ -119,6 +160,10 @@ def test_build_metadata_includes_source_destination_after_run_at() -> None:
     assert keys[run_at_index + 2] == "destination"
     assert metadata["source"].startswith("~")
     assert metadata["destination"].startswith("~")
+    assert metadata["return_frequency"] == "weekly"
+    assert metadata["missing_weeks_by_asset"] == {
+        "EUR.USD": {"missing_weeks": [], "missing_count": 0}
+    }
     assert "tensor" not in metadata
 
 
@@ -132,7 +177,10 @@ def test_build_check_average_payload() -> None:
     context = data_cleaning_runner.MetadataContext(
         returns=frame,
         assets=["EUR.USD"],
-        return_type="simple",
+        return_profile=data_cleaning_runner.ReturnProfile(
+            return_type="simple",
+            return_frequency="weekly",
+        ),
         source_dir=Path.home(),
         destination_dir=Path.home(),
         monthly_avg_close_by_asset={"EUR.USD": {"2024-01": Decimal("1.1")}},
@@ -159,7 +207,10 @@ def test_build_tensor_metadata_payload() -> None:
     context = data_cleaning_runner.MetadataContext(
         returns=frame,
         assets=["EUR.USD"],
-        return_type="simple",
+        return_profile=data_cleaning_runner.ReturnProfile(
+            return_type="simple",
+            return_frequency="weekly",
+        ),
         source_dir=Path.home(),
         destination_dir=Path.home(),
         tensor_info=data_cleaning_runner.ReturnTensorInfo(
@@ -176,6 +227,37 @@ def test_build_tensor_metadata_payload() -> None:
 
     assert list(payload.keys()) == ["tensor", "run_at"]
     assert payload["tensor"] is not None
+
+
+def test_build_metadata_includes_missing_weeks_by_asset() -> None:
+    frame = pd.DataFrame(
+        {"EUR.USD": [float("nan"), 0.1]},
+        index=pd.DatetimeIndex(
+            [
+                pd.Timestamp("2024-01-01 00:00:00", tz="UTC"),
+                pd.Timestamp("2024-01-08 00:00:00", tz="UTC"),
+            ]
+        ),
+    )
+    metadata = data_cleaning_runner._build_metadata(
+        data_cleaning_runner.MetadataContext(
+            returns=frame,
+            assets=["EUR.USD"],
+            return_profile=data_cleaning_runner.ReturnProfile(
+                return_type="simple",
+                return_frequency="weekly",
+            ),
+            source_dir=Path.home(),
+            destination_dir=Path.home(),
+        )
+    )
+
+    assert metadata["missing_weeks_by_asset"] == {
+        "EUR.USD": {
+            "missing_weeks": ["2024-W01"],
+            "missing_count": 1,
+        }
+    }
 
 
 def test_build_return_tensor_bundle_scales_and_masks() -> None:

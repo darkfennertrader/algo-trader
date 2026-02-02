@@ -27,12 +27,13 @@ from algo_trader.infrastructure import (
     OutputWriter,
     build_weekly_output_paths,
     ensure_directory,
-    format_run_at,
     log_boundary,
     require_env,
+    write_csv,
 )
 from algo_trader.infrastructure.paths import format_tilde_path
 from algo_trader.infrastructure.data import (
+    ReturnFrequency,
     ReturnType,
     ReturnsSource,
     ReturnsSourceConfig,
@@ -51,6 +52,9 @@ _OUTPUT_NAMES = OutputNames(
     output_name="returns.csv",
     metadata_name="returns_meta.json",
 )
+_RETURN_FREQUENCY: ReturnFrequency = "weekly"
+_WEEKLY_OHLC_NAME = "weekly_ohlc.csv"
+_WEEKLY_OHLC_META_NAME = "weekly_ohlc_meta.json"
 _RETURN_TENSOR_NAME = "return_tensor.pt"
 _CHECK_AVERAGE_NAME = "check_average.json"
 _TENSOR_METADATA_NAME = "tensor_metadata.json"
@@ -64,7 +68,7 @@ _TENSOR_VALUE_DTYPE = "int64"
 class MetadataContext:
     returns: pd.DataFrame
     assets: list[str]
-    return_type: ReturnType
+    return_profile: "ReturnProfile"
     source_dir: Path
     destination_dir: Path
     monthly_avg_close_by_asset: dict[str, dict[str, Decimal]] = field(
@@ -112,40 +116,35 @@ class RunRequest:
 
 
 @dataclass(frozen=True)
+class ReturnProfile:
+    return_type: ReturnType
+    return_frequency: ReturnFrequency
+
+
+@dataclass(frozen=True)
 class ReturnData:
     returns: pd.DataFrame
     monthly_avg_close_by_asset: dict[str, dict[str, Decimal]]
+    weekly_ohlc: pd.DataFrame
+    weekly_ohlc_time_meta: dict[str, pd.DataFrame]
 
 
-def _run_context(
-    config_path: Path | None,
-    start: str | None,
-    end: str | None,
-    return_type: str,
-    assets: str | None,
-) -> dict[str, str]:
-    resolved_path = config_path or DEFAULT_CONFIG_PATH
+def _run_context(request: RunRequest) -> dict[str, str]:
+    resolved_path = request.config_path or DEFAULT_CONFIG_PATH
     return {
         "config_path": str(resolved_path),
-        "start": start or "",
-        "end": end or "",
-        "return_type": return_type,
-        "assets": assets or "",
+        "start": request.start or "",
+        "end": request.end or "",
+        "return_type": request.return_type,
+        "assets": request.assets or "",
     }
 
 
 @log_boundary("data_cleaning.run", context=_run_context)
 def run(
     *,
-    config_path: Path | None,
-    start: str | None,
-    end: str | None,
-    return_type: str,
-    assets: str | None,
+    request: RunRequest,
 ) -> Path:
-    request = _build_run_request(
-        config_path, start, end, return_type, assets
-    )
     config = _resolve_run_config(request)
     logger.info("Using %s assets for data_cleaning", len(config.assets))
 
@@ -155,13 +154,24 @@ def run(
     output_path = _write_returns(
         return_data.returns, output_paths.output_path, writer
     )
+    weekly_ohlc_path = _write_weekly_ohlc(
+        return_data.weekly_ohlc, output_paths.output_dir
+    )
+    _write_weekly_ohlc_metadata(
+        return_data.weekly_ohlc_time_meta,
+        output_dir=output_paths.output_dir,
+        writer=writer,
+    )
     tensor_info = _write_return_tensor(
         return_data.returns, output_paths.output_dir
     )
     metadata_context = MetadataContext(
         returns=return_data.returns,
         assets=config.assets,
-        return_type=config.return_type,
+        return_profile=ReturnProfile(
+            return_type=config.return_type,
+            return_frequency=_RETURN_FREQUENCY,
+        ),
         source_dir=config.data_source,
         destination_dir=output_paths.output_dir,
         monthly_avg_close_by_asset=return_data.monthly_avg_close_by_asset,
@@ -188,17 +198,13 @@ def run(
         len(return_data.returns),
         len(return_data.returns.columns),
     )
+    logger.info(
+        "Saved weekly OHLC CSV path=%s rows=%s assets=%s",
+        weekly_ohlc_path,
+        len(return_data.weekly_ohlc),
+        len(return_data.weekly_ohlc.columns),
+    )
     return output_path
-
-
-def _build_run_request(
-    config_path: Path | None,
-    start: str | None,
-    end: str | None,
-    return_type: str,
-    assets: str | None,
-) -> RunRequest:
-    return RunRequest(config_path, start, end, return_type, assets)
 
 
 def _resolve_run_config(request: RunRequest) -> RunConfig:
@@ -223,23 +229,16 @@ def _resolve_run_config(request: RunRequest) -> RunConfig:
 
 
 def _load_return_data(config: RunConfig) -> ReturnData:
-    returns = _load_returns(
-        base_dir=config.data_source,
-        assets=config.assets,
-        return_type=config.return_type,
-        start=config.start,
-        end=config.end,
-    )
-    monthly_avg_close_by_asset = _load_monthly_avg_closes(
-        base_dir=config.data_source,
-        assets=config.assets,
-        return_type=config.return_type,
-        start=config.start,
-        end=config.end,
-    )
+    source = _build_returns_source(config)
+    returns = source.get_returns_frame()
+    daily_prices = source.get_daily_price_series()
+    monthly_avg_close_by_asset = _monthly_average_closes(daily_prices)
+    weekly_ohlc, weekly_ohlc_time_meta = source.get_weekly_ohlc_bundle()
     return ReturnData(
         returns=returns,
         monthly_avg_close_by_asset=monthly_avg_close_by_asset,
+        weekly_ohlc=weekly_ohlc,
+        weekly_ohlc_time_meta=weekly_ohlc_time_meta,
     )
 
 
@@ -335,58 +334,14 @@ def _validate_directory(path: Path, label: str) -> None:
         )
 
 
-def _load_returns(
-    *,
-    base_dir: Path,
-    assets: list[str],
-    return_type: ReturnType,
-    start: YearMonth | None,
-    end: YearMonth | None,
-) -> pd.DataFrame:
-    source = _build_returns_source(
-        base_dir=base_dir,
-        assets=assets,
-        return_type=return_type,
-        start=start,
-        end=end,
-    )
-    return source.get_returns_frame()
-
-
-def _load_monthly_avg_closes(
-    *,
-    base_dir: Path,
-    assets: list[str],
-    return_type: ReturnType,
-    start: YearMonth | None,
-    end: YearMonth | None,
-) -> dict[str, dict[str, Decimal]]:
-    source = _build_returns_source(
-        base_dir=base_dir,
-        assets=assets,
-        return_type=return_type,
-        start=start,
-        end=end,
-    )
-    daily_prices = source.get_daily_price_series()
-    return _monthly_average_closes(daily_prices)
-
-
-def _build_returns_source(
-    *,
-    base_dir: Path,
-    assets: list[str],
-    return_type: ReturnType,
-    start: YearMonth | None,
-    end: YearMonth | None,
-) -> ReturnsSource:
+def _build_returns_source(config: RunConfig) -> ReturnsSource:
     return ReturnsSource(
         ReturnsSourceConfig(
-            base_dir=base_dir,
-            assets=assets,
-            return_type=return_type,
-            start=start,
-            end=end,
+            base_dir=config.data_source,
+            assets=config.assets,
+            return_type=config.return_type,
+            start=config.start,
+            end=config.end,
         )
     )
 
@@ -426,6 +381,103 @@ def _write_returns(
     return output_path
 
 
+def _write_weekly_ohlc(
+    weekly_ohlc: pd.DataFrame,
+    output_dir: Path,
+) -> Path:
+    require_utc_hourly_index(
+        weekly_ohlc.index, label="weekly_ohlc", timezone=_TENSOR_TIMEZONE
+    )
+    path = output_dir / _WEEKLY_OHLC_NAME
+    write_csv(
+        weekly_ohlc,
+        path,
+        error_policy=ErrorPolicy(
+            error_type=DataProcessingError,
+            message="Failed to write weekly OHLC CSV",
+        ),
+    )
+    return path
+
+
+def _write_weekly_ohlc_metadata(
+    time_meta_by_asset: dict[str, pd.DataFrame],
+    *,
+    output_dir: Path,
+    writer: OutputWriter,
+) -> Path:
+    payload = _build_weekly_ohlc_metadata(time_meta_by_asset)
+    path = output_dir / _WEEKLY_OHLC_META_NAME
+    writer.write_metadata(payload, path)
+    return path
+
+
+def _build_weekly_ohlc_metadata(
+    time_meta_by_asset: dict[str, pd.DataFrame],
+) -> OrderedDict[str, object]:
+    metadata: OrderedDict[str, object] = OrderedDict()
+    for asset, frame in time_meta_by_asset.items():
+        asset_records: list[OrderedDict[str, str]] = []
+        if not frame.empty:
+            frame = frame.copy()
+            for week_start, row in frame.iterrows():
+                record = OrderedDict()
+                week_start_value = row.get("open_time")
+                week_end_value = (
+                    row.get("week_end")
+                    if "week_end" in row
+                    else None
+                )
+                record["week_start"] = _format_timestamp(week_start_value)
+                record["week_end"] = _format_timestamp(week_end_value)
+                record["open_time"] = _format_timestamp(
+                    row.get("open_time")
+                )
+                record["high_time"] = _format_timestamp(
+                    row.get("high_time")
+                )
+                record["low_time"] = _format_timestamp(
+                    row.get("low_time")
+                )
+                record["close_time"] = _format_timestamp(
+                    row.get("close_time")
+                )
+                asset_records.append(record)
+        metadata[asset] = asset_records
+    return metadata
+
+
+def _format_timestamp(value: object) -> str:
+    if value is None or value is pd.NaT:
+        return ""
+    if isinstance(value, pd.Timestamp):
+        timestamp = value
+    elif isinstance(value, datetime):
+        timestamp = pd.Timestamp(value)
+    elif isinstance(value, np.datetime64):
+        timestamp = pd.Timestamp(value)
+    else:
+        return ""
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize(timezone.utc)
+    else:
+        timestamp = timestamp.tz_convert(timezone.utc)
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _format_run_at_local(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    local = value.astimezone()
+    tz_name = local.tzname()
+    if tz_name:
+        return f"{local.strftime('%Y-%m-%d %H:%M:%S')} {tz_name}"
+    offset = local.strftime("%z")
+    if offset:
+        return f"{local.strftime('%Y-%m-%d %H:%M:%S')} {offset}"
+    return local.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _write_metadata(
     context: MetadataContext,
     *,
@@ -444,6 +496,7 @@ def _build_metadata(
     start_date = index[0] if index else ""
     end_date = index[-1] if index else ""
     missing_by_asset: dict[str, dict[str, object]] = {}
+    missing_weeks_by_asset = _build_missing_weeks_by_asset(context)
     zero_returns_by_asset: dict[str, dict[str, object]] = {}
     for asset in context.assets:
         if asset not in context.returns.columns:
@@ -480,12 +533,14 @@ def _build_metadata(
     return OrderedDict(
         [
             ("assets", context.assets),
-            ("return_type", context.return_type),
+            ("return_type", context.return_profile.return_type),
+            ("return_frequency", context.return_profile.return_frequency),
             ("start_date", start_date),
             ("end_date", end_date),
             ("missing_by_asset", missing_by_asset),
+            ("missing_weeks_by_asset", missing_weeks_by_asset),
             ("zero_returns_by_asset", zero_returns_by_asset),
-            ("run_at", format_run_at(datetime.now(timezone.utc))),
+            ("run_at", _format_run_at_local(datetime.now(timezone.utc))),
             ("source", format_tilde_path(context.source_dir)),
             ("destination", format_tilde_path(context.destination_dir)),
         ]
@@ -513,7 +568,7 @@ def _build_check_average(
                 "monthly_avg_close_by_asset",
                 context.monthly_avg_close_by_asset,
             ),
-            ("run_at", format_run_at(datetime.now(timezone.utc))),
+            ("run_at", _format_run_at_local(datetime.now(timezone.utc))),
         ]
     )
 
@@ -536,9 +591,73 @@ def _build_tensor_metadata(
     return OrderedDict(
         [
             ("tensor", _tensor_metadata(context)),
-            ("run_at", format_run_at(datetime.now(timezone.utc))),
+            ("run_at", _format_run_at_local(datetime.now(timezone.utc))),
         ]
     )
+
+
+def _build_missing_weeks_by_asset(
+    context: MetadataContext,
+) -> dict[str, dict[str, object]]:
+    week_labels = _iso_week_labels(context.returns.index)
+    unique_weeks = _unique_ordered(week_labels)
+    missing_weeks_by_asset: dict[str, dict[str, object]] = {}
+    for asset in context.assets:
+        missing_weeks = _asset_missing_weeks(
+            context.returns, asset, week_labels, unique_weeks
+        )
+        missing_weeks_by_asset[asset] = {
+            "missing_weeks": missing_weeks,
+            "missing_count": len(missing_weeks),
+        }
+    return missing_weeks_by_asset
+
+
+def _asset_missing_weeks(
+    returns: pd.DataFrame,
+    asset: str,
+    week_labels: list[str],
+    unique_weeks: list[str],
+) -> list[str]:
+    if returns.empty or asset not in returns.columns:
+        return unique_weeks
+    series = returns[asset]
+    if series.empty:
+        return unique_weeks
+    if not week_labels:
+        return []
+    week_index = pd.Series(week_labels, index=series.index)
+    grouped = series.groupby(week_index, sort=False)
+    missing_weeks: list[str] = []
+    for week, group in grouped:
+        if group.isna().all():
+            missing_weeks.append(str(week))
+    return missing_weeks
+
+
+def _iso_week_labels(index: pd.Index) -> list[str]:
+    if index.empty:
+        return []
+    if isinstance(index, pd.DatetimeIndex):
+        iso = index.isocalendar()
+        years = iso["year"].astype(str)
+        weeks = iso["week"].astype(str).str.zfill(2)
+        return [
+            f"{year}-W{week}"
+            for year, week in zip(years, weeks, strict=False)
+        ]
+    return [str(item) for item in index]
+
+
+def _unique_ordered(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
 
 
 def _monthly_average_closes(
@@ -572,7 +691,7 @@ def _normalize_index_dates(index: pd.Index) -> list[str]:
     if index.empty:
         return []
     if isinstance(index, pd.DatetimeIndex):
-        return [item.strftime("%Y-%m-%d") for item in index]
+        return [_format_timestamp(item) for item in index]
     return [str(item) for item in index]
 
 

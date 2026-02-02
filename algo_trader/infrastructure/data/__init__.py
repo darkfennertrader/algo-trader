@@ -1,6 +1,12 @@
 """Data loading infrastructure for analytics workflows."""
 
-from .returns_source import ReturnType, ReturnsSource, ReturnsSourceConfig
+from .returns_source import (
+    PriceColumns,
+    ReturnFrequency,
+    ReturnType,
+    ReturnsSource,
+    ReturnsSourceConfig,
+)
 from .symbols import join_symbol_currency, symbol_directory
 from .tensors import (
     require_utc_hourly_index,
@@ -10,6 +16,8 @@ from .tensors import (
 
 __all__ = [
     "ReturnType",
+    "ReturnFrequency",
+    "PriceColumns",
     "ReturnsSource",
     "ReturnsSourceConfig",
     "join_symbol_currency",

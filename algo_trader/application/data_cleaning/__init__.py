@@ -1,3 +1,3 @@
-from .runner import run
+from .runner import RunRequest, run
 
-__all__ = ["run"]
+__all__ = ["RunRequest", "run"]

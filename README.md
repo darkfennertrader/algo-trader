@@ -17,6 +17,11 @@ Basic commands using uv:
 - Modeling (Pyro inference): `uv run algotrader modeling --model normal --guide normal_mean_field`
 - Backtest (placeholder): `uv run algotrader backtest`
 
+Data cleaning return options:
+- `--return-type simple` (default): `(P_t / P_{t-1}) - 1`
+- `--return-type log`: `log(P_t) - log(P_{t-1})`
+- Return frequency is weekly: weekly returns from hourly closes grouped by week starting Monday; uses the first available price in the week (prefers Monday) and last available price (prefers Friday), labeled with the latest timestamp in that week across assets
+
 
 ### Preprocessors
 
@@ -111,14 +116,17 @@ algo_trader/
   `bar_size`, and `what_to_show` for your run.
 - Set `MAX_PARALLEL_REQUESTS`, `IB_HOST`, `IB_PORT`, and `IB_CLIENT_ID` in your `.env`
   (see `.env.example`).
-- For data cleaning, set `DATA_SOURCE` and `DATA_LAKE_SOURCE` in `.env`. Output is written
-  to `DATA_LAKE_SOURCE/YYYY-WW/returns.csv`.
-- For data processing, set `DATA_LAKE_SOURCE` and `FEATURE_STORE_SOURCE` in `.env`. The
-  command selects the latest `YYYY-WW` directory, reads `returns.csv`, and writes
-  `processed.csv` to the feature store.
+- For data cleaning, set `DATA_SOURCE` and `DATA_LAKE_SOURCE` in `.env`. Output is
+  located at `DATA_LAKE_SOURCE` under `.env` and is written to
+  `DATA_LAKE_SOURCE/YYYY-WW/returns.csv`.
+- For data processing, set `DATA_LAKE_SOURCE` and `FEATURE_STORE_SOURCE` in `.env`.
+  Output is located at `FEATURE_STORE_SOURCE` under `.env`. The command selects the
+  latest `YYYY-WW` directory, reads `returns.csv`, and writes `processed.csv` to the
+  feature store.
 - For modeling/inference, set `FEATURE_STORE_SOURCE` (input) and `MODEL_STORE_SOURCE`
-  (outputs) in `.env`. The command reads the latest prepared data from the feature store
-  (or `--input`), then writes parameter outputs to the model store.
+  (outputs) in `.env`. Output is located at `MODEL_STORE_SOURCE` under `.env`. The
+  command reads the latest prepared data from the feature store (or `--input`), then
+  writes parameter outputs to the model store.
 
 ## Adding a new preprocessor
 

@@ -13,3 +13,4 @@ wheels/
 .uv-cache
 typings
 config/tickers.yml
+/docs

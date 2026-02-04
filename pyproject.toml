@@ -17,6 +17,7 @@ dependencies = [
     "torchvision==0.25.0",
     "torchaudio==2.10.0",
     "pyro-ppl>=1.9.1",
+    "ta-lib==0.6.8",
 ]
 
 [build-system]
@@ -51,3 +52,6 @@ torchaudio = { index = "pytorch-cu126" }
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
+
+[tool.pylint.typecheck]
+generated-members = ["talib.*"]

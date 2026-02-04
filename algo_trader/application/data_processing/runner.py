@@ -21,7 +21,6 @@ from algo_trader.infrastructure import (
     ensure_directory,
     format_run_at,
     log_boundary,
-    require_env,
     resolve_latest_week_dir,
 )
 from algo_trader.infrastructure.data import (
@@ -39,6 +38,7 @@ from algo_trader.preprocessing import (
 )
 from ..data_io import read_indexed_csv
 from ..pipeline_utils import parse_pipeline_name
+from ..data_sources import resolve_data_lake, resolve_feature_store
 
 if TYPE_CHECKING:
     from algo_trader.preprocessing import PCAResult, ZScoreResult
@@ -134,34 +134,8 @@ def run(
     return output_paths.output_path
 
 
-def _resolve_data_lake() -> Path:
-    data_lake = Path(require_env("DATA_LAKE_SOURCE")).expanduser()
-    if not data_lake.exists():
-        raise DataSourceError(
-            "DATA_LAKE_SOURCE does not exist",
-            context={"path": str(data_lake)},
-        )
-    if not data_lake.is_dir():
-        raise DataSourceError(
-            "DATA_LAKE_SOURCE must be a directory",
-            context={"path": str(data_lake)},
-        )
-    return data_lake
-
-
-def _resolve_feature_store() -> Path:
-    feature_store = Path(require_env("FEATURE_STORE_SOURCE")).expanduser()
-    ensure_directory(
-        feature_store,
-        error_type=DataSourceError,
-        invalid_message="FEATURE_STORE_SOURCE must be a directory",
-        create_message="FEATURE_STORE_SOURCE cannot be created",
-    )
-    return feature_store
-
-
 def _load_latest_returns() -> tuple[pd.DataFrame, Path, str]:
-    data_lake = _resolve_data_lake()
+    data_lake = resolve_data_lake()
     latest_dir = _resolve_latest_directory(data_lake)
     input_path = latest_dir / _INPUT_NAME
     frame = _load_returns(input_path)
@@ -320,7 +294,7 @@ def _prepare_output_paths(
     version_label: str,
     names: OutputNames,
 ) -> OutputPaths:
-    feature_store = _resolve_feature_store()
+    feature_store = resolve_feature_store()
     output_paths = build_preprocessor_output_paths(
         feature_store,
         preprocessor_name,

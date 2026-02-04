@@ -4,15 +4,24 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Literal
 
 from algo_trader.domain import ConfigError
-from algo_trader.preprocessing import default_registry
+from algo_trader.pipeline.stages.features import default_registry as feature_registry
+from algo_trader.pipeline.stages.features.mean_reversion import (
+    SUPPORTED_FEATURES as MEAN_REVERSION_FEATURES,
+)
+from algo_trader.pipeline.stages.features.momentum import (
+    SUPPORTED_FEATURES as MOMENTUM_FEATURES,
+)
+from algo_trader.preprocessing import default_registry as preprocessor_registry
 
 
 @dataclass(frozen=True)
 class WizardCommand:
-    args: list[str]
+    commands: list[list[str]]
 
     def render(self) -> str:
-        return f"uv run {' '.join(self.args)}"
+        return "\n".join(
+            f"uv run {' '.join(args)}" for args in self.commands
+        )
 
 
 PromptKind = Literal["optional", "choice"]
@@ -29,10 +38,14 @@ class PromptSpec:
 
 def run() -> int:
     print("Algo Trader Wizard")
-    print("Select a workflow:")
-    workflow = _prompt_choice(
-        "workflow",
-        ["historical", "data_cleaning", "data_processing"],
+    workflow = _prompt_menu(
+        "Select a workflow:",
+        [
+            ("historical", "historical"),
+            ("data_cleaning", "data_cleaning"),
+            ("feat. engineering", "feature_engineering"),
+            ("data_processing", "data_processing"),
+        ],
     )
     command = _build_workflow_command(workflow)
 
@@ -46,7 +59,7 @@ def _historical_command() -> WizardCommand:
     config_path = _prompt_optional("Config path (blank for default)")
     if config_path:
         args.extend(["--config", config_path])
-    return WizardCommand(args=args)
+    return WizardCommand(commands=[args])
 
 
 def _data_cleaning_command() -> WizardCommand:
@@ -64,7 +77,7 @@ def _data_cleaning_command() -> WizardCommand:
     assets = _prompt_optional("Assets (comma-separated, blank for config)")
     if assets:
         args.extend(["--assets", assets])
-    return WizardCommand(args=args)
+    return WizardCommand(commands=[args])
 
 
 def _data_processing_command() -> WizardCommand:
@@ -73,11 +86,35 @@ def _data_processing_command() -> WizardCommand:
     if preprocessor:
         args.extend(["--preprocessor", preprocessor])
     args.extend(_prompt_preprocessor_args(preprocessor))
-    return WizardCommand(args=args)
+    return WizardCommand(commands=[args])
+
+
+def _feature_engineering_command() -> WizardCommand:
+    return_type = _prompt_choice(
+        "return type", ["simple", "log"], default="simple"
+    )
+    horizons = _prompt_optional(
+        "horizons in days (blank for defaults: momentum 5,20,60,130; "
+        "mean_reversion 5,20,60,130). When set, applies to all groups"
+    )
+    groups = _prompt_feature_groups()
+    if not groups:
+        groups = _feature_group_choices()
+    commands: list[list[str]] = []
+    for group in groups:
+        features = _prompt_feature_keys(group)
+        args = ["algotrader", "feature_engineering", "--return-type", return_type]
+        if horizons:
+            args.extend(["--horizons", horizons])
+        args.extend(["--group", group])
+        for feature in features:
+            args.extend(["--feature", feature])
+        commands.append(args)
+    return WizardCommand(commands=commands)
 
 
 def _prompt_preprocessor() -> str:
-    registry = default_registry()
+    registry = preprocessor_registry()
     names = registry.list_names()
     return _prompt_choice("preprocessor", names, default="identity")
 
@@ -102,6 +139,7 @@ def _workflow_builders() -> dict[str, Callable[[], WizardCommand]]:
         "historical": _historical_command,
         "data_cleaning": _data_cleaning_command,
         "data_processing": _data_processing_command,
+        "feature_engineering": _feature_engineering_command,
     }
 
 
@@ -255,3 +293,69 @@ def _prompt_choice(
 
 def _prompt_optional(label: str) -> str:
     return input(f"{label}: ").strip()
+
+
+def _prompt_menu(
+    title: str, options: Iterable[tuple[str, str]]
+) -> str:
+    menu = list(options)
+    if not menu:
+        raise ConfigError("No options available")
+    print(title)
+    for index, (label, _) in enumerate(menu, start=1):
+        print(f"{index}) {label}")
+    while True:
+        raw = input("Select number: ").strip()
+        if raw.isdigit():
+            selected = int(raw)
+            if 1 <= selected <= len(menu):
+                return menu[selected - 1][1]
+        print("Invalid selection. Enter a number from the menu.")
+
+
+def _feature_group_choices() -> list[str]:
+    registry = feature_registry()
+    return registry.list_names()
+
+
+def _prompt_feature_groups() -> list[str]:
+    available = _feature_group_choices()
+    label = (
+        "groups (comma-separated, blank for all). Options: "
+        + ", ".join(available)
+    )
+    while True:
+        raw = _prompt_optional(label)
+        if not raw:
+            return []
+        selected = [item.strip() for item in raw.split(",") if item.strip()]
+        unknown = sorted(set(selected).difference(available))
+        if not unknown:
+            return selected
+        print(f"Invalid groups: {', '.join(unknown)}")
+
+
+def _prompt_feature_keys(group: str) -> list[str]:
+    supported = _feature_keys_by_group().get(group)
+    if supported is None:
+        raise ConfigError(f"Unknown feature group '{group}'")
+    label = (
+        f"features for {group} (comma-separated, blank for all). "
+        f"Options: {', '.join(supported)}"
+    )
+    while True:
+        raw = _prompt_optional(label)
+        if not raw:
+            return []
+        selected = [item.strip() for item in raw.split(",") if item.strip()]
+        unknown = sorted(set(selected).difference(supported))
+        if not unknown:
+            return selected
+        print(f"Invalid features: {', '.join(unknown)}")
+
+
+def _feature_keys_by_group() -> dict[str, list[str]]:
+    return {
+        "momentum": sorted(MOMENTUM_FEATURES),
+        "mean_reversion": sorted(MEAN_REVERSION_FEATURES),
+    }

@@ -1,4 +1,4 @@
 from . import stages
-from .stages import modeling
+from .stages import features, modeling
 
-__all__ = ["modeling", "stages"]
+__all__ = ["features", "modeling", "stages"]

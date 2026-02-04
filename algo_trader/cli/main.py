@@ -14,9 +14,12 @@ from algo_trader.application.historical import (
     configure_logging,
     run,
 )
-from algo_trader.application.data_cleaning import RunRequest, run as run_data_cleaning
+from algo_trader.application.data_cleaning import (
+    RunRequest,
+    run as run_data_cleaning,
+)
 from algo_trader.application.data_processing import run as run_data_processing
-from algo_trader.application import modeling
+from algo_trader.application import feature_engineering, modeling
 from algo_trader.cli.wizard import run as run_wizard
 
 logger = logging.getLogger(__name__)
@@ -129,6 +132,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to prepared CSV (overrides feature store lookup).",
     )
 
+    feature_parser = subparsers.add_parser(
+        "feature_engineering",
+        help="Compute feature groups from cleaned data.",
+    )
+    feature_parser.add_argument(
+        "--return-type",
+        choices=["simple", "log"],
+        default="simple",
+        help="Return type for momentum features.",
+    )
+    feature_parser.add_argument(
+        "--horizons",
+        help="Comma-separated horizon days (default: 5,30,60,130).",
+    )
+    feature_parser.add_argument(
+        "--group",
+        action="append",
+        help="Feature group to compute (repeatable).",
+    )
+    feature_parser.add_argument(
+        "--feature",
+        action="append",
+        help="Feature name to compute within a group (repeatable).",
+    )
+
     subparsers.add_parser(
         "wizard",
         help="Interactive wizard to build CLI commands.",
@@ -200,6 +228,24 @@ def _run_modeling(
     return 0
 
 
+def _run_feature_engineering(
+    *,
+    return_type: str,
+    horizons: str | None,
+    groups: list[str] | None,
+    features: list[str] | None,
+) -> int:
+    feature_engineering.run(
+        request=feature_engineering.RunRequest(
+            return_type=return_type,
+            horizons=horizons,
+            groups=groups,
+            features=features,
+        )
+    )
+    return 0
+
+
 def _cli_context(argv: Sequence[str] | None) -> dict[str, str]:
     if not argv:
         return {}
@@ -239,6 +285,13 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
                 pipeline=getattr(args, "pipeline", "debug"),
                 input_path=getattr(args, "input", None),
             ),
+        ),
+        "feature_engineering": partial(
+            _run_feature_engineering,
+            return_type=getattr(args, "return_type", "simple"),
+            horizons=getattr(args, "horizons", None),
+            groups=getattr(args, "group", None),
+            features=getattr(args, "feature", None),
         ),
         "wizard": _run_wizard,
     }

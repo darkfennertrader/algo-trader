@@ -36,6 +36,11 @@ from algo_trader.pipeline.stages.features import (
     asset_frame,
     ordered_assets,
 )
+from algo_trader.pipeline.stages.features.breakout import (
+    DEFAULT_HORIZON_DAYS as DEFAULT_BREAKOUT_DAYS,
+    BreakoutConfig,
+    BreakoutFeatureGroup,
+)
 from algo_trader.pipeline.stages.features.mean_reversion import (
     DEFAULT_HORIZON_DAYS as DEFAULT_MEAN_REV_HORIZON_DAYS,
     MeanReversionConfig,
@@ -328,6 +333,9 @@ def _resolve_group_horizons(
         if group_name == "mean_reversion":
             days = list(DEFAULT_MEAN_REV_HORIZON_DAYS)
             return _build_horizon_specs(days, _momentum_factory)
+        if group_name == "breakout":
+            days = list(DEFAULT_BREAKOUT_DAYS)
+            return _build_horizon_specs(days, _momentum_factory)
         raise ConfigError(
             "Unknown feature group for horizons",
             context={"group": group_name},
@@ -335,6 +343,8 @@ def _resolve_group_horizons(
     if group_name == "momentum":
         return _build_horizon_specs(horizon_days, _momentum_factory)
     if group_name == "mean_reversion":
+        return _build_horizon_specs(horizon_days, _momentum_factory)
+    if group_name == "breakout":
         return _build_horizon_specs(horizon_days, _momentum_factory)
     raise ConfigError(
         "Unknown feature group for horizons",
@@ -409,6 +419,16 @@ def _build_group(
             features=config.selection.features,
         )
         return MeanReversionFeatureGroup(mean_rev_config)
+    if name == "breakout":
+        breakout_horizons = [
+            HorizonSpec(days=spec.days, weeks=spec.weeks)
+            for spec in horizons
+        ]
+        breakout_config = BreakoutConfig(
+            horizons=breakout_horizons,
+            features=config.selection.features,
+        )
+        return BreakoutFeatureGroup(breakout_config)
     raise ConfigError(
         "Feature group implementation unavailable",
         context={"group": name},

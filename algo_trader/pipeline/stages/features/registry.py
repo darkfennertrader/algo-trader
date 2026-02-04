@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 from algo_trader.domain import ConfigError
 from .protocols import FeatureGroup
 from .horizons import HorizonSpec
+from .breakout import (
+    DEFAULT_HORIZON_DAYS as DEFAULT_BREAKOUT_DAYS,
+    BreakoutConfig,
+    BreakoutFeatureGroup,
+)
 from .momentum import DEFAULT_HORIZON_DAYS, MomentumConfig, MomentumFeatureGroup
 from .mean_reversion import (
     DEFAULT_HORIZON_DAYS as DEFAULT_MEAN_REV_DAYS,
@@ -64,6 +69,14 @@ def default_registry() -> FeatureRegistry:
         MeanReversionFeatureGroup(
             MeanReversionConfig(horizons=mean_rev_horizons)
         ),
+    )
+    breakout_horizons = [
+        HorizonSpec(days=days, weeks=days // 5)
+        for days in DEFAULT_BREAKOUT_DAYS
+    ]
+    registry.register(
+        "breakout",
+        BreakoutFeatureGroup(BreakoutConfig(horizons=breakout_horizons)),
     )
     return registry
 

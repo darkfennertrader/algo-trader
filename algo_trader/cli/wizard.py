@@ -5,6 +5,9 @@ from typing import Callable, Iterable, Literal
 
 from algo_trader.domain import ConfigError
 from algo_trader.pipeline.stages.features import default_registry as feature_registry
+from algo_trader.pipeline.stages.features.breakout import (
+    SUPPORTED_FEATURES as BREAKOUT_FEATURES,
+)
 from algo_trader.pipeline.stages.features.mean_reversion import (
     SUPPORTED_FEATURES as MEAN_REVERSION_FEATURES,
 )
@@ -95,7 +98,8 @@ def _feature_engineering_command() -> WizardCommand:
     )
     horizons = _prompt_optional(
         "horizons in days (blank for defaults: momentum 5,20,60,130; "
-        "mean_reversion 5,20,60,130). When set, applies to all groups"
+        "mean_reversion 5,20,60,130; breakout 5,20,60,130). "
+        "When set, applies to all groups"
     )
     groups = _prompt_feature_groups()
     if not groups:
@@ -358,4 +362,5 @@ def _feature_keys_by_group() -> dict[str, list[str]]:
     return {
         "momentum": sorted(MOMENTUM_FEATURES),
         "mean_reversion": sorted(MEAN_REVERSION_FEATURES),
+        "breakout": sorted(BREAKOUT_FEATURES),
     }

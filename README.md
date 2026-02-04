@@ -25,7 +25,7 @@ Data cleaning return options:
 
 ### Feature engineering
 
-Compute feature groups from data-cleaning outputs (currently weekly-only momentum and mean-reversion features).
+Compute feature groups from data-cleaning outputs (currently weekly-only momentum, mean-reversion, and breakout features).
 
 ```bash
 uv run algotrader feature_engineering \
@@ -39,12 +39,14 @@ Args and defaults:
 - `horizons`: comma-separated day counts (optional). If not set, each group uses its own defaults:
   - momentum: `5,20,60,130`
   - mean_reversion: `5,20,60,130`
+  - breakout: `5,20,60,130`
   When provided, the same horizons are applied to all selected groups.
 - `group`: feature group to compute (repeatable; default = all registered groups).
-   Valid values: `momentum`, `mean_reversion`.
+   Valid values: `momentum`, `mean_reversion`, `breakout`.
 - `feature`: feature key within a group (repeatable; default = group default set).
   - momentum keys: `momentum`, `vol_scaled_momentum`, `slope`, `ema_spread`
   - mean_reversion keys: `z_price_ema`, `z_price_med`, `donch_pos`, `rsi_centered`, `rev`, `shock`, `range_pos`, `range_z`
+  - breakout keys: `brk_up`, `brk_dn`
 
 Outputs (per group):
 - `FEATURE_STORE_SOURCE/features/YYYY-WW/<group>/features.csv` (MultiIndex columns: asset, feature)
@@ -78,6 +80,37 @@ Horizon constraints: `z_price_ema`, `donch_pos`, `rsi_centered` use horizons >= 
 - `shock_4w`: prior 1-week log return divided by 4-week rolling std of 1-week returns.
 - `range_pos_1w`: (close − mid) / (0.5 * range), mid = (high + low)/2, range = high − low.
 - `range_z_<h>w`: z-score of weekly range over h-week rolling mean/std (h >= 12).
+
+#### Breakout group features
+
+Computed on weekly OHLC data per asset (horizons shown in weeks; defaults = 1, 4, 12, 26):
+
+- `brk_up_<h>w`: 1 if close_t > max(High_{t-h..t-1}), else 0.
+- `brk_dn_<h>w`: 1 if close_t < min(Low_{t-h..t-1}), else 0.
+
+#### Feature reference
+
+This section provides a quick explanation of each feature key (independent of horizon suffixes).
+
+Momentum:
+- `momentum`: cumulative return over the horizon.
+- `vol_scaled_momentum`: momentum divided by rolling std of 1W returns over the horizon.
+- `slope`: linear regression slope of log price over the horizon.
+- `ema_spread`: EMA differences normalized by ATR for the longer horizon.
+
+Mean-reversion:
+- `z_price_ema`: z-score of log price versus EWM mean with same halflife.
+- `z_price_med`: z-score of log price versus rolling median using MAD-based scale.
+- `donch_pos`: position of close within rolling high/low range (0 to 1).
+- `rsi_centered`: RSI centered at zero (RSI minus 50).
+- `rev`: negative of the prior horizon log return (lagged one week).
+- `shock`: prior 1W log return scaled by 4W rolling std of 1W returns.
+- `range_pos`: close position within current bar range using mid/half-range.
+- `range_z`: z-score of weekly range versus rolling mean/std.
+
+Breakout:
+- `brk_up`: 1 if close exceeds the prior rolling high over the horizon.
+- `brk_dn`: 1 if close breaks below the prior rolling low over the horizon.
 
 
 ### Preprocessors

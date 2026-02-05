@@ -42,6 +42,36 @@ def require_weekly_ohlc(inputs: FeatureInputs) -> pd.DataFrame:
             "weekly_ohlc must include asset and field columns",
             context={"column_levels": str(frame.columns.nlevels)},
         )
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        raise DataProcessingError(
+            "weekly_ohlc index must be datetime",
+            context={"index_type": type(frame.index).__name__},
+        )
+    return frame
+
+
+def require_daily_ohlc(inputs: FeatureInputs) -> pd.DataFrame:
+    frame = inputs.frames.get("daily_ohlc")
+    if frame is None:
+        raise DataProcessingError(
+            "daily_ohlc input is required",
+            context={"inputs": ",".join(inputs.frames.keys())},
+        )
+    if not isinstance(frame.columns, pd.MultiIndex):
+        raise DataProcessingError(
+            "daily_ohlc must have multi-index columns",
+            context={"columns_type": type(frame.columns).__name__},
+        )
+    if frame.columns.nlevels < 2:
+        raise DataProcessingError(
+            "daily_ohlc must include asset and field columns",
+            context={"column_levels": str(frame.columns.nlevels)},
+        )
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        raise DataProcessingError(
+            "daily_ohlc index must be datetime",
+            context={"index_type": type(frame.index).__name__},
+        )
     return frame
 
 
@@ -59,12 +89,12 @@ def require_no_missing(frame: pd.DataFrame, assets: Iterable[str]) -> None:
         )
 
 
-def require_ohlc_columns(frame: pd.DataFrame) -> None:
+def require_ohlc_columns(frame: pd.DataFrame, *, label: str = "weekly_ohlc") -> None:
     required = ["Open", "High", "Low", "Close"]
     missing = [name for name in required if name not in frame.columns]
     if missing:
         raise DataProcessingError(
-            "weekly_ohlc missing required columns",
+            f"{label} missing required columns",
             context={"columns": ",".join(missing)},
         )
 

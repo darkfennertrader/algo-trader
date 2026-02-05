@@ -25,28 +25,28 @@ Data cleaning return options:
 
 ### Feature engineering
 
-Compute feature groups from data-cleaning outputs (currently weekly-only momentum, mean-reversion, and breakout features).
+Compute feature groups from data-cleaning outputs (weekly momentum/mean-reversion/breakout plus daily-input volatility features, all output weekly).
 
 ```bash
 uv run algotrader feature_engineering \
-  --return-type simple \
   --horizons 5,30,60,130 \
   --group momentum
 ```
 
 Args and defaults:
-- `return-type`: `simple` or `log` (optional, default = `simple`; used by momentum features)
 - `horizons`: comma-separated day counts (optional). If not set, each group uses its own defaults:
   - momentum: `5,20,60,130`
   - mean_reversion: `5,20,60,130`
   - breakout: `5,20,60,130`
+  - volatility: `5,20,60,130`
   When provided, the same horizons are applied to all selected groups.
 - `group`: feature group to compute (repeatable; default = all registered groups).
-   Valid values: `momentum`, `mean_reversion`, `breakout`.
+   Valid values: `momentum`, `mean_reversion`, `breakout`, `volatility`.
 - `feature`: feature key within a group (repeatable; default = group default set).
   - momentum keys: `momentum`, `vol_scaled_momentum`, `slope`, `ema_spread`
   - mean_reversion keys: `z_price_ema`, `z_price_med`, `donch_pos`, `rsi_centered`, `rev`, `shock`, `range_pos`, `range_z`
   - breakout keys: `brk_up`, `brk_dn`
+  - volatility keys: `vol_cc_d`, `atrp_d`, `vol_range_parkinson_d`, `vol_regime_cc`, `vov_norm`, `vol_ts_cc_1w_4w`, `vol_ts_cc_4w_12w`, `vol_ts_cc_4w_26w`, `vol_ts_atr_4w_12w`, `downside_vol_d_4w`, `upside_vol_d_4w`, `down_up_vol_ratio_4w`, `realized_skew_d_12w`, `realized_kurt_d_12w`, `tail_5p_sigma_ratio_12w`, `jump_freq_4w`
 
 Outputs (per group):
 - `FEATURE_STORE_SOURCE/features/YYYY-WW/<group>/features.csv` (MultiIndex columns: asset, feature)
@@ -55,38 +55,61 @@ Outputs (per group):
 
 Notes:
 - Weekly inputs are loaded from `DATA_LAKE_SOURCE/YYYY-WW/weekly_ohlc.csv`.
+- Volatility features use daily inputs from `DATA_LAKE_SOURCE/YYYY-WW/daily_ohlc.csv` and are sampled to weekly output.
 - Missing weekly OHLC values for any asset will raise an error.
 - Metadata includes `feature_name_units` and `days_to_weeks` for horizon mapping.
 
 #### Momentum group features
 
-Computed on weekly OHLC data per asset (horizons shown in weeks):
+Computed on weekly OHLC data per asset (horizons shown in weeks; returns are log for momentum features):
 
-- `mom_<h>w`: cumulative return over h weeks.
-- `z_mom_<h>w`: momentum scaled by rolling std of weekly returns over h weeks.
-- `slope_<h>w`: slope of the linear regression of log price over h weeks.
-- `ema_spread_<s>w_<l>w`: (EMA_s − EMA_l) normalized by ATR_l (longer horizon).
+- `mom_1w`, `mom_4w`, `mom_12w`, `mom_26w`: log cumulative return over the stated horizon, using weekly log returns.
+- `z_mom_1w`, `z_mom_4w`, `z_mom_12w`, `z_mom_26w`: log cumulative return divided by (sigma_ref * sqrt(H) + eps), where sigma_ref is the 26w rolling std of weekly log returns.
+- `slope_4w`, `slope_12w`, `slope_26w`: slope of the linear regression of weekly log price over the stated horizon.
+- `ema_spread_4w_12w`, `ema_spread_4w_26w`, `ema_spread_12w_26w`: (EMA_s − EMA_l) on weekly closes normalized by ATR_l on weekly bars (longer horizon).
 
 #### Mean-reversion group features
 
 Computed on weekly OHLC data per asset (horizons shown in weeks; defaults = 1, 4, 12, 26).
 Horizon constraints: `z_price_ema`, `donch_pos`, `rsi_centered` use horizons >= 4w; `z_price_med` uses >= 26w; `range_z` uses >= 12w; `shock` is fixed at 4w; `range_pos` is fixed at 1w.
 
-- `z_price_ema_<h>w`: (log close − EWM mean) / EWM std, both with halflife = h.
-- `z_price_med_<h>w`: (log close − rolling median) / (1.4826 * rolling MAD), window = h (h >= 26).
-- `donch_pos_<h>w`: (close − low_h) / (high_h − low_h), using rolling High/Low over h weeks.
-- `rsi_centered_<h>w`: RSI_h − 50 (RSI in [0, 100]).
-- `rev_<h>w`: negative h-week log return, lagged one week (−log(C_{t-1} / C_{t-1-h})).
-- `shock_4w`: prior 1-week log return divided by 4-week rolling std of 1-week returns.
-- `range_pos_1w`: (close − mid) / (0.5 * range), mid = (high + low)/2, range = high − low.
-- `range_z_<h>w`: z-score of weekly range over h-week rolling mean/std (h >= 12).
+- `z_price_ema_4w`, `z_price_ema_12w`, `z_price_ema_26w`: (p_t − EMA_h(p)) / (EWM_std_h(p) + eps), where p_t = log(C_t^w) and both EWM mean/std use halflife = h.
+- `z_price_med_26w`: (p_t − median(p_{t−25..t})) / (1.4826 * MAD_{26}(p) + eps), with MAD computed on log closes in the 26w window.
+- `donch_pos_4w`, `donch_pos_12w`, `donch_pos_26w`: (C_t^w − low_h(t)) / (high_h(t) − low_h(t) + eps), where high_h/low_h are rolling h‑week High/Low extrema.
+- `rsi_centered_4w`, `rsi_centered_12w`, `rsi_centered_26w`: RSI_h(C^w) − 50, computed on weekly closes.
+- `rev_1w`, `rev_4w`, `rev_12w`, `rev_26w`: −log(C_{t−1}^w / C_{t−1−h}^w), i.e., negative h‑week log return lagged one week.
+- `shock_4w`: r_{t−1}^w / (std(r_{t−4..t−1}^w) + eps), where r^w is weekly log returns.
+- `range_pos_1w`: (C_t^w − mid_t) / (0.5 * range_t + eps), mid_t = (H_t^w + L_t^w)/2, range_t = H_t^w − L_t^w.
+- `range_z_12w`, `range_z_26w`: (range_t − mean(range_{t−h+1..t})) / (std(range_{t−h+1..t}) + eps), where range_t = H_t^w − L_t^w.
 
 #### Breakout group features
 
 Computed on weekly OHLC data per asset (horizons shown in weeks; defaults = 1, 4, 12, 26):
 
-- `brk_up_<h>w`: 1 if close_t > max(High_{t-h..t-1}), else 0.
-- `brk_dn_<h>w`: 1 if close_t < min(Low_{t-h..t-1}), else 0.
+- `brk_up_1w`, `brk_up_4w`, `brk_up_12w`, `brk_up_26w`: 1 if close_t > max(High_{t-h..t-1}), else 0.
+- `brk_dn_1w`, `brk_dn_4w`, `brk_dn_12w`, `brk_dn_26w`: 1 if close_t < min(Low_{t-h..t-1}), else 0.
+
+#### Volatility group features
+
+Computed on daily OHLC data per asset, then sampled to weekly output (horizons shown in weeks; defaults = 1, 4, 12, 26).
+Missing daily OHLC rows are dropped before indicator computation; data-quality ratios are written to `goodness.json`.
+
+- `vol_cc_d_1w`, `vol_cc_d_4w`, `vol_cc_d_12w`, `vol_cc_d_26w`: close-to-close realized vol over the stated horizon of daily returns.
+- `atrp_d_4w`, `atrp_d_12w`: ATR over the stated horizon of daily bars, divided by close.
+- `vol_range_parkinson_d_4w`: Parkinson range vol over 4 weeks of daily bars.
+- `vol_regime_cc_4w_26w`: current 4w vol vs median of prior 26 weeks of 4w vol history.
+- `vov_norm_12w`: log((a_12w + eps) / (B + eps)), where a_12w is std(|r_t|) over last 12w daily returns and B is the median of the prior 26w of a_12w.
+- `vol_ts_cc_1w_4w`: log ratio of 1w vs 4w close-to-close vol.
+- `vol_ts_cc_4w_12w`: log ratio of 4w vs 12w close-to-close vol.
+- `vol_ts_cc_4w_26w`: log ratio of 4w vs 26w close-to-close vol.
+- `vol_ts_atr_4w_12w`: log ratio of 4w vs 12w ATR% vol.
+- `downside_vol_d_4w`: downside semideviation over 4 weeks (fallback to sigma if few negatives).
+- `upside_vol_d_4w`: upside semideviation over 4 weeks (fallback to sigma if few positives).
+- `down_up_vol_ratio_4w`: log ratio of downside vs upside vol (eps=1e-6).
+- `realized_skew_d_12w`: clipped realized skewness over 12 weeks.
+- `realized_kurt_d_12w`: clipped realized excess kurtosis over 12 weeks.
+- `tail_5p_sigma_ratio_12w`: log ratio of empirical 5% tail vs 1.645*sigma_12w (eps=1e-6).
+- `jump_freq_4w`: fraction of last 4w days with |r| > 2*sigma_12w.
 
 #### Feature reference
 
@@ -111,6 +134,31 @@ Mean-reversion:
 Breakout:
 - `brk_up`: 1 if close exceeds the prior rolling high over the horizon.
 - `brk_dn`: 1 if close breaks below the prior rolling low over the horizon.
+
+Volatility:
+
+  Volatility Level (log returns only):
+- `vol_cc_d`: close-to-close realized vol over daily **log** returns.
+- `atrp_d`: ATR over daily bars as a percent of price.
+- `vol_range_parkinson_d`: Parkinson range volatility from daily high/low.
+- `vol_regime_cc`: log((sigma_4w+eps)/(median_26w+eps)) using sigma_4w from log-return vol, eps=1e-6.
+- `vov_norm`: normalized volatility-of-vol using |r_t| over 12w (log returns), normalized by the median of the prior 26w of 12w vol-of-vol and reported as a log-ratio with eps.
+
+  Volatility term structure (ratios/slope):
+- `vol_ts_cc_1w_4w`: log((v_1w+eps)/(v_4w+eps)) using v=max(vol, eps), eps=1e-6.
+- `vol_ts_cc_4w_12w`: log((v_4w+eps)/(v_12w+eps)) using v=max(vol, eps), eps=1e-6.
+- `vol_ts_cc_4w_26w`: log((v_4w+eps)/(v_26w+eps)) using v=max(vol, eps), eps=1e-6.
+- `vol_ts_atr_4w_12w`: log((v_4w+eps)/(v_12w+eps)) using v=max(vol, eps), eps=1e-6.
+
+  Volatility asymmetry and tails:
+- `downside_vol_d_4w`: semideviation on negative returns; fallback to sigma_4w if fewer than 3 negatives.
+- `upside_vol_d_4w`: semideviation on positive returns; fallback to sigma_4w if fewer than 3 positives.
+- `down_up_vol_ratio_4w`: log((d+eps)/(u+eps)) with v=max(vol, eps), eps=1e-6.
+- `realized_skew_d_12w`: clipped to [-5, 5], computed from 12w returns.
+- `realized_kurt_d_12w`: clipped to [-2, 10], excess kurtosis from 12w returns.
+- `tail_5p_sigma_ratio_12w`: log(((-q05)+eps)/(1.645*sigma_12w+eps)), eps=1e-6.
+- `jump_freq_4w`: count(|r| > 2*sigma_12w) / 20 over the last 4w.
+
 
 
 ### Preprocessors

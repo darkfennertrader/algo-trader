@@ -15,6 +15,14 @@ from .mean_reversion import (
     MeanReversionConfig,
     MeanReversionFeatureGroup,
 )
+from .volatility import (
+    DEFAULT_EPSILON as DEFAULT_VOLATILITY_EPSILON,
+    DEFAULT_HORIZON_DAYS as DEFAULT_VOLATILITY_HORIZON_DAYS,
+    SUPPORTED_FEATURES as VOLATILITY_FEATURES,
+    VolatilityConfig,
+    VolatilityFeatureGroup,
+    VolatilityGoodness,
+)
 
 __all__ = [
     "FeatureFrequency",
@@ -35,4 +43,10 @@ __all__ = [
     "MEAN_REV_FEATURES",
     "MeanReversionConfig",
     "MeanReversionFeatureGroup",
+    "DEFAULT_VOLATILITY_EPSILON",
+    "DEFAULT_VOLATILITY_HORIZON_DAYS",
+    "VOLATILITY_FEATURES",
+    "VolatilityConfig",
+    "VolatilityFeatureGroup",
+    "VolatilityGoodness",
 ]

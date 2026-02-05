@@ -16,6 +16,11 @@ from .mean_reversion import (
     MeanReversionConfig,
     MeanReversionFeatureGroup,
 )
+from .volatility import (
+    DEFAULT_HORIZON_DAYS as DEFAULT_VOLATILITY_DAYS,
+    VolatilityConfig,
+    VolatilityFeatureGroup,
+)
 
 
 @dataclass
@@ -57,7 +62,6 @@ def default_registry() -> FeatureRegistry:
         MomentumFeatureGroup(
             MomentumConfig(
                 horizons=default_horizons,
-                return_type="simple",
             )
         ),
     )
@@ -77,6 +81,16 @@ def default_registry() -> FeatureRegistry:
     registry.register(
         "breakout",
         BreakoutFeatureGroup(BreakoutConfig(horizons=breakout_horizons)),
+    )
+    volatility_horizons = [
+        HorizonSpec(days=days, weeks=days // 5)
+        for days in DEFAULT_VOLATILITY_DAYS
+    ]
+    registry.register(
+        "volatility",
+        VolatilityFeatureGroup(
+            VolatilityConfig(horizons=volatility_horizons)
+        ),
     )
     return registry
 

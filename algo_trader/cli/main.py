@@ -137,12 +137,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Compute feature groups from cleaned data.",
     )
     feature_parser.add_argument(
-        "--return-type",
-        choices=["simple", "log"],
-        default="simple",
-        help="Return type for momentum features.",
-    )
-    feature_parser.add_argument(
         "--horizons",
         help="Comma-separated horizon days (default: 5,30,60,130).",
     )
@@ -230,14 +224,12 @@ def _run_modeling(
 
 def _run_feature_engineering(
     *,
-    return_type: str,
     horizons: str | None,
     groups: list[str] | None,
     features: list[str] | None,
 ) -> int:
     feature_engineering.run(
         request=feature_engineering.RunRequest(
-            return_type=return_type,
             horizons=horizons,
             groups=groups,
             features=features,
@@ -288,7 +280,6 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
         ),
         "feature_engineering": partial(
             _run_feature_engineering,
-            return_type=getattr(args, "return_type", "simple"),
             horizons=getattr(args, "horizons", None),
             groups=getattr(args, "group", None),
             features=getattr(args, "feature", None),

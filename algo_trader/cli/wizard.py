@@ -14,6 +14,9 @@ from algo_trader.pipeline.stages.features.mean_reversion import (
 from algo_trader.pipeline.stages.features.momentum import (
     SUPPORTED_FEATURES as MOMENTUM_FEATURES,
 )
+from algo_trader.pipeline.stages.features.volatility import (
+    SUPPORTED_FEATURES as VOLATILITY_FEATURES,
+)
 from algo_trader.preprocessing import default_registry as preprocessor_registry
 
 
@@ -93,12 +96,10 @@ def _data_processing_command() -> WizardCommand:
 
 
 def _feature_engineering_command() -> WizardCommand:
-    return_type = _prompt_choice(
-        "return type", ["simple", "log"], default="simple"
-    )
     horizons = _prompt_optional(
         "horizons in days (blank for defaults: momentum 5,20,60,130; "
-        "mean_reversion 5,20,60,130; breakout 5,20,60,130). "
+        "mean_reversion 5,20,60,130; breakout 5,20,60,130; "
+        "volatility 5,20,60,130). "
         "When set, applies to all groups"
     )
     groups = _prompt_feature_groups()
@@ -107,7 +108,7 @@ def _feature_engineering_command() -> WizardCommand:
     commands: list[list[str]] = []
     for group in groups:
         features = _prompt_feature_keys(group)
-        args = ["algotrader", "feature_engineering", "--return-type", return_type]
+        args = ["algotrader", "feature_engineering"]
         if horizons:
             args.extend(["--horizons", horizons])
         args.extend(["--group", group])
@@ -363,4 +364,5 @@ def _feature_keys_by_group() -> dict[str, list[str]]:
         "momentum": sorted(MOMENTUM_FEATURES),
         "mean_reversion": sorted(MEAN_REVERSION_FEATURES),
         "breakout": sorted(BREAKOUT_FEATURES),
+        "volatility": sorted(VOLATILITY_FEATURES),
     }

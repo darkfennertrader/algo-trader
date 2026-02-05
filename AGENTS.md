@@ -5,6 +5,7 @@
 - Use `uv run` for executing project commands and `uv add` / `uv remove` for dependency changes to keep `pyproject.toml` in sync.
 - Code contributions: ensure every Python snippet follows idiomatic patterns and aligns SOLID with the modern principles below (SRP -> cohesion, DIP/ISP -> depend on abstractions and keep interfaces lean, LSP -> prefer composition over inheritance, OCP -> low coupling, decouple creation from use).
 - Type checking: write Python code with complete and correct type hints, and ensure it passes static type checking with both Pyright/Pylance and Pylint (with type checking enabled), fixing any type or lint issues they would report.
+- Lint guardrails: proactively avoid pylint complexity warnings. Stay within these limits (or refactor): locals <= 15, branches <= 12, arguments <= 5, return statements <= 6. Do not leave known pylint warnings in the codebase.
 - For third-party library features, consult documentation via Context7 before implementing to ensure alignment with upstream APIs and usage.
 - Pyro: review guidance in `docs/pyro` before implementing or modifying models/guides.
 

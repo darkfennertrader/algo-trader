@@ -52,17 +52,25 @@ from algo_trader.pipeline.stages.features.momentum import (
     MomentumConfig,
     MomentumFeatureGroup,
 )
+from algo_trader.pipeline.stages.features.volatility import (
+    DEFAULT_HORIZON_DAYS as DEFAULT_VOLATILITY_HORIZON_DAYS,
+    VolatilityConfig,
+    VolatilityFeatureGroup,
+    VolatilityGoodness,
+)
 from algo_trader.pipeline.stages.features.registry import default_registry
 from ..data_sources import resolve_data_lake, resolve_feature_store
 
 logger = logging.getLogger(__name__)
 
 _WEEKLY_OHLC_NAME = "weekly_ohlc.csv"
+_DAILY_OHLC_NAME = "daily_ohlc.csv"
 _OUTPUT_NAMES = OutputNames(
     output_name="features.csv",
     metadata_name="metadata.json",
 )
 _TENSOR_NAME = "features_tensor.pt"
+_GOODNESS_NAME = "goodness.json"
 _FREQUENCY = "weekly"
 _TRADING_DAYS_PER_WEEK = 5
 _TENSOR_TIMESTAMP_UNIT = "epoch_hours"
@@ -72,7 +80,6 @@ _TENSOR_VALUE_DTYPE = "float64"
 
 @dataclass(frozen=True)
 class RunRequest:
-    return_type: str
     horizons: str | None = None
     groups: Sequence[str] | None = None
     features: Sequence[str] | None = None
@@ -98,6 +105,12 @@ class FeaturePaths:
 
 
 @dataclass(frozen=True)
+class FeatureInputSources:
+    weekly_path: Path
+    daily_path: Path | None
+
+
+@dataclass(frozen=True)
 class RunConfig:
     settings: FeatureSettings
     selection: FeatureSelection
@@ -110,6 +123,7 @@ class FeatureOutputPaths:
     output_path: Path
     metadata_path: Path
     tensor_path: Path
+    goodness_path: Path
 
 
 @dataclass(frozen=True)
@@ -149,7 +163,6 @@ HorizonSpecT = TypeVar("HorizonSpecT", bound=HorizonLike)
 
 def _run_context(request: RunRequest) -> dict[str, str]:
     return {
-        "return_type": request.return_type,
         "horizons": request.horizons or "",
         "groups": ",".join(request.groups or []),
         "features": ",".join(request.features or []),
@@ -159,11 +172,9 @@ def _run_context(request: RunRequest) -> dict[str, str]:
 @log_boundary("feature_engineering.run", context=_run_context)
 def run(*, request: RunRequest) -> list[Path]:
     config = _resolve_run_config(request)
-    weekly_ohlc, input_path, version_label = _load_weekly_ohlc(
-        config.paths.data_lake
-    )
-    inputs = FeatureInputs(
-        frames={"weekly_ohlc": weekly_ohlc}, frequency=_FREQUENCY
+    needs_daily = "volatility" in config.selection.groups
+    inputs, sources, version_label = _load_feature_inputs(
+        config.paths.data_lake, needs_daily=needs_daily
     )
     output_paths: list[Path] = []
     for group_name in config.selection.groups:
@@ -183,7 +194,7 @@ def run(*, request: RunRequest) -> list[Path]:
                 group=group_name,
                 paths=paths,
                 data=FeatureDataContext(
-                    input_path=input_path,
+                    input_path=sources.weekly_path,
                     frame=output.frame,
                     assets=ordered_assets(output.frame),
                     features=output.feature_names,
@@ -192,6 +203,12 @@ def run(*, request: RunRequest) -> list[Path]:
                 horizons=group_horizons,
             ),
         )
+        if isinstance(group, VolatilityFeatureGroup):
+            _write_goodness(
+                group.goodness,
+                paths=paths,
+                source_path=sources.daily_path,
+            )
         logger.info(
             "Saved %s features path=%s rows=%s assets=%s",
             group_name,
@@ -204,14 +221,13 @@ def run(*, request: RunRequest) -> list[Path]:
 
 
 def _resolve_run_config(request: RunRequest) -> RunConfig:
-    return_type = _normalize_return_type(request.return_type)
     horizon_days = _normalize_horizon_days(request.horizons)
     data_lake = resolve_data_lake()
     feature_store = resolve_feature_store()
     groups = _resolve_groups(request.groups)
     return RunConfig(
         settings=FeatureSettings(
-            return_type=return_type,
+            return_type="log",
             horizon_days=horizon_days,
             eps=DEFAULT_EPSILON,
         ),
@@ -246,16 +262,6 @@ def _normalize_group_name(name: str) -> str:
     if not normalized:
         raise ConfigError("feature group name must not be empty")
     return normalized
-
-
-def _normalize_return_type(raw: str) -> ReturnType:
-    normalized = raw.strip().lower()
-    if normalized not in ("simple", "log"):
-        raise ConfigError(
-            "return-type must be simple or log",
-            context={"return_type": raw},
-        )
-    return normalized  # type: ignore[return-value]
 
 
 def _normalize_horizon_days(raw: str | None) -> list[int] | None:
@@ -326,39 +332,44 @@ def _resolve_group_horizons(
     def _momentum_factory(day: int, weeks: int) -> HorizonSpec:
         return HorizonSpec(days=day, weeks=weeks)
 
+    default_days_by_group = {
+        "momentum": list(DEFAULT_HORIZON_DAYS),
+        "mean_reversion": list(DEFAULT_MEAN_REV_HORIZON_DAYS),
+        "breakout": list(DEFAULT_BREAKOUT_DAYS),
+        "volatility": list(DEFAULT_VOLATILITY_HORIZON_DAYS),
+    }
     if horizon_days is None:
-        if group_name == "momentum":
-            days = list(DEFAULT_HORIZON_DAYS)
-            return _build_horizon_specs(days, _momentum_factory)
-        if group_name == "mean_reversion":
-            days = list(DEFAULT_MEAN_REV_HORIZON_DAYS)
-            return _build_horizon_specs(days, _momentum_factory)
-        if group_name == "breakout":
-            days = list(DEFAULT_BREAKOUT_DAYS)
-            return _build_horizon_specs(days, _momentum_factory)
+        days = default_days_by_group.get(group_name)
+    else:
+        days = list(horizon_days) if group_name in default_days_by_group else None
+    if not days:
         raise ConfigError(
             "Unknown feature group for horizons",
             context={"group": group_name},
         )
-    if group_name == "momentum":
-        return _build_horizon_specs(horizon_days, _momentum_factory)
-    if group_name == "mean_reversion":
-        return _build_horizon_specs(horizon_days, _momentum_factory)
-    if group_name == "breakout":
-        return _build_horizon_specs(horizon_days, _momentum_factory)
-    raise ConfigError(
-        "Unknown feature group for horizons",
-        context={"group": group_name},
-    )
+    return _build_horizon_specs(days, _momentum_factory)
 
 
-def _load_weekly_ohlc(
-    data_lake: Path,
-) -> tuple[pd.DataFrame, Path, str]:
+def _load_feature_inputs(
+    data_lake: Path, *, needs_daily: bool
+) -> tuple[FeatureInputs, FeatureInputSources, str]:
     latest_dir = _resolve_latest_directory(data_lake)
-    input_path = latest_dir / _WEEKLY_OHLC_NAME
-    frame = _read_weekly_ohlc(input_path)
-    return frame, input_path, latest_dir.name
+    weekly_path = latest_dir / _WEEKLY_OHLC_NAME
+    weekly_ohlc = _read_weekly_ohlc(weekly_path)
+    daily_ohlc: pd.DataFrame | None = None
+    daily_path: Path | None = None
+    if needs_daily:
+        daily_path = latest_dir / _DAILY_OHLC_NAME
+        daily_ohlc = _read_daily_ohlc(daily_path)
+    frames: dict[str, pd.DataFrame] = {"weekly_ohlc": weekly_ohlc}
+    if daily_ohlc is not None:
+        frames["daily_ohlc"] = daily_ohlc
+    inputs = FeatureInputs(frames=frames, frequency=_FREQUENCY)
+    sources = FeatureInputSources(
+        weekly_path=weekly_path,
+        daily_path=daily_path,
+    )
+    return inputs, sources, latest_dir.name
 
 
 def _resolve_latest_directory(base_dir: Path) -> Path:
@@ -393,6 +404,30 @@ def _read_weekly_ohlc(path: Path) -> pd.DataFrame:
     return frame
 
 
+def _read_daily_ohlc(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise DataSourceError(
+            "daily_ohlc.csv not found",
+            context={"path": str(path)},
+        )
+    try:
+        frame = pd.read_csv(
+            path,
+            header=[0, 1],
+            index_col=0,
+            parse_dates=[0],
+        )
+    except Exception as exc:
+        raise DataSourceError(
+            "Failed to read daily_ohlc CSV",
+            context={"path": str(path)},
+        ) from exc
+    require_utc_hourly_index(
+        frame.index, label="daily_ohlc", timezone=_TENSOR_TIMEZONE
+    )
+    return frame
+
+
 def _build_group(
     name: str, config: RunConfig, horizons: Sequence[HorizonLike]
 ) -> FeatureGroup:
@@ -403,7 +438,6 @@ def _build_group(
         ]
         momentum_config = MomentumConfig(
             horizons=momentum_horizons,
-            return_type=config.settings.return_type,
             eps=config.settings.eps,
             features=config.selection.features,
         )
@@ -429,6 +463,17 @@ def _build_group(
             features=config.selection.features,
         )
         return BreakoutFeatureGroup(breakout_config)
+    if name == "volatility":
+        volatility_horizons = [
+            HorizonSpec(days=spec.days, weeks=spec.weeks)
+            for spec in horizons
+        ]
+        volatility_config = VolatilityConfig(
+            horizons=volatility_horizons,
+            eps=config.settings.eps,
+            features=config.selection.features,
+        )
+        return VolatilityFeatureGroup(volatility_config)
     raise ConfigError(
         "Feature group implementation unavailable",
         context={"group": name},
@@ -452,6 +497,7 @@ def _prepare_output_paths(
         output_path=output_dir / _OUTPUT_NAMES.output_name,
         metadata_path=output_dir / _OUTPUT_NAMES.metadata_name,
         tensor_path=output_dir / _TENSOR_NAME,
+        goodness_path=output_dir / _GOODNESS_NAME,
     )
 
 
@@ -474,6 +520,45 @@ def _write_outputs(
     )
     payload = _build_metadata(metadata, feature_names)
     writer.write_metadata(payload, paths.metadata_path)
+
+
+def _write_goodness(
+    goodness: VolatilityGoodness | None,
+    *,
+    paths: FeatureOutputPaths,
+    source_path: Path | None,
+) -> None:
+    if goodness is None:
+        return
+    if source_path is None:
+        raise DataProcessingError(
+            "daily_ohlc source path is required for goodness output",
+            context={"path": str(paths.goodness_path)},
+        )
+    payload = _build_goodness_payload(
+        goodness,
+        source_path=source_path,
+        destination_path=paths.output_path,
+    )
+    writer = _build_output_writer()
+    writer.write_metadata(payload, paths.goodness_path)
+
+
+def _build_goodness_payload(
+    goodness: VolatilityGoodness,
+    *,
+    source_path: Path,
+    destination_path: Path,
+) -> dict[str, object]:
+    return {
+        "group": "volatility",
+        "run_at": format_run_at(datetime.now(timezone.utc)),
+        "source": format_tilde_path(source_path),
+        "dest": format_tilde_path(destination_path),
+        "ratio_definition": "valid_daily_ohlc / horizon_days",
+        "horizon_days_by_feature": dict(goodness.horizon_days_by_feature),
+        "ratios_by_feature": goodness.ratios_by_feature,
+    }
 
 
 def _build_output_writer() -> OutputWriter:

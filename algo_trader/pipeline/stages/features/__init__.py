@@ -40,6 +40,13 @@ from .seasonal import (
     SeasonalConfig,
     SeasonalFeatureGroup,
 )
+from .regime import (
+    DEFAULT_HORIZON_DAYS as DEFAULT_REGIME_HORIZON_DAYS,
+    SUPPORTED_FEATURES as REGIME_FEATURES,
+    RegimeConfig,
+    RegimeFeatureGroup,
+    RegimeGoodness,
+)
 
 __all__ = [
     "FeatureFrequency",
@@ -76,4 +83,9 @@ __all__ = [
     "SEASONAL_FEATURES",
     "SeasonalConfig",
     "SeasonalFeatureGroup",
+    "DEFAULT_REGIME_HORIZON_DAYS",
+    "REGIME_FEATURES",
+    "RegimeConfig",
+    "RegimeFeatureGroup",
+    "RegimeGoodness",
 ]

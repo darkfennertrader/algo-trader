@@ -31,6 +31,11 @@ from .seasonal import (
     SeasonalConfig,
     SeasonalFeatureGroup,
 )
+from .regime import (
+    DEFAULT_HORIZON_DAYS as DEFAULT_REGIME_DAYS,
+    RegimeConfig,
+    RegimeFeatureGroup,
+)
 
 
 @dataclass
@@ -119,6 +124,15 @@ def default_registry() -> FeatureRegistry:
         "seasonal",
         SeasonalFeatureGroup(
             SeasonalConfig(horizons=seasonal_horizons)
+        ),
+    )
+    regime_horizons = [
+        HorizonSpec(days=days, weeks=days // 5) for days in DEFAULT_REGIME_DAYS
+    ]
+    registry.register(
+        "regime",
+        RegimeFeatureGroup(
+            RegimeConfig(horizons=regime_horizons)
         ),
     )
     return registry

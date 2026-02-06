@@ -11,7 +11,7 @@ from ..horizons import HorizonSpec
 from ..momentum import MomentumConfig, MomentumFeatureGroup
 from ..mean_reversion import MeanReversionConfig, MeanReversionFeatureGroup
 from ..protocols import FeatureGroup, FeatureInputs, FeatureOutput
-from ..utils import normalize_feature_set, ordered_assets
+from ..utils import normalize_feature_set, ordered_assets, reindex_asset_features
 from ..volatility import VolatilityConfig, VolatilityFeatureGroup
 
 DEFAULT_HORIZON_DAYS: tuple[int, ...] = (5, 20, 60, 130)
@@ -167,15 +167,7 @@ def _build_cross_sectional_features(
             frames.append(_attach_feature(ranked, name))
     combined = pd.concat(frames, axis=1)
     combined.columns = combined.columns.set_names(["asset", "feature"])
-    combined = combined.reindex(
-        columns=pd.MultiIndex.from_product(
-            [
-                pd.Index(assets, name="asset"),
-                pd.Index(feature_names, name="feature"),
-            ],
-            names=["asset", "feature"],
-        )
-    )
+    combined = reindex_asset_features(combined, assets, feature_names)
     return combined, feature_names
 
 

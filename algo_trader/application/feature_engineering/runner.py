@@ -71,6 +71,13 @@ from algo_trader.pipeline.stages.features.seasonal import (
     SeasonalConfig,
     SeasonalFeatureGroup,
 )
+from algo_trader.pipeline.stages.features.regime import (
+    DEFAULT_EPSILON as DEFAULT_REGIME_EPSILON,
+    DEFAULT_HORIZON_DAYS as DEFAULT_REGIME_HORIZON_DAYS,
+    RegimeConfig,
+    RegimeFeatureGroup,
+    RegimeGoodness,
+)
 from algo_trader.pipeline.stages.features.registry import default_registry
 from ..data_sources import resolve_data_lake, resolve_feature_store
 
@@ -197,7 +204,7 @@ def run(*, request: RunRequest) -> list[Path]:
     config = _resolve_run_config(request)
     needs_daily = bool(
         set(config.selection.groups).intersection(
-            {"volatility", "seasonal", "cross_sectional"}
+            {"volatility", "seasonal", "cross_sectional", "regime"}
         )
     )
     inputs, sources, version_label = _load_feature_inputs(
@@ -374,6 +381,7 @@ def _resolve_group_horizons(
         "cross_sectional": list(DEFAULT_CROSS_SECTIONAL_HORIZON_DAYS),
         "volatility": list(DEFAULT_VOLATILITY_HORIZON_DAYS),
         "seasonal": list(DEFAULT_SEASONAL_HORIZON_DAYS),
+        "regime": list(DEFAULT_REGIME_HORIZON_DAYS),
     }
     if horizon_days is None:
         days = default_days_by_group.get(group_name)
@@ -468,74 +476,110 @@ def _read_daily_ohlc(path: Path) -> pd.DataFrame:
 def _build_group(
     name: str, config: RunConfig, horizons: Sequence[HorizonLike]
 ) -> FeatureGroup:
-    if name == "momentum":
-        momentum_horizons = [
-            HorizonSpec(days=spec.days, weeks=spec.weeks)
-            for spec in horizons
-        ]
-        momentum_config = MomentumConfig(
-            horizons=momentum_horizons,
-            eps=config.settings.eps,
-            features=config.selection.features,
+    builders: dict[str, Callable[[RunConfig, Sequence[HorizonLike]], FeatureGroup]] = {
+        "momentum": _build_momentum_group,
+        "mean_reversion": _build_mean_reversion_group,
+        "breakout": _build_breakout_group,
+        "cross_sectional": _build_cross_sectional_group,
+        "volatility": _build_volatility_group,
+        "seasonal": _build_seasonal_group,
+        "regime": _build_regime_group,
+    }
+    builder = builders.get(name)
+    if builder is None:
+        raise ConfigError(
+            "Feature group implementation unavailable",
+            context={"group": name},
         )
-        return MomentumFeatureGroup(momentum_config)
-    if name == "mean_reversion":
-        mean_rev_horizons = [
-            HorizonSpec(days=spec.days, weeks=spec.weeks)
-            for spec in horizons
-        ]
-        mean_rev_config = MeanReversionConfig(
-            horizons=mean_rev_horizons,
-            eps=config.settings.eps,
-            features=config.selection.features,
-        )
-        return MeanReversionFeatureGroup(mean_rev_config)
-    if name == "breakout":
-        breakout_horizons = [
-            HorizonSpec(days=spec.days, weeks=spec.weeks)
-            for spec in horizons
-        ]
-        breakout_config = BreakoutConfig(
-            horizons=breakout_horizons,
-            features=config.selection.features,
-        )
-        return BreakoutFeatureGroup(breakout_config)
-    if name == "cross_sectional":
-        cross_sectional_horizons = [
-            HorizonSpec(days=spec.days, weeks=spec.weeks)
-            for spec in horizons
-        ]
-        cross_sectional_config = CrossSectionalConfig(
-            horizons=cross_sectional_horizons,
-            eps=config.settings.eps,
-            features=config.selection.features,
-        )
-        return CrossSectionalFeatureGroup(cross_sectional_config)
-    if name == "volatility":
-        volatility_horizons = [
-            HorizonSpec(days=spec.days, weeks=spec.weeks)
-            for spec in horizons
-        ]
-        volatility_config = VolatilityConfig(
-            horizons=volatility_horizons,
-            eps=config.settings.eps,
-            features=config.selection.features,
-        )
-        return VolatilityFeatureGroup(volatility_config)
-    if name == "seasonal":
-        seasonal_horizons = [
-            HorizonSpec(days=spec.days, weeks=spec.weeks)
-            for spec in horizons
-        ]
-        seasonal_config = SeasonalConfig(
-            horizons=seasonal_horizons,
-            features=config.selection.features,
-        )
-        return SeasonalFeatureGroup(seasonal_config)
-    raise ConfigError(
-        "Feature group implementation unavailable",
-        context={"group": name},
+    return builder(config, horizons)
+
+
+def _build_horizon_specs_for_group(
+    horizons: Sequence[HorizonLike],
+) -> list[HorizonSpec]:
+    return [HorizonSpec(days=spec.days, weeks=spec.weeks) for spec in horizons]
+
+
+def _build_momentum_group(
+    config: RunConfig, horizons: Sequence[HorizonLike]
+) -> FeatureGroup:
+    momentum_horizons = _build_horizon_specs_for_group(horizons)
+    momentum_config = MomentumConfig(
+        horizons=momentum_horizons,
+        eps=config.settings.eps,
+        features=config.selection.features,
     )
+    return MomentumFeatureGroup(momentum_config)
+
+
+def _build_mean_reversion_group(
+    config: RunConfig, horizons: Sequence[HorizonLike]
+) -> FeatureGroup:
+    mean_rev_horizons = _build_horizon_specs_for_group(horizons)
+    mean_rev_config = MeanReversionConfig(
+        horizons=mean_rev_horizons,
+        eps=config.settings.eps,
+        features=config.selection.features,
+    )
+    return MeanReversionFeatureGroup(mean_rev_config)
+
+
+def _build_breakout_group(
+    config: RunConfig, horizons: Sequence[HorizonLike]
+) -> FeatureGroup:
+    breakout_horizons = _build_horizon_specs_for_group(horizons)
+    breakout_config = BreakoutConfig(
+        horizons=breakout_horizons,
+        features=config.selection.features,
+    )
+    return BreakoutFeatureGroup(breakout_config)
+
+
+def _build_cross_sectional_group(
+    config: RunConfig, horizons: Sequence[HorizonLike]
+) -> FeatureGroup:
+    cross_sectional_horizons = _build_horizon_specs_for_group(horizons)
+    cross_sectional_config = CrossSectionalConfig(
+        horizons=cross_sectional_horizons,
+        eps=config.settings.eps,
+        features=config.selection.features,
+    )
+    return CrossSectionalFeatureGroup(cross_sectional_config)
+
+
+def _build_volatility_group(
+    config: RunConfig, horizons: Sequence[HorizonLike]
+) -> FeatureGroup:
+    volatility_horizons = _build_horizon_specs_for_group(horizons)
+    volatility_config = VolatilityConfig(
+        horizons=volatility_horizons,
+        eps=config.settings.eps,
+        features=config.selection.features,
+    )
+    return VolatilityFeatureGroup(volatility_config)
+
+
+def _build_seasonal_group(
+    config: RunConfig, horizons: Sequence[HorizonLike]
+) -> FeatureGroup:
+    seasonal_horizons = _build_horizon_specs_for_group(horizons)
+    seasonal_config = SeasonalConfig(
+        horizons=seasonal_horizons,
+        features=config.selection.features,
+    )
+    return SeasonalFeatureGroup(seasonal_config)
+
+
+def _build_regime_group(
+    config: RunConfig, horizons: Sequence[HorizonLike]
+) -> FeatureGroup:
+    regime_horizons = _build_horizon_specs_for_group(horizons)
+    regime_config = RegimeConfig(
+        horizons=regime_horizons,
+        eps=DEFAULT_REGIME_EPSILON,
+        features=config.selection.features,
+    )
+    return RegimeFeatureGroup(regime_config)
 
 
 def _prepare_output_paths(
@@ -600,6 +644,19 @@ def _build_goodness_payload(
             source_path=context.sources.daily_path,
             destination_path=context.paths.output_path,
         )
+    if isinstance(group, RegimeFeatureGroup):
+        if group.goodness is None:
+            return None
+        if context.sources.daily_path is None:
+            raise DataProcessingError(
+                "daily_ohlc source path is required for goodness output",
+                context={"path": str(context.paths.goodness_path)},
+            )
+        return _build_regime_goodness_payload(
+            group.goodness,
+            source_path=context.sources.daily_path,
+            destination_path=context.paths.output_path,
+        )
     weekly = require_weekly_ohlc(context.inputs)
     horizon_days_by_feature = _weekly_horizon_days_by_feature(
         context.group_name, context.output.feature_names
@@ -654,6 +711,23 @@ def _build_volatility_goodness_payload(
     }
 
 
+def _build_regime_goodness_payload(
+    goodness: RegimeGoodness,
+    *,
+    source_path: Path,
+    destination_path: Path,
+) -> dict[str, object]:
+    return {
+        "group": "regime",
+        "run_at": format_run_at(datetime.now(timezone.utc)),
+        "source": format_tilde_path(source_path),
+        "dest": format_tilde_path(destination_path),
+        "ratio_definition": "valid_daily_ohlc / horizon_days",
+        "horizon_days_by_feature": dict(goodness.horizon_days_by_feature),
+        "ratios_by_feature": goodness.ratios_by_feature,
+    }
+
+
 def _weekly_horizon_days_by_feature(
     group_name: str, feature_names: Sequence[str]
 ) -> dict[str, int]:
@@ -675,6 +749,7 @@ def _feature_weeks(group_name: str, feature_name: str) -> int | None:
         "breakout": _parse_weeks_suffix,
         "cross_sectional": _cross_sectional_feature_weeks,
         "seasonal": _parse_weeks_suffix,
+        "regime": _parse_weeks_suffix,
     }
     handler = handlers.get(group_name)
     if handler is None:

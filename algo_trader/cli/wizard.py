@@ -20,6 +20,9 @@ from algo_trader.pipeline.stages.features.momentum import (
 from algo_trader.pipeline.stages.features.volatility import (
     SUPPORTED_FEATURES as VOLATILITY_FEATURES,
 )
+from algo_trader.pipeline.stages.features.regime import (
+    SUPPORTED_FEATURES as REGIME_FEATURES,
+)
 from algo_trader.preprocessing import default_registry as preprocessor_registry
 
 
@@ -102,7 +105,8 @@ def _feature_engineering_command() -> WizardCommand:
     horizons = _prompt_optional(
         "horizons in days (blank for defaults: momentum 5,20,60,130; "
         "mean_reversion 5,20,60,130; breakout 5,20,60,130; "
-        "cross_sectional 5,20,60,130; volatility 5,20,60,130). "
+        "cross_sectional 5,20,60,130; volatility 5,20,60,130; "
+        "regime 5,20,60,130). "
         "When set, applies to all groups"
     )
     groups = _prompt_feature_groups()
@@ -369,4 +373,5 @@ def _feature_keys_by_group() -> dict[str, list[str]]:
         "breakout": sorted(BREAKOUT_FEATURES),
         "cross_sectional": sorted(CROSS_SECTIONAL_FEATURES),
         "volatility": sorted(VOLATILITY_FEATURES),
+        "regime": sorted(REGIME_FEATURES),
     }

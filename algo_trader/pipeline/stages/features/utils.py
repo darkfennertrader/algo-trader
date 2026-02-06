@@ -18,6 +18,22 @@ def ordered_assets(frame: pd.DataFrame) -> list[str]:
     return assets
 
 
+def reindex_asset_features(
+    frame: pd.DataFrame,
+    assets: Sequence[str],
+    feature_names: Sequence[str],
+) -> pd.DataFrame:
+    return frame.reindex(
+        columns=pd.MultiIndex.from_product(
+            [
+                pd.Index(assets, name="asset"),
+                pd.Index(feature_names, name="feature"),
+            ],
+            names=["asset", "feature"],
+        )
+    )
+
+
 def asset_frame(frame: pd.DataFrame, asset: str) -> pd.DataFrame:
     asset_slice = frame.xs(asset, axis=1, level=0, drop_level=True)
     if isinstance(asset_slice, pd.Series):
@@ -166,6 +182,24 @@ def normalize_feature_set(
             context={"features": ",".join(unknown)},
         )
     return normalized
+
+
+def prepare_weekly_daily_inputs(
+    inputs: FeatureInputs,
+    *,
+    features: Sequence[str] | None,
+    supported_features: Sequence[str],
+    error_message: str,
+) -> tuple[set[str], pd.DataFrame, pd.DataFrame, Sequence[str]]:
+    feature_set = normalize_feature_set(
+        features,
+        supported_features,
+        error_message=error_message,
+    )
+    weekly_ohlc = require_weekly_ohlc(inputs)
+    daily_ohlc = require_daily_ohlc(inputs)
+    assets = ordered_assets(weekly_ohlc)
+    return feature_set, weekly_ohlc, daily_ohlc, assets
 
 
 ConfigT = TypeVar("ConfigT")

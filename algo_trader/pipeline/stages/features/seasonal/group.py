@@ -16,13 +16,10 @@ from algo_trader.pipeline.stages.features.protocols import (
 from ..utils import (
     asset_frame,
     load_asset_daily,
-    normalize_feature_set,
-    ordered_assets,
-    require_daily_ohlc,
+    prepare_weekly_daily_inputs,
     require_datetime_index,
     require_no_missing,
     require_weekly_index,
-    require_weekly_ohlc,
     week_end_by_start,
     week_start_index,
 )
@@ -62,11 +59,13 @@ class SeasonalFeatureGroup(FeatureGroup):
         return self._missing_weekdays
 
     def compute(self, inputs: FeatureInputs) -> FeatureOutput:
-        feature_set, weekly_ohlc, daily_ohlc, assets = _prepare_inputs(
-            inputs,
-            features=self._config.features,
-            supported_features=type(self).supported_features,
-            error_message=type(self).error_message,
+        feature_set, weekly_ohlc, daily_ohlc, assets = (
+            prepare_weekly_daily_inputs(
+                inputs,
+                features=self._config.features,
+                supported_features=type(self).supported_features,
+                error_message=type(self).error_message,
+            )
         )
         if not assets:
             return FeatureOutput(frame=pd.DataFrame(), feature_names=[])
@@ -90,24 +89,6 @@ class _SeasonalContext:
     week_end_by_week_start: pd.Series
     horizons: Sequence[HorizonSpec]
     feature_set: set[str]
-
-
-def _prepare_inputs(
-    inputs: FeatureInputs,
-    *,
-    features: Sequence[str] | None,
-    supported_features: Sequence[str],
-    error_message: str,
-) -> tuple[set[str], pd.DataFrame, pd.DataFrame, Sequence[str]]:
-    feature_set = normalize_feature_set(
-        features,
-        supported_features,
-        error_message=error_message,
-    )
-    weekly_ohlc = require_weekly_ohlc(inputs)
-    daily_ohlc = require_daily_ohlc(inputs)
-    assets = ordered_assets(weekly_ohlc)
-    return feature_set, weekly_ohlc, daily_ohlc, assets
 
 
 def _build_context(

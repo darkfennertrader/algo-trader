@@ -7,6 +7,12 @@ from .utils import (
     require_weekly_ohlc,
     serialize_series,
 )
+from .cross_sectional import (
+    DEFAULT_HORIZON_DAYS as DEFAULT_CROSS_SECTIONAL_HORIZON_DAYS,
+    SUPPORTED_FEATURES as CROSS_SECTIONAL_FEATURES,
+    CrossSectionalConfig,
+    CrossSectionalFeatureGroup,
+)
 from .breakout import (
     DEFAULT_HORIZON_DAYS as DEFAULT_BREAKOUT_HORIZON_DAYS,
     SUPPORTED_FEATURES as BREAKOUT_FEATURES,
@@ -47,6 +53,10 @@ __all__ = [
     "ordered_assets",
     "require_weekly_ohlc",
     "serialize_series",
+    "DEFAULT_CROSS_SECTIONAL_HORIZON_DAYS",
+    "CROSS_SECTIONAL_FEATURES",
+    "CrossSectionalConfig",
+    "CrossSectionalFeatureGroup",
     "DEFAULT_BREAKOUT_HORIZON_DAYS",
     "BREAKOUT_FEATURES",
     "BreakoutConfig",

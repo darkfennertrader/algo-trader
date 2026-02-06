@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 from algo_trader.domain import ConfigError
 from .protocols import FeatureGroup
 from .horizons import HorizonSpec
+from .cross_sectional import (
+    DEFAULT_HORIZON_DAYS as DEFAULT_CROSS_SECTIONAL_DAYS,
+    CrossSectionalConfig,
+    CrossSectionalFeatureGroup,
+)
 from .breakout import (
     DEFAULT_HORIZON_DAYS as DEFAULT_BREAKOUT_DAYS,
     BreakoutConfig,
@@ -86,6 +91,16 @@ def default_registry() -> FeatureRegistry:
     registry.register(
         "breakout",
         BreakoutFeatureGroup(BreakoutConfig(horizons=breakout_horizons)),
+    )
+    cross_sectional_horizons = [
+        HorizonSpec(days=days, weeks=days // 5)
+        for days in DEFAULT_CROSS_SECTIONAL_DAYS
+    ]
+    registry.register(
+        "cross_sectional",
+        CrossSectionalFeatureGroup(
+            CrossSectionalConfig(horizons=cross_sectional_horizons)
+        ),
     )
     volatility_horizons = [
         HorizonSpec(days=days, weeks=days // 5)

@@ -39,6 +39,11 @@ from algo_trader.pipeline.stages.features import (
     require_weekly_ohlc,
     serialize_series,
 )
+from algo_trader.pipeline.stages.features.cross_sectional import (
+    DEFAULT_HORIZON_DAYS as DEFAULT_CROSS_SECTIONAL_HORIZON_DAYS,
+    CrossSectionalConfig,
+    CrossSectionalFeatureGroup,
+)
 from algo_trader.pipeline.stages.features.breakout import (
     DEFAULT_HORIZON_DAYS as DEFAULT_BREAKOUT_DAYS,
     BreakoutConfig,
@@ -191,7 +196,9 @@ def _run_context(request: RunRequest) -> dict[str, str]:
 def run(*, request: RunRequest) -> list[Path]:
     config = _resolve_run_config(request)
     needs_daily = bool(
-        set(config.selection.groups).intersection({"volatility", "seasonal"})
+        set(config.selection.groups).intersection(
+            {"volatility", "seasonal", "cross_sectional"}
+        )
     )
     inputs, sources, version_label = _load_feature_inputs(
         config.paths.data_lake, needs_daily=needs_daily
@@ -364,6 +371,7 @@ def _resolve_group_horizons(
         "momentum": list(DEFAULT_HORIZON_DAYS),
         "mean_reversion": list(DEFAULT_MEAN_REV_HORIZON_DAYS),
         "breakout": list(DEFAULT_BREAKOUT_DAYS),
+        "cross_sectional": list(DEFAULT_CROSS_SECTIONAL_HORIZON_DAYS),
         "volatility": list(DEFAULT_VOLATILITY_HORIZON_DAYS),
         "seasonal": list(DEFAULT_SEASONAL_HORIZON_DAYS),
     }
@@ -492,6 +500,17 @@ def _build_group(
             features=config.selection.features,
         )
         return BreakoutFeatureGroup(breakout_config)
+    if name == "cross_sectional":
+        cross_sectional_horizons = [
+            HorizonSpec(days=spec.days, weeks=spec.weeks)
+            for spec in horizons
+        ]
+        cross_sectional_config = CrossSectionalConfig(
+            horizons=cross_sectional_horizons,
+            eps=config.settings.eps,
+            features=config.selection.features,
+        )
+        return CrossSectionalFeatureGroup(cross_sectional_config)
     if name == "volatility":
         volatility_horizons = [
             HorizonSpec(days=spec.days, weeks=spec.weeks)
@@ -654,6 +673,7 @@ def _feature_weeks(group_name: str, feature_name: str) -> int | None:
         "momentum": _momentum_feature_weeks,
         "mean_reversion": _mean_reversion_feature_weeks,
         "breakout": _parse_weeks_suffix,
+        "cross_sectional": _cross_sectional_feature_weeks,
         "seasonal": _parse_weeks_suffix,
     }
     handler = handlers.get(group_name)
@@ -675,6 +695,15 @@ def _mean_reversion_feature_weeks(feature_name: str) -> int | None:
     if feature_name == "range_pos_1w":
         return 1
     return _parse_weeks_suffix(feature_name)
+
+
+def _cross_sectional_feature_weeks(feature_name: str) -> int | None:
+    prefixes = ("cs_centered_", "cs_rank_")
+    for prefix in prefixes:
+        if feature_name.startswith(prefix):
+            base = feature_name[len(prefix) :]
+            return _parse_weeks_suffix(base)
+    return None
 
 
 def _parse_weeks_suffix(feature_name: str) -> int | None:

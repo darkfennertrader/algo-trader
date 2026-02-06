@@ -25,7 +25,7 @@ Data cleaning return options:
 
 ### Feature engineering
 
-Compute feature groups from data-cleaning outputs (weekly momentum/mean-reversion/breakout plus daily-input volatility features, all output weekly).
+Compute feature groups from data-cleaning outputs (weekly momentum/mean-reversion/breakout plus daily-input volatility features, all output weekly), plus cross-sectional transforms.
 
 ```bash
 uv run algotrader feature_engineering \
@@ -42,11 +42,12 @@ Args and defaults:
   - seasonal: `60,130`
   When provided, the same horizons are applied to all selected groups.
 - `group`: feature group to compute (repeatable; default = all registered groups).
-   Valid values: `momentum`, `mean_reversion`, `breakout`, `volatility`, `seasonal`.
+   Valid values: `momentum`, `mean_reversion`, `breakout`, `cross_sectional`, `volatility`, `seasonal`.
 - `feature`: feature key within a group (repeatable; default = group default set).
   - momentum keys: `momentum`, `vol_scaled_momentum`, `slope`, `ema_spread`
   - mean_reversion keys: `z_price_ema`, `z_price_med`, `donch_pos`, `rsi_centered`, `rev`, `shock`, `range_pos`, `range_z`
   - breakout keys: `brk_up`, `brk_dn`
+  - cross_sectional keys: `cs_centered`, `cs_rank`
   - volatility keys: `vol_cc_d`, `atrp_d`, `vol_range_parkinson_d`, `vol_regime_cc`, `vov_norm`, `vol_ts_cc_1w_4w`, `vol_ts_cc_4w_12w`, `vol_ts_cc_4w_26w`, `vol_ts_atr_4w_12w`, `downside_vol_d_4w`, `upside_vol_d_4w`, `down_up_vol_ratio_4w`, `realized_skew_d_12w`, `realized_kurt_d_12w`, `tail_5p_sigma_ratio_12w`, `jump_freq_4w`
   - seasonal keys: `dow_alpha`, `dow_spread`
 
@@ -59,6 +60,7 @@ Notes:
 - Weekly inputs are loaded from `DATA_LAKE_SOURCE/YYYY-WW/weekly_ohlc.csv`.
 - Volatility features use daily inputs from `DATA_LAKE_SOURCE/YYYY-WW/daily_ohlc.csv` and are sampled to weekly output.
 - Seasonal features use daily inputs from `DATA_LAKE_SOURCE/YYYY-WW/daily_ohlc.csv` and are sampled to weekly output.
+- Cross-sectional features use both weekly and daily inputs because they derive from momentum, mean-reversion, and volatility base features.
 - Missing weekly OHLC values for any asset will raise an error.
 - Metadata includes `feature_name_units` and `days_to_weeks` for horizon mapping.
 
@@ -114,6 +116,32 @@ Missing daily OHLC rows are dropped before indicator computation; data-quality r
 - `tail_5p_sigma_ratio_12w`: log ratio of empirical 5% tail vs 1.645*sigma_12w (eps=1e-6).
 - `jump_freq_4w`: fraction of last 4w days with |r| > 2*sigma_12w.
 
+#### Cross-sectional group features
+
+Computed on weekly output by applying cross-sectional transforms to a fixed base feature set. For each week t, U_t is the assets with valid base features and N_eff(t) is the count.
+
+- `cs_centered_*`: base feature minus the cross-sectional mean at week t.
+- `cs_rank_*`: cross-sectional percentile rank at week t using average rank for ties: (rank - 0.5) / N_eff(t).
+
+Base features (examples: `cs_centered_mom_4w`, `cs_rank_vol_cc_d_4w`):
+
+Trend:
+- `mom_4w`, `mom_12w`
+- `z_mom_4w`, `z_mom_12w`
+
+Mean-reversion:
+- `z_price_ema_12w`, `z_price_ema_26w`
+- `z_price_med_26w`
+- `rev_1w`
+- `shock_4w`
+
+Vol/tail/jump:
+- `vol_cc_d_1w`, `vol_cc_d_4w`, `vol_cc_d_12w`, `vol_cc_d_26w`
+- `downside_vol_d_4w`, `upside_vol_d_4w`
+- `realized_skew_d_12w`, `realized_kurt_d_12w`
+- `tail_5p_sigma_ratio_12w`
+- `jump_freq_4w`
+
 #### Seasonal group features
 
 Computed on daily OHLC data per asset, then sampled to weekly output (horizons shown in weeks; defaults = 12, 26).
@@ -148,6 +176,10 @@ Mean-reversion:
 Breakout:
 - `brk_up`: 1 if close exceeds the prior rolling high over the horizon.
 - `brk_dn`: 1 if close breaks below the prior rolling low over the horizon.
+
+Cross-sectional:
+- `cs_centered`: base feature minus the cross-sectional mean at week t.
+- `cs_rank`: cross-sectional percentile rank at week t using average rank for ties.
 
 Volatility:
 

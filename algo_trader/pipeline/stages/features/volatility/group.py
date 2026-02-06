@@ -21,7 +21,6 @@ from .asymmetry import (
 )
 from .common import (
     log_ratio,
-    require_datetime_index,
     to_weekly,
     week_end_by_start,
 )
@@ -41,12 +40,14 @@ from .term_structure import (
 )
 from ..utils import (
     asset_frame,
+    load_asset_daily,
     normalize_feature_set,
     ordered_assets,
     require_daily_ohlc,
     require_no_missing,
-    require_ohlc_columns,
+    require_weekly_index,
     require_weekly_ohlc,
+    serialize_series,
 )
 
 DEFAULT_HORIZON_DAYS: tuple[int, ...] = (5, 20, 60, 130)
@@ -171,7 +172,7 @@ def _build_context(
     assets: Sequence[str],
 ) -> _VolatilityContext:
     require_no_missing(weekly_ohlc, assets)
-    weekly_index = _require_weekly_index(weekly_ohlc)
+    weekly_index = require_weekly_index(weekly_ohlc)
     week_end_by_week_start = week_end_by_start(weekly_index)
     plan = _build_feature_plan(config.horizons, feature_set)
     return _VolatilityContext(
@@ -195,7 +196,7 @@ def _compute_assets(
         feature: {} for feature in context.plan.horizon_days_by_feature
     }
     for asset in assets:
-        asset_daily = _load_asset_daily(daily_ohlc, asset)
+        asset_daily = load_asset_daily(daily_ohlc, asset)
         feature_frame, ratio_payload = _compute_asset_features(
             asset_daily,
             context=context,
@@ -204,17 +205,6 @@ def _compute_assets(
         for feature_name, values in ratio_payload.items():
             ratios_by_feature[feature_name][asset] = values
     return features_by_asset, ratios_by_feature
-
-
-def _load_asset_daily(daily_ohlc: pd.DataFrame, asset: str) -> pd.DataFrame:
-    if asset not in daily_ohlc.columns.get_level_values(0):
-        raise DataProcessingError(
-            "daily_ohlc missing asset",
-            context={"asset": asset},
-        )
-    asset_daily = asset_frame(daily_ohlc, asset)
-    require_ohlc_columns(asset_daily, label="daily_ohlc")
-    return asset_daily
 
 
 @dataclass(frozen=True)
@@ -635,17 +625,8 @@ def _compute_goodness_ratios(
         )
     for feature_name, horizon_days in horizon_days_by_feature.items():
         series = ratios_by_horizon[horizon_days]
-        ratios_by_feature[feature_name] = _serialize_series(series)
+        ratios_by_feature[feature_name] = serialize_series(series)
     return ratios_by_feature
-
-
-def _require_weekly_index(frame: pd.DataFrame) -> pd.DatetimeIndex:
-    if not isinstance(frame.index, pd.DatetimeIndex):
-        raise DataProcessingError(
-            "weekly_ohlc index must be datetime",
-            context={"index_type": type(frame.index).__name__},
-        )
-    return frame.index
 
 
 def _require_positive_close(close: pd.Series) -> None:
@@ -687,21 +668,6 @@ def _n_eff_ratio(asset_daily: pd.DataFrame, horizon_days: int) -> pd.Series:
         window=horizon_days, min_periods=horizon_days
     ).sum()
     return counts / float(horizon_days)
-
-
-def _serialize_series(series: pd.Series) -> dict[str, float | None]:
-    payload: dict[str, float | None] = {}
-    index = require_datetime_index(series.index, label="weekly_feature")
-    values = series.to_numpy(dtype=float)
-    for stamp, value in zip(index, values, strict=False):
-        if pd.isna(stamp):
-            continue
-        key = stamp.isoformat()
-        if pd.isna(value):
-            payload[key] = None
-        else:
-            payload[key] = float(value)
-    return payload
 
 
 def _close_to_close_returns(close: pd.Series) -> pd.Series:

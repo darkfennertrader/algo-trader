@@ -99,6 +99,57 @@ def require_ohlc_columns(frame: pd.DataFrame, *, label: str = "weekly_ohlc") -> 
         )
 
 
+def require_datetime_index(
+    index: pd.Index, *, label: str
+) -> pd.DatetimeIndex:
+    if not isinstance(index, pd.DatetimeIndex):
+        raise DataProcessingError(
+            f"{label} index must be datetime",
+            context={"index_type": type(index).__name__},
+        )
+    return index
+
+
+def require_weekly_index(
+    frame: pd.DataFrame, *, label: str = "weekly_ohlc"
+) -> pd.DatetimeIndex:
+    if not isinstance(frame.index, pd.DatetimeIndex):
+        raise DataProcessingError(
+            f"{label} index must be datetime",
+            context={"index_type": type(frame.index).__name__},
+        )
+    return frame.index
+
+
+def week_start_index(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    normalized = index.normalize()
+    offsets = pd.to_timedelta(normalized.dayofweek, unit="D")
+    return normalized - offsets
+
+
+def week_end_by_start(index: pd.DatetimeIndex) -> pd.Series:
+    if index.empty:
+        return pd.Series(dtype="datetime64[ns]")
+    week_start = week_start_index(index)
+    return pd.Series(index, index=week_start).groupby(level=0).max()
+
+
+def load_asset_daily(
+    daily_ohlc: pd.DataFrame,
+    asset: str,
+    *,
+    label: str = "daily_ohlc",
+) -> pd.DataFrame:
+    if asset not in daily_ohlc.columns.get_level_values(0):
+        raise DataProcessingError(
+            f"{label} missing asset",
+            context={"asset": asset},
+        )
+    asset_daily = asset_frame(daily_ohlc, asset)
+    require_ohlc_columns(asset_daily, label=label)
+    return asset_daily
+
+
 def normalize_feature_set(
     features: Sequence[str] | None,
     supported: Sequence[str],
@@ -159,3 +210,16 @@ def compute_weekly_group_features(
             asset_data, config, feature_set
         ),
     )
+
+
+def serialize_series(series: pd.Series) -> dict[str, float | None]:
+    payload: dict[str, float | None] = {}
+    index = require_datetime_index(series.index, label="feature_series")
+    values = series.to_numpy(dtype=float)
+    for stamp, value in zip(index, values, strict=False):
+        key = stamp.isoformat()
+        if pd.isna(value):
+            payload[key] = None
+        else:
+            payload[key] = float(value)
+    return payload

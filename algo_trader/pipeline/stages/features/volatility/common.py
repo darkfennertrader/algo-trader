@@ -3,31 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from algo_trader.domain import DataProcessingError
-
-
-def require_datetime_index(
-    index: pd.Index, *, label: str
-) -> pd.DatetimeIndex:
-    if not isinstance(index, pd.DatetimeIndex):
-        raise DataProcessingError(
-            f"{label} index must be datetime",
-            context={"index_type": type(index).__name__},
-        )
-    return index
-
-
-def week_start_index(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    normalized = index.normalize()
-    offsets = pd.to_timedelta(normalized.dayofweek, unit="D")
-    return normalized - offsets
-
-
-def week_end_by_start(index: pd.DatetimeIndex) -> pd.Series:
-    if index.empty:
-        return pd.Series(dtype="datetime64[ns]")
-    week_start = week_start_index(index)
-    return pd.Series(index, index=week_start).groupby(level=0).max()
+from algo_trader.pipeline.stages.features.utils import (
+    require_datetime_index,
+    week_end_by_start,
+    week_start_index,
+)
 
 
 def to_weekly(

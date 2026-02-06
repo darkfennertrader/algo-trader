@@ -21,6 +21,11 @@ from .volatility import (
     VolatilityConfig,
     VolatilityFeatureGroup,
 )
+from .seasonal import (
+    DEFAULT_HORIZON_DAYS as DEFAULT_SEASONAL_DAYS,
+    SeasonalConfig,
+    SeasonalFeatureGroup,
+)
 
 
 @dataclass
@@ -90,6 +95,15 @@ def default_registry() -> FeatureRegistry:
         "volatility",
         VolatilityFeatureGroup(
             VolatilityConfig(horizons=volatility_horizons)
+        ),
+    )
+    seasonal_horizons = [
+        HorizonSpec(days=days, weeks=days // 5) for days in DEFAULT_SEASONAL_DAYS
+    ]
+    registry.register(
+        "seasonal",
+        SeasonalFeatureGroup(
+            SeasonalConfig(horizons=seasonal_horizons)
         ),
     )
     return registry

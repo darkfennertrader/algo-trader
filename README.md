@@ -39,14 +39,16 @@ Args and defaults:
   - mean_reversion: `5,20,60,130`
   - breakout: `5,20,60,130`
   - volatility: `5,20,60,130`
+  - seasonal: `60,130`
   When provided, the same horizons are applied to all selected groups.
 - `group`: feature group to compute (repeatable; default = all registered groups).
-   Valid values: `momentum`, `mean_reversion`, `breakout`, `volatility`.
+   Valid values: `momentum`, `mean_reversion`, `breakout`, `volatility`, `seasonal`.
 - `feature`: feature key within a group (repeatable; default = group default set).
   - momentum keys: `momentum`, `vol_scaled_momentum`, `slope`, `ema_spread`
   - mean_reversion keys: `z_price_ema`, `z_price_med`, `donch_pos`, `rsi_centered`, `rev`, `shock`, `range_pos`, `range_z`
   - breakout keys: `brk_up`, `brk_dn`
   - volatility keys: `vol_cc_d`, `atrp_d`, `vol_range_parkinson_d`, `vol_regime_cc`, `vov_norm`, `vol_ts_cc_1w_4w`, `vol_ts_cc_4w_12w`, `vol_ts_cc_4w_26w`, `vol_ts_atr_4w_12w`, `downside_vol_d_4w`, `upside_vol_d_4w`, `down_up_vol_ratio_4w`, `realized_skew_d_12w`, `realized_kurt_d_12w`, `tail_5p_sigma_ratio_12w`, `jump_freq_4w`
+  - seasonal keys: `dow_alpha`, `dow_spread`
 
 Outputs (per group):
 - `FEATURE_STORE_SOURCE/features/YYYY-WW/<group>/features.csv` (MultiIndex columns: asset, feature)
@@ -56,6 +58,7 @@ Outputs (per group):
 Notes:
 - Weekly inputs are loaded from `DATA_LAKE_SOURCE/YYYY-WW/weekly_ohlc.csv`.
 - Volatility features use daily inputs from `DATA_LAKE_SOURCE/YYYY-WW/daily_ohlc.csv` and are sampled to weekly output.
+- Seasonal features use daily inputs from `DATA_LAKE_SOURCE/YYYY-WW/daily_ohlc.csv` and are sampled to weekly output.
 - Missing weekly OHLC values for any asset will raise an error.
 - Metadata includes `feature_name_units` and `days_to_weeks` for horizon mapping.
 
@@ -92,7 +95,7 @@ Computed on weekly OHLC data per asset (horizons shown in weeks; defaults = 1, 4
 #### Volatility group features
 
 Computed on daily OHLC data per asset, then sampled to weekly output (horizons shown in weeks; defaults = 1, 4, 12, 26).
-Missing daily OHLC rows are dropped before indicator computation; data-quality ratios are written to `goodness.json`.
+Missing daily OHLC rows are dropped before indicator computation; data-quality ratios are written to `goodness.json` as valid / horizon for volatility and missing / horizon for weekly groups.
 
 - `vol_cc_d_1w`, `vol_cc_d_4w`, `vol_cc_d_12w`, `vol_cc_d_26w`: close-to-close realized vol over the stated horizon of daily returns.
 - `atrp_d_4w`, `atrp_d_12w`: ATR over the stated horizon of daily bars, divided by close.
@@ -110,6 +113,17 @@ Missing daily OHLC rows are dropped before indicator computation; data-quality r
 - `realized_kurt_d_12w`: clipped realized excess kurtosis over 12 weeks.
 - `tail_5p_sigma_ratio_12w`: log ratio of empirical 5% tail vs 1.645*sigma_12w (eps=1e-6).
 - `jump_freq_4w`: fraction of last 4w days with |r| > 2*sigma_12w.
+
+#### Seasonal group features
+
+Computed on daily OHLC data per asset, then sampled to weekly output (horizons shown in weeks; defaults = 12, 26).
+Daily returns are log returns on daily closes: r_d = log(C_d) − log(C_{d−1}).
+For each weekly output t and horizon h, use the last h completed weeks (Mon–Fri) and compute the weekday means:
+
+- `dow_alpha_Mon_12w`, `dow_alpha_Tue_12w`, `dow_alpha_Wed_12w`, `dow_alpha_Thu_12w`, `dow_alpha_Fri_12w`
+- `dow_alpha_Mon_26w`, `dow_alpha_Tue_26w`, `dow_alpha_Wed_26w`, `dow_alpha_Thu_26w`, `dow_alpha_Fri_26w`
+- `dow_spread_12w`: max weekday mean − min weekday mean over the last 12 weeks
+- `dow_spread_26w`: max weekday mean − min weekday mean over the last 26 weeks
 
 #### Feature reference
 
@@ -158,6 +172,10 @@ Volatility:
 - `realized_kurt_d_12w`: clipped to [-2, 10], excess kurtosis from 12w returns.
 - `tail_5p_sigma_ratio_12w`: log(((-q05)+eps)/(1.645*sigma_12w+eps)), eps=1e-6.
 - `jump_freq_4w`: count(|r| > 2*sigma_12w) / 20 over the last 4w.
+
+Seasonal:
+- `dow_alpha`: average daily log return for a weekday over the last h weeks.
+- `dow_spread`: max weekday mean minus min weekday mean over the last h weeks.
 
 
 
@@ -234,20 +252,40 @@ algo_trader/
   application/
     data_cleaning/
     data_processing/
+    feature_engineering/
     historical/
+    modeling/
   domain/
+    market_data/
   infrastructure/
+    data/
+    exporters/
   preprocessing/
   providers/
+    historical/
+    live/
   pipeline/
+    stages/
 ```
 
-- `cli/` parses command-line args and routes to use-cases. It contains entrypoints only.
-- `application/` orchestrates workflows like historical downloads or backtests. It wires protocols to concrete providers.
-- `domain/` holds core models and Protocols. It stays stable and avoids vendor or CLI dependencies.
-- `infrastructure/` contains shared plumbing (env, logging, storage, event bus). It supports the app but isn’t domain logic.
-- `providers/` houses vendor adapters like IB or Alpaca. These implementations satisfy domain protocols.
-- `pipeline/` groups swappable stages and composition (preprocess, features, model, metrics). It lets you reorder or replace components easily.
+- `cli/` parses command-line args and routes to use-cases; entrypoints only.
+- `application/` orchestrates workflows and wires protocols to concrete providers.
+- `application/data_cleaning/` builds weekly returns and OHLC from raw data.
+- `application/data_processing/` runs preprocessors and writes processed feature sets.
+- `application/feature_engineering/` computes feature groups from cleaned inputs.
+- `application/historical/` handles historical data downloads and requests.
+- `application/modeling/` runs inference workflows and model I/O.
+- `domain/` holds core models and protocols; stays stable and vendor-agnostic.
+- `domain/market_data/` domain models and interfaces for market data.
+- `infrastructure/` shared plumbing (env, logging, storage, event bus).
+- `infrastructure/data/` shared data utilities, schemas, and storage helpers.
+- `infrastructure/exporters/` exporters for saving or emitting artifacts.
+- `preprocessing/` feature preprocessing implementations (z-score, PCA, etc.).
+- `providers/` vendor adapters like IB or Alpaca.
+- `providers/historical/` historical data provider adapters.
+- `providers/live/` live data/execution provider adapters.
+- `pipeline/` composable stages (preprocess, features, model, metrics).
+- `pipeline/stages/` concrete pipeline stages and registries.
 
 ## Configuration
 

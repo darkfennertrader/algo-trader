@@ -25,7 +25,7 @@ Data cleaning return options:
 
 ### Feature engineering
 
-Compute feature groups from data-cleaning outputs (weekly momentum/mean-reversion/breakout plus daily-input volatility features, all output weekly), plus cross-sectional transforms.
+Compute feature groups from data-cleaning outputs (weekly momentum/mean-reversion/breakout plus daily-input volatility and regime features, all output weekly), plus cross-sectional transforms.
 
 ```bash
 uv run algotrader feature_engineering \
@@ -40,9 +40,10 @@ Args and defaults:
   - breakout: `5,20,60,130`
   - volatility: `5,20,60,130`
   - seasonal: `60,130`
+  - regime: `5,20,60,130`
   When provided, the same horizons are applied to all selected groups.
 - `group`: feature group to compute (repeatable; default = all registered groups).
-   Valid values: `momentum`, `mean_reversion`, `breakout`, `cross_sectional`, `volatility`, `seasonal`.
+   Valid values: `momentum`, `mean_reversion`, `breakout`, `cross_sectional`, `volatility`, `seasonal`, `regime`.
 - `feature`: feature key within a group (repeatable; default = group default set).
   - momentum keys: `momentum`, `vol_scaled_momentum`, `slope`, `ema_spread`
   - mean_reversion keys: `z_price_ema`, `z_price_med`, `donch_pos`, `rsi_centered`, `rev`, `shock`, `range_pos`, `range_z`
@@ -50,6 +51,7 @@ Args and defaults:
   - cross_sectional keys: `cs_centered`, `cs_rank`
   - volatility keys: `vol_cc_d`, `atrp_d`, `vol_range_parkinson_d`, `vol_regime_cc`, `vov_norm`, `vol_ts_cc_1w_4w`, `vol_ts_cc_4w_12w`, `vol_ts_cc_4w_26w`, `vol_ts_atr_4w_12w`, `downside_vol_d_4w`, `upside_vol_d_4w`, `down_up_vol_ratio_4w`, `realized_skew_d_12w`, `realized_kurt_d_12w`, `tail_5p_sigma_ratio_12w`, `jump_freq_4w`
   - seasonal keys: `dow_alpha`, `dow_spread`
+  - regime keys: `glob_vol_cc_d`, `glob_vol_regime_cc`, `glob_corr_mean`, `glob_pc1_share`, `glob_disp_ret`, `glob_disp_mom`, `glob_disp_vol`
 
 Outputs (per group):
 - `FEATURE_STORE_SOURCE/features/YYYY-WW/<group>/features.csv` (MultiIndex columns: asset, feature)
@@ -61,6 +63,7 @@ Notes:
 - Volatility features use daily inputs from `DATA_LAKE_SOURCE/YYYY-WW/daily_ohlc.csv` and are sampled to weekly output.
 - Seasonal features use daily inputs from `DATA_LAKE_SOURCE/YYYY-WW/daily_ohlc.csv` and are sampled to weekly output.
 - Cross-sectional features use both weekly and daily inputs because they derive from momentum, mean-reversion, and volatility base features.
+- Regime features use daily inputs for volatility, correlation, and one-factor-ness plus weekly inputs for return/momentum dispersion; outputs are broadcast to each asset.
 - Missing weekly OHLC values for any asset will raise an error.
 - Metadata includes `feature_name_units` and `days_to_weeks` for horizon mapping.
 
@@ -97,7 +100,7 @@ Computed on weekly OHLC data per asset (horizons shown in weeks; defaults = 1, 4
 #### Volatility group features
 
 Computed on daily OHLC data per asset, then sampled to weekly output (horizons shown in weeks; defaults = 1, 4, 12, 26).
-Missing daily OHLC rows are dropped before indicator computation; data-quality ratios are written to `goodness.json` as valid / horizon for volatility and missing / horizon for weekly groups.
+Missing daily OHLC rows are dropped before indicator computation; data-quality ratios are written to `goodness.json` as valid / horizon for volatility and regime and missing / horizon for weekly groups.
 
 - `vol_cc_d_1w`, `vol_cc_d_4w`, `vol_cc_d_12w`, `vol_cc_d_26w`: close-to-close realized vol over the stated horizon of daily returns.
 - `atrp_d_4w`, `atrp_d_12w`: ATR over the stated horizon of daily bars, divided by close.
@@ -153,6 +156,18 @@ For each weekly output t and horizon h, use the last h completed weeks (Mon–Fr
 - `dow_spread_12w`: max weekday mean − min weekday mean over the last 12 weeks
 - `dow_spread_26w`: max weekday mean − min weekday mean over the last 26 weeks
 
+#### Regime group features
+
+Computed on daily inputs (volatility, correlation, one-factor-ness) and weekly inputs (dispersion), then broadcast to all assets at week t (horizons shown in weeks; defaults = 1, 4, 12, 26).
+
+- `glob_vol_cc_d_4w`, `glob_vol_cc_d_12w`: mean close-to-close realized vol across assets over daily returns, sampled weekly.
+- `glob_vol_regime_cc_4w_26w`: log ratio of current 4w global vol vs the prior 26w median of 4w global vol (eps=1e-6).
+- `glob_corr_mean_12w`: average pairwise correlation across assets over the last 12w of daily returns.
+- `glob_pc1_share_12w`: leading eigenvalue share of the 12w daily-return covariance matrix.
+- `glob_disp_ret_1w`: cross-sectional dispersion of 1w log returns using MAD scaling (1.4826 * MAD).
+- `glob_disp_mom_12w`: cross-sectional dispersion of 12w momentum using MAD scaling (1.4826 * MAD).
+- `glob_disp_vol_4w`: cross-sectional dispersion of 4w close-to-close vol using MAD scaling (1.4826 * MAD).
+
 #### Feature reference
 
 This section provides a quick explanation of each feature key (independent of horizon suffixes).
@@ -204,6 +219,15 @@ Volatility:
 - `realized_kurt_d_12w`: clipped to [-2, 10], excess kurtosis from 12w returns.
 - `tail_5p_sigma_ratio_12w`: log(((-q05)+eps)/(1.645*sigma_12w+eps)), eps=1e-6.
 - `jump_freq_4w`: count(|r| > 2*sigma_12w) / 20 over the last 4w.
+
+Regime:
+- `glob_vol_cc_d`: average close-to-close realized vol across assets (daily log returns), sampled weekly.
+- `glob_vol_regime_cc`: log ratio of current 4w global vol vs prior 26w median of 4w global vol (eps=1e-6).
+- `glob_corr_mean`: average pairwise correlation across assets over the horizon.
+- `glob_pc1_share`: leading eigenvalue share of the return covariance matrix over the horizon.
+- `glob_disp_ret`: cross-sectional dispersion of 1w log returns using MAD scaling (1.4826 * MAD).
+- `glob_disp_mom`: cross-sectional dispersion of 12w momentum using MAD scaling (1.4826 * MAD).
+- `glob_disp_vol`: cross-sectional dispersion of 4w close-to-close vol using MAD scaling (1.4826 * MAD).
 
 Seasonal:
 - `dow_alpha`: average daily log return for a weekday over the last h weeks.

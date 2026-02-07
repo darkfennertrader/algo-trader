@@ -2,42 +2,23 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Protocol, Sequence, TypeVar
+from typing import Callable, Protocol, Sequence, TypeVar
 
-import numpy as np
 import pandas as pd
-import torch
 
 from algo_trader.domain import ConfigError, DataProcessingError, DataSourceError
-from algo_trader.infrastructure import (
-    ErrorPolicy,
-    FileOutputWriter,
-    OutputNames,
-    OutputWriter,
-    ensure_directory,
-    format_run_at,
-    log_boundary,
-    resolve_latest_week_dir,
-)
-from algo_trader.infrastructure.data import (
-    ReturnType,
-    require_utc_hourly_index,
-    timestamps_to_epoch_hours,
-    write_tensor_bundle,
-)
-from algo_trader.infrastructure.paths import format_tilde_path
+from algo_trader.infrastructure import log_boundary, resolve_latest_week_dir
+from algo_trader.infrastructure.data import require_utc_hourly_index
 from algo_trader.pipeline.stages.features import (
     FeatureGroup,
     FeatureInputs,
-    FeatureOutput,
     HorizonSpec,
-    asset_frame,
     ordered_assets,
-    require_daily_ohlc,
-    require_weekly_ohlc,
 )
 from algo_trader.pipeline.stages.features.cross_sectional import (
     DEFAULT_HORIZON_DAYS as DEFAULT_CROSS_SECTIONAL_HORIZON_DAYS,
@@ -64,7 +45,6 @@ from algo_trader.pipeline.stages.features.volatility import (
     DEFAULT_HORIZON_DAYS as DEFAULT_VOLATILITY_HORIZON_DAYS,
     VolatilityConfig,
     VolatilityFeatureGroup,
-    VolatilityGoodness,
 )
 from algo_trader.pipeline.stages.features.seasonal import (
     DEFAULT_HORIZON_DAYS as DEFAULT_SEASONAL_HORIZON_DAYS,
@@ -76,27 +56,38 @@ from algo_trader.pipeline.stages.features.regime import (
     DEFAULT_HORIZON_DAYS as DEFAULT_REGIME_HORIZON_DAYS,
     RegimeConfig,
     RegimeFeatureGroup,
-    RegimeGoodness,
 )
 from algo_trader.pipeline.stages.features.registry import default_registry
-from .goodness import daily_goodness_ratios, weekly_goodness_ratios
+from .constants import (
+    _ALL_GROUP,
+    _CROSS_SECTIONAL_GROUP,
+    _DAILY_OHLC_NAME,
+    _FREQUENCY,
+    _TENSOR_TIMEZONE,
+    _TRADING_DAYS_PER_WEEK,
+    _WEEKLY_OHLC_NAME,
+)
+from .outputs import (
+    FeatureDataContext,
+    GoodnessContext,
+    MetadataContext,
+    _build_goodness_payload,
+    _extra_metadata,
+    _group_uses_daily_source,
+    _prepare_output_paths,
+    _write_goodness_payload,
+    _write_outputs,
+)
+from .types import (
+    FeatureInputSources,
+    FeaturePaths,
+    FeatureSelection,
+    FeatureSettings,
+    RunConfig,
+)
 from ..data_sources import resolve_data_lake, resolve_feature_store
 
 logger = logging.getLogger(__name__)
-
-_WEEKLY_OHLC_NAME = "weekly_ohlc.csv"
-_DAILY_OHLC_NAME = "daily_ohlc.csv"
-_OUTPUT_NAMES = OutputNames(
-    output_name="features.csv",
-    metadata_name="metadata.json",
-)
-_TENSOR_NAME = "features_tensor.pt"
-_GOODNESS_NAME = "goodness.json"
-_FREQUENCY = "weekly"
-_TRADING_DAYS_PER_WEEK = 5
-_TENSOR_TIMESTAMP_UNIT = "epoch_hours"
-_TENSOR_TIMEZONE = "UTC"
-_TENSOR_VALUE_DTYPE = "float64"
 
 
 @dataclass(frozen=True)
@@ -104,83 +95,6 @@ class RunRequest:
     horizons: str | None = None
     groups: Sequence[str] | None = None
     features: Sequence[str] | None = None
-
-
-@dataclass(frozen=True)
-class FeatureSettings:
-    return_type: ReturnType
-    horizon_days: Sequence[int] | None
-    eps: float
-
-
-@dataclass(frozen=True)
-class FeatureSelection:
-    groups: Sequence[str]
-    features: Sequence[str] | None
-
-
-@dataclass(frozen=True)
-class FeaturePaths:
-    data_lake: Path
-    feature_store: Path
-
-
-@dataclass(frozen=True)
-class FeatureInputSources:
-    weekly_path: Path
-    daily_path: Path | None
-    hourly_path: Path | None
-
-
-@dataclass(frozen=True)
-class RunConfig:
-    settings: FeatureSettings
-    selection: FeatureSelection
-    paths: FeaturePaths
-
-
-@dataclass(frozen=True)
-class FeatureOutputPaths:
-    output_dir: Path
-    output_path: Path
-    metadata_path: Path
-    tensor_path: Path
-    goodness_path: Path
-
-
-@dataclass(frozen=True)
-class GoodnessContext:
-    group: FeatureGroup
-    group_name: str
-    output: FeatureOutput
-    inputs: FeatureInputs
-    paths: FeatureOutputPaths
-    sources: FeatureInputSources
-
-
-@dataclass(frozen=True)
-class FeatureTensorBundle:
-    values: torch.Tensor
-    timestamps: torch.Tensor
-    missing_mask: torch.Tensor
-
-
-@dataclass(frozen=True)
-class FeatureDataContext:
-    input_path: Path
-    frame: pd.DataFrame
-    assets: Sequence[str]
-    features: Sequence[str]
-
-
-@dataclass(frozen=True)
-class MetadataContext:
-    group: str
-    paths: FeatureOutputPaths
-    data: FeatureDataContext
-    settings: FeatureSettings
-    horizons: Sequence["HorizonLike"]
-    sources: FeatureInputSources
 
 
 class HorizonLike(Protocol):
@@ -204,10 +118,16 @@ def _run_context(request: RunRequest) -> dict[str, str]:
 
 @log_boundary("feature_engineering.run", context=_run_context)
 def run(*, request: RunRequest) -> list[Path]:
+    start_time = time.perf_counter()
+    use_parallel_all = _uses_parallel_all(request.groups)
     config = _resolve_run_config(request)
+    if use_parallel_all:
+        output_paths = _run_parallel_all(config)
+        _log_run_duration(config.selection.groups, start_time)
+        return output_paths
     needs_daily = bool(
         set(config.selection.groups).intersection(
-            {"volatility", "seasonal", "cross_sectional", "regime"}
+            {"volatility", "seasonal", _CROSS_SECTIONAL_GROUP, "regime"}
         )
     )
     inputs, sources, version_label = _load_feature_inputs(
@@ -215,55 +135,168 @@ def run(*, request: RunRequest) -> list[Path]:
     )
     output_paths: list[Path] = []
     for group_name in config.selection.groups:
-        group_horizons = _resolve_group_horizons(
-            group_name, config.settings.horizon_days
-        )
-        group = _build_group(group_name, config, group_horizons)
-        output = group.compute(inputs)
-        paths = _prepare_output_paths(
-            config.paths.feature_store, version_label, group_name
-        )
-        extra_metadata = _extra_metadata(group)
-        _write_outputs(
-            output.frame,
-            output.feature_names,
-            paths,
-            metadata=MetadataContext(
-                group=group_name,
-                paths=paths,
-                data=FeatureDataContext(
-                    input_path=sources.weekly_path,
-                    frame=output.frame,
-                    assets=ordered_assets(output.frame),
-                    features=output.feature_names,
-                ),
-                settings=config.settings,
-                horizons=group_horizons,
-                sources=sources,
-            ),
-            extra_metadata=extra_metadata,
-        )
-        goodness_payload = _build_goodness_payload(
-            GoodnessContext(
-                group=group,
+        output_paths.append(
+            _run_group_with_inputs(
                 group_name=group_name,
-                output=output,
+                config=config,
                 inputs=inputs,
-                paths=paths,
                 sources=sources,
+                version_label=version_label,
             )
         )
-        if goodness_payload is not None:
-            _write_goodness_payload(goodness_payload, paths=paths)
-        logger.info(
-            "Saved %s features path=%s rows=%s assets=%s",
-            group_name,
-            paths.output_path,
-            len(output.frame),
-            len(output.frame.columns),
-        )
-        output_paths.append(paths.output_path)
+    _log_run_duration(config.selection.groups, start_time)
     return output_paths
+
+
+def _run_parallel_all(config: RunConfig) -> list[Path]:
+    latest_dir = _resolve_latest_directory(config.paths.data_lake)
+    worker_count = _resolve_parallel_workers()
+    parallel_groups = [
+        group
+        for group in config.selection.groups
+        if group != _CROSS_SECTIONAL_GROUP
+    ]
+    output_paths: list[Path] = []
+    if parallel_groups:
+        logger.info(
+            "Running feature groups in parallel workers=%s groups=%s",
+            worker_count,
+            ",".join(parallel_groups),
+        )
+        output_paths.extend(
+            _run_parallel_groups(
+                groups=parallel_groups,
+                config=config,
+                latest_dir=latest_dir,
+                worker_count=worker_count,
+            )
+        )
+    if _CROSS_SECTIONAL_GROUP in config.selection.groups:
+        output_paths.append(
+            _run_group_job(_CROSS_SECTIONAL_GROUP, config, latest_dir)
+        )
+    return output_paths
+
+
+def _resolve_parallel_workers() -> int:
+    count = os.cpu_count()
+    if count is None:
+        return 1
+    return max(1, count - 1)
+
+
+def _run_parallel_groups(
+    *,
+    groups: Sequence[str],
+    config: RunConfig,
+    latest_dir: Path,
+    worker_count: int,
+) -> list[Path]:
+    output_paths: list[Path] = []
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        futures_by_group = {
+            group: executor.submit(_run_group_job, group, config, latest_dir)
+            for group in groups
+        }
+        for group in groups:
+            future = futures_by_group[group]
+            try:
+                output_paths.append(future.result())
+            except Exception as exc:
+                for pending in futures_by_group.values():
+                    pending.cancel()
+                raise DataProcessingError(
+                    "Feature group computation failed",
+                    context={"group": group},
+                ) from exc
+    return output_paths
+
+
+def _run_group_job(
+    group_name: str, config: RunConfig, latest_dir: Path
+) -> Path:
+    inputs, sources, version_label = _load_feature_inputs_from_dir(
+        latest_dir, needs_daily=_group_uses_daily_source(group_name)
+    )
+    return _run_group_with_inputs(
+        group_name=group_name,
+        config=config,
+        inputs=inputs,
+        sources=sources,
+        version_label=version_label,
+    )
+
+
+def _run_group_with_inputs(
+    *,
+    group_name: str,
+    config: RunConfig,
+    inputs: FeatureInputs,
+    sources: FeatureInputSources,
+    version_label: str,
+) -> Path:
+    start_time = time.perf_counter()
+    group_horizons = _resolve_group_horizons(
+        group_name, config.settings.horizon_days
+    )
+    group = _build_group(group_name, config, group_horizons)
+    output = group.compute(inputs)
+    paths = _prepare_output_paths(
+        config.paths.feature_store, version_label, group_name
+    )
+    extra_metadata = _extra_metadata(group)
+    _write_outputs(
+        output.frame,
+        output.feature_names,
+        paths,
+        metadata=MetadataContext(
+            group=group_name,
+            paths=paths,
+            data=FeatureDataContext(
+                input_path=sources.weekly_path,
+                frame=output.frame,
+                assets=ordered_assets(output.frame),
+                features=output.feature_names,
+            ),
+            settings=config.settings,
+            horizons=group_horizons,
+            sources=sources,
+        ),
+        extra_metadata=extra_metadata,
+    )
+    goodness_payload = _build_goodness_payload(
+        GoodnessContext(
+            group=group,
+            group_name=group_name,
+            output=output,
+            inputs=inputs,
+            paths=paths,
+            sources=sources,
+        )
+    )
+    if goodness_payload is not None:
+        _write_goodness_payload(goodness_payload, paths=paths)
+    duration = time.perf_counter() - start_time
+    logger.info(
+        "Saved %s features path=%s rows=%s assets=%s duration=%.2fs",
+        group_name,
+        paths.output_path,
+        len(output.frame),
+        len(output.frame.columns),
+        duration,
+    )
+    return paths.output_path
+
+
+def _log_run_duration(groups: Sequence[str], start_time: float) -> None:
+    duration = time.perf_counter() - start_time
+    duration_minutes = duration / 60.0
+    logger.info("----- TOTAL -----")
+    logger.info(
+        "Feature engineering completed groups=%s duration=%.2fm",
+        ",".join(groups),
+        duration_minutes,
+    )
 
 
 def _resolve_run_config(request: RunRequest) -> RunConfig:
@@ -294,6 +327,13 @@ def _resolve_groups(groups: Sequence[str] | None) -> list[str]:
     if not groups:
         return available
     normalized = [_normalize_group_name(name) for name in groups]
+    if _ALL_GROUP in normalized:
+        if set(normalized) != {_ALL_GROUP}:
+            raise ConfigError(
+                "group=all cannot be combined with other groups",
+                context={"groups": ",".join(normalized)},
+            )
+        return available
     unknown = sorted(set(normalized).difference(available))
     if unknown:
         raise ConfigError(
@@ -308,6 +348,20 @@ def _normalize_group_name(name: str) -> str:
     if not normalized:
         raise ConfigError("feature group name must not be empty")
     return normalized
+
+
+def _uses_parallel_all(groups: Sequence[str] | None) -> bool:
+    if not groups:
+        return False
+    normalized = [_normalize_group_name(name) for name in groups]
+    if _ALL_GROUP in normalized:
+        if set(normalized) != {_ALL_GROUP}:
+            raise ConfigError(
+                "group=all cannot be combined with other groups",
+                context={"groups": ",".join(normalized)},
+            )
+        return True
+    return False
 
 
 def _normalize_horizon_days(raw: str | None) -> list[int] | None:
@@ -403,6 +457,12 @@ def _load_feature_inputs(
     data_lake: Path, *, needs_daily: bool
 ) -> tuple[FeatureInputs, FeatureInputSources, str]:
     latest_dir = _resolve_latest_directory(data_lake)
+    return _load_feature_inputs_from_dir(latest_dir, needs_daily=needs_daily)
+
+
+def _load_feature_inputs_from_dir(
+    latest_dir: Path, *, needs_daily: bool
+) -> tuple[FeatureInputs, FeatureInputSources, str]:
     weekly_path = latest_dir / _WEEKLY_OHLC_NAME
     weekly_ohlc = _read_weekly_ohlc(weekly_path)
     daily_ohlc: pd.DataFrame | None = None
@@ -585,385 +645,3 @@ def _build_regime_group(
         features=config.selection.features,
     )
     return RegimeFeatureGroup(regime_config)
-
-
-def _prepare_output_paths(
-    feature_store: Path,
-    version_label: str,
-    group: str,
-) -> FeatureOutputPaths:
-    output_dir = feature_store / "features" / version_label / group
-    ensure_directory(
-        output_dir,
-        error_type=DataProcessingError,
-        invalid_message="Feature output path must be a directory",
-        create_message="Failed to prepare feature output directory",
-    )
-    return FeatureOutputPaths(
-        output_dir=output_dir,
-        output_path=output_dir / _OUTPUT_NAMES.output_name,
-        metadata_path=output_dir / _OUTPUT_NAMES.metadata_name,
-        tensor_path=output_dir / _TENSOR_NAME,
-        goodness_path=output_dir / _GOODNESS_NAME,
-    )
-
-
-def _write_outputs(
-    frame: pd.DataFrame,
-    feature_names: Sequence[str],
-    paths: FeatureOutputPaths,
-    *,
-    metadata: MetadataContext,
-    extra_metadata: Mapping[str, object] | None = None,
-) -> None:
-    writer = _build_output_writer()
-    writer.write_frame(frame, paths.output_path)
-    bundle = _build_tensor_bundle(frame, feature_names)
-    write_tensor_bundle(
-        paths.tensor_path,
-        values=bundle.values,
-        timestamps=bundle.timestamps,
-        missing_mask=bundle.missing_mask,
-        error_message="Failed to write feature tensor output",
-    )
-    payload = _build_metadata(
-        metadata, feature_names, extra_metadata=extra_metadata
-    )
-    writer.write_metadata(payload, paths.metadata_path)
-
-
-def _build_goodness_payload(
-    context: GoodnessContext,
-) -> dict[str, object] | None:
-    group = context.group
-    sources = _build_source_paths(context.group_name, context.sources)
-    if isinstance(group, VolatilityFeatureGroup):
-        if group.goodness is None:
-            return None
-        return _build_volatility_goodness_payload(
-            group.goodness,
-            sources=sources,
-            destination_path=context.paths.output_path,
-        )
-    if isinstance(group, RegimeFeatureGroup):
-        if group.goodness is None:
-            return None
-        return _build_regime_goodness_payload(
-            group.goodness,
-            sources=sources,
-            destination_path=context.paths.output_path,
-        )
-    weekly = require_weekly_ohlc(context.inputs)
-    horizon_days_by_feature = _weekly_horizon_days_by_feature(
-        context.group_name, context.output.feature_names
-    )
-    if _group_uses_daily_source(context.group_name):
-        daily = require_daily_ohlc(context.inputs)
-        ratios_by_feature = daily_goodness_ratios(
-            daily,
-            weekly,
-            horizon_days_by_feature=horizon_days_by_feature,
-            trading_days_per_week=_TRADING_DAYS_PER_WEEK,
-        )
-        ratio_definition = "missing_weekly_ohlc / horizon_weeks"
-    else:
-        ratios_by_feature = weekly_goodness_ratios(
-            weekly,
-            horizon_days_by_feature=horizon_days_by_feature,
-            trading_days_per_week=_TRADING_DAYS_PER_WEEK,
-        )
-        ratio_definition = "missing_weekly_ohlc / horizon_weeks"
-    return {
-        "group": context.group_name,
-        "run_at": format_run_at(datetime.now(timezone.utc)),
-        "source": sources,
-        "dest": format_tilde_path(context.paths.output_path),
-        "ratio_definition": ratio_definition,
-        "ratios_by_feature": ratios_by_feature,
-    }
-
-
-def _build_source_paths(
-    group_name: str, sources: FeatureInputSources
-) -> list[str]:
-    return [
-        _resolve_source_path(group_name, sources, frequency)
-        for frequency in _group_source_frequencies(group_name)
-    ]
-
-
-def _resolve_source_path(
-    group_name: str, sources: FeatureInputSources, frequency: str
-) -> str:
-    if frequency == "weekly":
-        return format_tilde_path(sources.weekly_path)
-    if frequency == "daily":
-        if sources.daily_path is None:
-            raise DataProcessingError(
-                "daily_ohlc source path is required for metadata output",
-                context={"group": group_name},
-            )
-        return format_tilde_path(sources.daily_path)
-    if frequency == "hourly":
-        if sources.hourly_path is None:
-            raise DataProcessingError(
-                "hourly_ohlc source path is required for metadata output",
-                context={"group": group_name},
-            )
-        return format_tilde_path(sources.hourly_path)
-    raise ConfigError(
-        "Unknown feature frequency for metadata output",
-        context={"group": group_name, "frequency": frequency},
-    )
-
-
-def _group_source_frequencies(group_name: str) -> tuple[str, ...]:
-    frequencies_by_group = {
-        "momentum": ("weekly",),
-        "mean_reversion": ("weekly",),
-        "breakout": ("weekly",),
-        "cross_sectional": ("weekly", "daily"),
-        "volatility": ("weekly", "daily"),
-        "seasonal": ("weekly", "daily"),
-        "regime": ("weekly", "daily"),
-    }
-    frequencies = frequencies_by_group.get(group_name)
-    if frequencies is None:
-        raise ConfigError(
-            "Unknown feature group for goodness output",
-            context={"group": group_name},
-        )
-    return frequencies
-
-
-def _group_uses_daily_source(group_name: str) -> bool:
-    return "daily" in _group_source_frequencies(group_name)
-
-
-def _extra_metadata(group: FeatureGroup) -> Mapping[str, object] | None:
-    if isinstance(group, SeasonalFeatureGroup):
-        missing = group.missing_weekdays
-        if missing is None:
-            return None
-        return {"missing_weekdays_by_asset": missing}
-    return None
-
-
-def _write_goodness_payload(
-    payload: dict[str, object],
-    *,
-    paths: FeatureOutputPaths,
-) -> None:
-    writer = _build_output_writer()
-    writer.write_metadata(payload, paths.goodness_path)
-
-
-def _build_volatility_goodness_payload(
-    goodness: VolatilityGoodness,
-    *,
-    sources: Sequence[str],
-    destination_path: Path,
-) -> dict[str, object]:
-    return {
-        "group": "volatility",
-        "run_at": format_run_at(datetime.now(timezone.utc)),
-        "source": sources,
-        "dest": format_tilde_path(destination_path),
-        "ratio_definition": "valid_daily_ohlc / horizon_days",
-        "ratios_by_feature": goodness.ratios_by_feature,
-    }
-
-
-def _build_regime_goodness_payload(
-    goodness: RegimeGoodness,
-    *,
-    sources: Sequence[str],
-    destination_path: Path,
-) -> dict[str, object]:
-    return {
-        "group": "regime",
-        "run_at": format_run_at(datetime.now(timezone.utc)),
-        "source": sources,
-        "dest": format_tilde_path(destination_path),
-        "ratio_definition": "valid_daily_ohlc / horizon_days",
-        "ratios_by_feature": goodness.ratios_by_feature,
-    }
-
-
-def _weekly_horizon_days_by_feature(
-    group_name: str, feature_names: Sequence[str]
-) -> dict[str, int]:
-    if not feature_names:
-        return {}
-    mapping: dict[str, int] = {}
-    for name in feature_names:
-        weeks = _feature_weeks(group_name, name)
-        if weeks is None:
-            continue
-        mapping[name] = weeks * _TRADING_DAYS_PER_WEEK
-    return mapping
-
-
-def _feature_weeks(group_name: str, feature_name: str) -> int | None:
-    handlers = {
-        "momentum": _momentum_feature_weeks,
-        "mean_reversion": _mean_reversion_feature_weeks,
-        "breakout": _parse_weeks_suffix,
-        "cross_sectional": _cross_sectional_feature_weeks,
-        "seasonal": _parse_weeks_suffix,
-        "regime": _parse_weeks_suffix,
-    }
-    handler = handlers.get(group_name)
-    if handler is None:
-        return None
-    return handler(feature_name)
-
-
-def _momentum_feature_weeks(feature_name: str) -> int | None:
-    if feature_name.startswith("ema_spread_"):
-        parts = feature_name.replace("ema_spread_", "").split("w_")
-        if len(parts) == 2:
-            long_weeks = max(int(parts[0]), int(parts[1].rstrip("w")))
-            return long_weeks
-    return _parse_weeks_suffix(feature_name)
-
-
-def _mean_reversion_feature_weeks(feature_name: str) -> int | None:
-    if feature_name == "range_pos_1w":
-        return 1
-    return _parse_weeks_suffix(feature_name)
-
-
-def _cross_sectional_feature_weeks(feature_name: str) -> int | None:
-    prefixes = ("cs_centered_", "cs_rank_")
-    for prefix in prefixes:
-        if feature_name.startswith(prefix):
-            base = feature_name[len(prefix) :]
-            return _parse_weeks_suffix(base)
-    return None
-
-
-def _parse_weeks_suffix(feature_name: str) -> int | None:
-    if not feature_name.endswith("w"):
-        return None
-    parts = feature_name.rsplit("_", maxsplit=1)
-    if len(parts) != 2:
-        return None
-    suffix = parts[1]
-    if not suffix.endswith("w"):
-        return None
-    try:
-        return int(suffix[:-1])
-    except ValueError:
-        return None
-
-
-def _build_output_writer() -> OutputWriter:
-    return FileOutputWriter(
-        data_policy=ErrorPolicy(
-            error_type=DataProcessingError,
-            message="Failed to write feature CSV",
-        ),
-        metadata_policy=ErrorPolicy(
-            error_type=DataProcessingError,
-            message="Failed to write feature metadata",
-        ),
-    )
-
-
-def _build_tensor_bundle(
-    frame: pd.DataFrame,
-    feature_names: Sequence[str],
-) -> FeatureTensorBundle:
-    assets = ordered_assets(frame)
-    values = _frame_to_tensor(frame, assets, feature_names)
-    missing_mask = np.isnan(values)
-    index = _require_datetime_index(frame.index)
-    timestamps = timestamps_to_epoch_hours(index)
-    return FeatureTensorBundle(
-        values=torch.tensor(values, dtype=torch.float64),
-        timestamps=torch.tensor(timestamps, dtype=torch.int64),
-        missing_mask=torch.tensor(missing_mask, dtype=torch.bool),
-    )
-
-
-def _frame_to_tensor(
-    frame: pd.DataFrame,
-    assets: Sequence[str],
-    feature_names: Sequence[str],
-) -> np.ndarray:
-    if not assets or not feature_names:
-        return np.empty((len(frame), 0, 0), dtype=float)
-    output = np.empty(
-        (len(frame), len(assets), len(feature_names)), dtype=float
-    )
-    for asset_idx, asset in enumerate(assets):
-        asset_data = asset_frame(frame, asset)
-        asset_data = asset_data.reindex(columns=list(feature_names))
-        output[:, asset_idx, :] = asset_data.to_numpy(dtype=float)
-    return output
-
-
-def _build_metadata(
-    context: MetadataContext,
-    feature_names: Sequence[str],
-    *,
-    extra_metadata: Mapping[str, object] | None = None,
-) -> dict[str, object]:
-    missing_by_asset = _missing_by_asset(
-        context.data.frame, context.data.assets
-    )
-    payload: dict[str, object] = {
-        "group": context.group,
-        "frequency": list(_group_source_frequencies(context.group)),
-        "return_type": context.settings.return_type,
-        "eps": context.settings.eps,
-        "days_to_weeks": {
-            str(spec.days): spec.weeks for spec in context.horizons
-        },
-        "rows": len(context.data.frame),
-        "assets": len(context.data.assets),
-        "features": len(feature_names),
-        "feature_names": list(feature_names),
-        "run_at": format_run_at(datetime.now(timezone.utc)),
-        "source": _build_source_paths(context.group, context.sources),
-        "destination": format_tilde_path(context.paths.output_path),
-        "artifacts": {
-            "tensor": format_tilde_path(context.paths.tensor_path),
-            "tensor_timestamp_unit": _TENSOR_TIMESTAMP_UNIT,
-            "tensor_timezone": _TENSOR_TIMEZONE,
-            "tensor_value_dtype": _TENSOR_VALUE_DTYPE,
-        },
-        "missing_by_asset": missing_by_asset,
-    }
-    if extra_metadata:
-        payload.update(extra_metadata)
-    return payload
-
-
-def _missing_by_asset(
-    frame: pd.DataFrame, assets: Iterable[str]
-) -> dict[str, object]:
-    missing: dict[str, object] = {}
-    for asset in assets:
-        asset_data = asset_frame(frame, asset)
-        counts = asset_data.isna().sum()
-        by_feature = {
-            feature: int(count)
-            for feature, count in counts.items()
-            if int(count) > 0
-        }
-        missing[asset] = {
-            "total": int(counts.sum()),
-            "by_feature": by_feature,
-        }
-    return missing
-
-
-def _require_datetime_index(index: pd.Index) -> pd.DatetimeIndex:
-    if not isinstance(index, pd.DatetimeIndex):
-        raise DataProcessingError(
-            "feature index must be datetime",
-            context={"index_type": type(index).__name__},
-        )
-    return index

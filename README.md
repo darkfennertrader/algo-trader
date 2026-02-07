@@ -35,7 +35,8 @@ uv run algotrader feature_engineering \
 Args and defaults:
 - Horizons are fixed to each group's defaults (see the group sections below). The CLI does not accept horizon overrides.
 - `group`: feature group to compute (repeatable; default = all registered groups).
-   Valid values: `momentum`, `mean_reversion`, `breakout`, `cross_sectional`, `volatility`, `seasonal`, `regime`.
+   Valid values: `momentum`, `mean_reversion`, `breakout`, `cross_sectional`, `volatility`, `seasonal`, `regime`, `all`.
+   `all` runs the non-cross-sectional groups in parallel using (logical CPUs - 1) workers, then computes `cross_sectional` last.
 - `feature`: feature key within a group (repeatable; default = group default set).
   - momentum keys: `momentum`, `vol_scaled_momentum`, `slope`, `ema_spread`
   - mean_reversion keys: `z_price_ema`, `z_price_med`, `donch_pos`, `rsi_centered`, `rev`, `shock`, `range_pos`, `range_z`

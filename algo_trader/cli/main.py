@@ -139,7 +139,10 @@ def _build_parser() -> argparse.ArgumentParser:
     feature_parser.add_argument(
         "--group",
         action="append",
-        help="Feature group to compute (repeatable).",
+        help=(
+            "Feature group to compute (repeatable). "
+            "Use 'all' to run all groups in parallel."
+        ),
     )
     feature_parser.add_argument(
         "--feature",

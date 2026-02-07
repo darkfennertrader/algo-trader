@@ -106,8 +106,10 @@ def _data_processing_command() -> WizardCommand:
 
 def _feature_engineering_command() -> WizardCommand:
     groups = _prompt_feature_groups()
-    if not groups:
-        groups = _feature_group_choices()
+    if not groups or groups == ["all"]:
+        return WizardCommand(
+            commands=[["algotrader", "feature_engineering", "--group", "all"]]
+        )
     commands: list[list[str]] = []
     first_group = True
     for group in groups:
@@ -329,9 +331,9 @@ def _feature_group_choices() -> list[str]:
 
 
 def _prompt_feature_groups() -> list[str]:
-    available = _feature_group_choices()
+    available = [*_feature_group_choices(), "all"]
     label = (
-        "groups (comma-separated, blank for all). Options: "
+        "groups (comma-separated, blank for all/parallel). Options: "
         + ", ".join(available)
     )
     while True:
@@ -339,6 +341,11 @@ def _prompt_feature_groups() -> list[str]:
         if not raw:
             return []
         selected = [item.strip() for item in raw.split(",") if item.strip()]
+        if "all" in selected:
+            if len(selected) > 1:
+                print("Invalid groups: all cannot be combined with others")
+                continue
+            return ["all"]
         unknown = sorted(set(selected).difference(available))
         if not unknown:
             return selected

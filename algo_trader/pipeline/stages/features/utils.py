@@ -321,13 +321,13 @@ def serialize_series(series: pd.Series) -> dict[str, float | None]:
     return payload
 
 
-def serialize_series_positive(series: pd.Series) -> dict[str, float]:
-    payload: dict[str, float] = {}
+def serialize_series_positive(series: pd.Series) -> dict[str, str]:
+    payload: dict[str, str] = {}
     index = require_datetime_index(series.index, label="feature_series")
     values = series.to_numpy(dtype=float)
     for stamp, value in zip(index, values, strict=False):
         if pd.isna(value) or value <= 0:
             continue
         key = stamp.isoformat(timespec="seconds").replace("T", "_")
-        payload[key] = float(value)
+        payload[key] = f"{float(value):.3f}"
     return payload

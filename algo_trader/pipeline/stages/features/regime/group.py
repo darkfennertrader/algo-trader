@@ -58,7 +58,7 @@ class RegimeConfig:
 
 @dataclass(frozen=True)
 class RegimeGoodness:
-    ratios_by_feature: Mapping[str, Mapping[str, Mapping[str, float]]]
+    ratios_by_feature: Mapping[str, Mapping[str, Mapping[str, str]]]
     horizon_days_by_feature: Mapping[str, int]
 
 
@@ -456,7 +456,7 @@ def _compute_goodness(
     weeks_by_feature = {
         name: max(1, days // 5) for name, days in horizon_days_by_feature.items()
     }
-    ratios_by_feature: dict[str, dict[str, dict[str, float]]] = {
+    ratios_by_feature: dict[str, dict[str, dict[str, str]]] = {
         name: {} for name in weeks_by_feature
     }
     for asset in assets:

@@ -79,9 +79,11 @@ def _historical_command() -> WizardCommand:
 
 def _data_cleaning_command() -> WizardCommand:
     args: list[str] = ["algotrader", "data_cleaning"]
-    start = _prompt_optional("Start month YYYY-MM (blank for full range)")
-    if start:
-        args.extend(["--start", start])
+    start = _prompt_optional("Start month YYYY-MM")
+    while not start:
+        print("Start month is required.")
+        start = _prompt_optional("Start month YYYY-MM")
+    args.extend(["--start", start])
     end = _prompt_optional("End month YYYY-MM (blank for full range)")
     if end:
         args.extend(["--end", end])

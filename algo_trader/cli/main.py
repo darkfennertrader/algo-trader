@@ -53,6 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     data_cleaning_parser.add_argument(
         "--start",
+        required=True,
         help="Start month in YYYY-MM format (inclusive).",
     )
     data_cleaning_parser.add_argument(

@@ -184,7 +184,9 @@ def _build_goodness_payload(
             horizon_days_by_feature=horizon_days_by_feature,
             trading_days_per_week=_TRADING_DAYS_PER_WEEK,
         )
-        ratio_definition = "missing_weekly_ohlc / horizon_weeks"
+        ratio_definition = (
+            "avg_missing_daily_ohlc_fraction_over_horizon_weeks"
+        )
     else:
         ratios_by_feature = weekly_goodness_ratios(
             weekly,

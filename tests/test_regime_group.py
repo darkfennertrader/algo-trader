@@ -131,4 +131,4 @@ def test_regime_goodness_ratio_daily() -> None:
     ratios = goodness.ratios_by_feature["glob_disp_ret_1w"]["ASSET"]
     second_week = weekly_index[1]
     key = second_week.isoformat(timespec="seconds").replace("T", "_")
-    assert ratios[key] == 0.2
+    assert ratios[key] == "0.200"

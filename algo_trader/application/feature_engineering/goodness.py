@@ -18,8 +18,8 @@ def weekly_goodness_ratios(
     *,
     horizon_days_by_feature: Mapping[str, int],
     trading_days_per_week: int,
-) -> dict[str, dict[str, dict[str, float]]]:
-    ratios_by_feature: dict[str, dict[str, dict[str, float]]] = {}
+) -> dict[str, dict[str, dict[str, str]]]:
+    ratios_by_feature: dict[str, dict[str, dict[str, str]]] = {}
     if not horizon_days_by_feature:
         return ratios_by_feature
     weeks_by_feature = _weeks_by_feature(
@@ -44,8 +44,8 @@ def daily_goodness_ratios(
     *,
     horizon_days_by_feature: Mapping[str, int],
     trading_days_per_week: int,
-) -> dict[str, dict[str, dict[str, float]]]:
-    ratios_by_feature: dict[str, dict[str, dict[str, float]]] = {}
+) -> dict[str, dict[str, dict[str, str]]]:
+    ratios_by_feature: dict[str, dict[str, dict[str, str]]] = {}
     if not horizon_days_by_feature:
         return ratios_by_feature
     weeks_by_feature = _weeks_by_feature(

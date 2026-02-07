@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-import re
+from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import tzinfo as TzInfo
 from pathlib import Path
@@ -10,7 +10,14 @@ from typing import Iterable, Literal, cast
 import numpy as np
 import pandas as pd
 
-from algo_trader.domain import DataProcessingError, DataSourceError
+from algo_trader.domain import DataProcessingError
+from .asset_loading import (
+    AssetLoadRequest,
+    load_asset_frame,
+    load_asset_frame_job,
+    month_end_exclusive,
+    month_start,
+)
 from .indexing import (
     combine_hourly_indexes,
     require_datetime_index,
@@ -22,10 +29,6 @@ ReturnFrequency = Literal["weekly"]
 YearMonth = tuple[int, int]
 
 logger = logging.getLogger(__name__)
-
-_FILE_MONTH_PATTERN = re.compile(
-    r"^hist_data_(?P<year>\d{4})-(?P<month>0[1-9]|1[0-2])\.csv$"
-)
 
 TimeZone = str | TzInfo
 
@@ -48,11 +51,16 @@ class ReturnsSourceConfig:
     start: YearMonth | None = None
     end: YearMonth | None = None
     columns: PriceColumns = field(default_factory=PriceColumns)
+    workers: int | None = None
 
 
 class ReturnsSource:
     def __init__(self, config: ReturnsSourceConfig) -> None:
         self._config = config
+        self._assets = list(config.assets)
+        self._worker_count = _resolve_worker_count(
+            len(self._assets), config.workers
+        )
         self._daily_asset_data: dict[str, pd.Series] | None = None
         self._hourly_asset_data: dict[str, pd.Series] | None = None
         self._hourly_ohlc_data: dict[str, pd.DataFrame] | None = None
@@ -76,7 +84,7 @@ class ReturnsSource:
         if not asset_data:
             raise DataProcessingError(
                 "No OHLC data available",
-                context={"assets": ",".join(self._config.assets)},
+                context={"assets": ",".join(self._assets)},
             )
         expected_weeks = _expected_week_starts(
             asset_data,
@@ -111,7 +119,7 @@ class ReturnsSource:
         if not asset_data:
             raise DataProcessingError(
                 "No OHLC data available",
-                context={"assets": ",".join(self._config.assets)},
+                context={"assets": ",".join(self._assets)},
             )
         daily_by_asset: dict[str, pd.DataFrame] = {}
         for asset, frame in asset_data.items():
@@ -142,19 +150,14 @@ class ReturnsSource:
         )
         if cache is not None:
             return cache
-        asset_data: dict[str, pd.Series] = {}
-        for asset in self._config.assets:
-            series = self._load_asset_series(
-                asset, resample_daily=resample_daily
+        if self._worker_count > 1 and len(self._assets) > 1:
+            asset_data = self._load_asset_series_parallel(
+                resample_daily=resample_daily
             )
-            if series is None:
-                logger.warning(
-                    "No data found for asset=%s base_dir=%s",
-                    asset,
-                    self._config.base_dir,
-                )
-                series = pd.Series(dtype=float, name=asset)
-            asset_data[asset] = series
+        else:
+            asset_data = self._load_asset_series_sequential(
+                resample_daily=resample_daily
+            )
         if resample_daily:
             self._daily_asset_data = asset_data
         else:
@@ -164,7 +167,6 @@ class ReturnsSource:
     def _get_hourly_ohlc_data(self) -> dict[str, pd.DataFrame]:
         if self._hourly_ohlc_data is not None:
             return self._hourly_ohlc_data
-        asset_data: dict[str, pd.DataFrame] = {}
         columns = self._config.columns
         ohlc_columns = [
             columns.open_col,
@@ -172,18 +174,14 @@ class ReturnsSource:
             columns.low_col,
             columns.close_col,
         ]
-        for asset in self._config.assets:
-            frame = self._load_asset_frame(
-                asset, columns=ohlc_columns, resample_daily=False
+        if self._worker_count > 1 and len(self._assets) > 1:
+            asset_data = self._load_ohlc_parallel(
+                columns=ohlc_columns
             )
-            if frame is None:
-                logger.warning(
-                    "No OHLC data found for asset=%s base_dir=%s",
-                    asset,
-                    self._config.base_dir,
-                )
-                frame = pd.DataFrame(columns=ohlc_columns)
-            asset_data[asset] = frame
+        else:
+            asset_data = self._load_ohlc_sequential(
+                columns=ohlc_columns
+            )
         self._hourly_ohlc_data = asset_data
         return asset_data
 
@@ -206,111 +204,152 @@ class ReturnsSource:
         columns: list[str],
         resample_daily: bool,
     ) -> pd.DataFrame | None:
-        asset_dir = self._config.base_dir / asset
-        if asset_dir.exists() and not asset_dir.is_dir():
-            raise DataSourceError(
-                "Asset path must be a directory",
-                context={"path": str(asset_dir), "asset": asset},
+        return load_asset_frame(
+            AssetLoadRequest(
+                base_dir=self._config.base_dir,
+                asset=asset,
+                columns=columns,
+                resample_daily=resample_daily,
+                time_col=self._config.columns.time_col,
+                start=self._config.start,
+                end=self._config.end,
             )
-        if not asset_dir.exists():
-            return None
-        csv_paths = sorted(asset_dir.rglob("*.csv"))
-        if not csv_paths:
-            return None
+        )
 
-        frames: list[pd.DataFrame] = []
-        for path in csv_paths:
-            frame = self._read_csv(path, columns=columns)
-            frame = _filter_frame_to_month(
-                frame, path, self._config.columns.time_col, asset
+    def _load_asset_series_sequential(
+        self, *, resample_daily: bool
+    ) -> dict[str, pd.Series]:
+        asset_data: dict[str, pd.Series] = {}
+        for asset in self._assets:
+            series = self._load_asset_series(
+                asset, resample_daily=resample_daily
             )
-            frames.append(frame)
+            if series is None:
+                logger.warning(
+                    "No data found for asset=%s base_dir=%s",
+                    asset,
+                    self._config.base_dir,
+                )
+                series = pd.Series(dtype=float, name=asset)
+            asset_data[asset] = series
+        return asset_data
 
-        combined = pd.concat(frames, ignore_index=True)
-        if combined.empty:
-            return None
-
-        time_col = self._config.columns.time_col
-        combined = combined.dropna(subset=[time_col])
-        combined = combined.set_index(time_col)
-        _ensure_datetime_index(combined, time_col)
-        combined = combined[~combined.index.duplicated(keep="last")]
-        combined = combined.sort_index()
-        combined = self._filter_by_month_range(combined)
-        if resample_daily:
-            combined = self._resample_daily(combined)
-        return combined
-
-    def _read_csv(self, path: Path, *, columns: list[str]) -> pd.DataFrame:
-        time_col = self._config.columns.time_col
-        usecols = [time_col, *columns]
-        unique_cols = list(dict.fromkeys(usecols))
-        try:
-            frame = pd.read_csv(
-                path,
-                usecols=unique_cols,
-                parse_dates=[time_col],
+    def _load_asset_series_parallel(
+        self, *, resample_daily: bool
+    ) -> dict[str, pd.Series]:
+        price_col = self._config.columns.price_col
+        futures_by_asset: dict[str, Future[pd.DataFrame | None]] = {}
+        with ProcessPoolExecutor(
+            max_workers=self._worker_count
+        ) as executor:
+            for asset in self._assets:
+                request = AssetLoadRequest(
+                    base_dir=self._config.base_dir,
+                    asset=asset,
+                    columns=[price_col],
+                    resample_daily=resample_daily,
+                    time_col=self._config.columns.time_col,
+                    start=self._config.start,
+                    end=self._config.end,
+                )
+                futures_by_asset[asset] = executor.submit(
+                    load_asset_frame_job,
+                    request,
+                )
+            results = self._collect_parallel_results(
+                futures_by_asset,
+                error_message="Failed to load asset data",
             )
-        except ValueError as exc:
-            raise DataSourceError(
-                "CSV missing required columns",
-                context={"path": str(path), "columns": ",".join(unique_cols)},
-            ) from exc
-        except Exception as exc:
-            raise DataSourceError(
-                "Failed to read CSV",
-                context={"path": str(path)},
-            ) from exc
-        return frame
+        asset_data: dict[str, pd.Series] = {}
+        for asset in self._assets:
+            frame = results.get(asset)
+            if frame is None or frame.empty:
+                logger.warning(
+                    "No data found for asset=%s base_dir=%s",
+                    asset,
+                    self._config.base_dir,
+                )
+                series = pd.Series(dtype=float, name=asset)
+            else:
+                series = frame[price_col].rename(asset)
+            asset_data[asset] = series
+        return asset_data
 
-    def _filter_by_month_range(self, frame: pd.DataFrame) -> pd.DataFrame:
-        if self._config.start is None and self._config.end is None:
-            return frame
-
-        index = _ensure_datetime_index(frame, self._config.columns.time_col)
-        tzinfo = cast(TimeZone | None, index.tz)
-        start_ts = (
-            _month_start(self._config.start, tzinfo)
-            if self._config.start
-            else None
-        )
-        end_ts = (
-            _month_end_exclusive(self._config.end, tzinfo)
-            if self._config.end
-            else None
-        )
-        if start_ts is not None:
-            frame = frame[frame.index >= start_ts]
-        if end_ts is not None:
-            frame = frame[frame.index < end_ts]
-        return frame
-
-    def _resample_daily(self, frame: pd.DataFrame) -> pd.DataFrame:
-        if frame.empty:
-            return frame
-        frame = frame.sort_index()
-        daily = frame.resample("1D", label="left", closed="left").last()
-        daily_index = _ensure_datetime_index(
-            daily, self._config.columns.time_col
-        )
-        weekday_mask = (daily_index.dayofweek >= 0) & (
-            daily_index.dayofweek <= 4
-        )
-        daily = daily[weekday_mask]
-        daily_index = _ensure_datetime_index(
-            daily, self._config.columns.time_col
-        )
-        if daily_index.tz is None:
-            frame_index = _ensure_datetime_index(
-                frame, self._config.columns.time_col
+    def _load_ohlc_sequential(
+        self, *, columns: list[str]
+    ) -> dict[str, pd.DataFrame]:
+        asset_data: dict[str, pd.DataFrame] = {}
+        for asset in self._assets:
+            frame = self._load_asset_frame(
+                asset, columns=columns, resample_daily=False
             )
-            tz = cast(TimeZone | None, frame_index.tz)
-            if tz:
-                daily_index = daily_index.tz_localize(tz)
-        daily.index = daily_index
-        if daily.index.name is None:
-            daily.index.name = self._config.columns.time_col
-        return daily
+            if frame is None:
+                logger.warning(
+                    "No OHLC data found for asset=%s base_dir=%s",
+                    asset,
+                    self._config.base_dir,
+                )
+                frame = pd.DataFrame(columns=columns)
+            asset_data[asset] = frame
+        return asset_data
+
+    def _load_ohlc_parallel(
+        self, *, columns: list[str]
+    ) -> dict[str, pd.DataFrame]:
+        futures_by_asset: dict[str, Future[pd.DataFrame | None]] = {}
+        with ProcessPoolExecutor(
+            max_workers=self._worker_count
+        ) as executor:
+            for asset in self._assets:
+                request = AssetLoadRequest(
+                    base_dir=self._config.base_dir,
+                    asset=asset,
+                    columns=columns,
+                    resample_daily=False,
+                    time_col=self._config.columns.time_col,
+                    start=self._config.start,
+                    end=self._config.end,
+                )
+                futures_by_asset[asset] = executor.submit(
+                    load_asset_frame_job,
+                    request,
+                )
+            results = self._collect_parallel_results(
+                futures_by_asset,
+                error_message="Failed to load OHLC data",
+            )
+        asset_data: dict[str, pd.DataFrame] = {}
+        for asset in self._assets:
+            frame = results.get(asset)
+            if frame is None:
+                logger.warning(
+                    "No OHLC data found for asset=%s base_dir=%s",
+                    asset,
+                    self._config.base_dir,
+                )
+                frame = pd.DataFrame(columns=columns)
+            asset_data[asset] = frame
+        return asset_data
+
+    def _collect_parallel_results(
+        self,
+        futures_by_asset: dict[str, Future[pd.DataFrame | None]],
+        *,
+        error_message: str,
+    ) -> dict[str, pd.DataFrame | None]:
+        results: dict[str, pd.DataFrame | None] = {}
+        for asset in self._assets:
+            future = futures_by_asset[asset]
+            try:
+                results[asset] = future.result()
+            except Exception as exc:
+                for pending in futures_by_asset.values():
+                    pending.cancel()
+                raise DataProcessingError(
+                    error_message,
+                    context={"asset": asset},
+                ) from exc
+        return results
 
     def _align_and_trim_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
         frame = frame.dropna(axis=0, how="all")
@@ -344,75 +383,12 @@ class ReturnsSource:
         return weekly_returns
 
 
-def _month_start(month: YearMonth, tzinfo: TimeZone | None) -> pd.Timestamp:
-    year, month_value = month
-    start = pd.Timestamp(year=year, month=month_value, day=1)
-    if tzinfo and start.tzinfo is None:
-        start = start.tz_localize(tzinfo)
-    return start
-
-
-def _month_end_exclusive(
-    month: YearMonth, tzinfo: TimeZone | None
-) -> pd.Timestamp:
-    year, month_value = month
-    start = pd.Timestamp(year=year, month=month_value, day=1)
-    end = (start + pd.offsets.MonthBegin(1)).normalize()
-    if tzinfo and end.tzinfo is None:
-        end = end.tz_localize(tzinfo)
-    return end
-
-
-def _ensure_datetime_index(
-    frame: pd.DataFrame, time_col: str
-) -> pd.DatetimeIndex:
-    if isinstance(frame.index, pd.DatetimeIndex):
-        return frame.index
-    try:
-        index = pd.DatetimeIndex(frame.index)
-    except Exception as exc:
-        raise DataProcessingError(
-            "Index must be datetime",
-            context={"column": time_col},
-        ) from exc
-    frame.index = index
-    return index
-
-
-def _extract_month_from_path(path: Path) -> YearMonth:
-    match = _FILE_MONTH_PATTERN.match(path.name)
-    if not match:
-        raise DataSourceError(
-            "Historical CSV filename must match hist_data_YYYY-MM.csv",
-            context={"path": str(path)},
-        )
-    return int(match.group("year")), int(match.group("month"))
-
-
-def _filter_frame_to_month(
-    frame: pd.DataFrame, path: Path, time_col: str, asset: str
-) -> pd.DataFrame:
-    year, month = _extract_month_from_path(path)
-    if time_col not in frame.columns:
-        raise DataSourceError(
-            "CSV missing time column",
-            context={"path": str(path), "column": time_col},
-        )
-    if frame.empty:
-        return frame
-    month_mask = (frame[time_col].dt.year == year) & (
-        frame[time_col].dt.month == month
-    )
-    if not month_mask.all():
-        dropped = len(frame) - int(month_mask.sum())
-        if dropped:
-            logger.debug(
-                "Found out-of-month rows asset=%s path=%s count=%s",
-                asset,
-                path,
-                dropped,
-            )
-    return frame[month_mask]
+def _resolve_worker_count(asset_count: int, requested: int | None) -> int:
+    if asset_count <= 1:
+        return 1
+    if requested is None:
+        return 1
+    return max(1, min(asset_count, requested))
 
 
 def _weekly_returns_from_ohlc(
@@ -486,18 +462,24 @@ def _compute_weekly_ohlc(
         missing = weekly.index[weekly.isna().all(axis=1)]
         if not missing.empty:
             missing_by_asset[asset] = [
-                stamp.isoformat() for stamp in missing
+                _format_week_label(stamp) for stamp in missing
             ]
         weekly_by_asset[asset] = weekly
         time_by_asset[asset] = time_meta
     if missing_by_asset:
         raise DataProcessingError(
             "Weekly OHLC missing complete weeks",
-            context={"missing_weeks_by_asset": str(missing_by_asset)},
+            context={
+                "missing_weeks_by_asset (start week)": str(missing_by_asset)
+            },
         )
     if not weekly_by_asset:
         return pd.DataFrame(), {}
     return pd.concat(weekly_by_asset, axis=1), time_by_asset
+
+
+def _format_week_label(timestamp: pd.Timestamp) -> str:
+    return timestamp.strftime("%Y-%m-%d")
 
 
 def _weekly_ohlc_frame(
@@ -727,14 +709,29 @@ def _expected_week_starts(
     if range_start >= range_end:
         return pd.DatetimeIndex([])
     range_end = range_end - pd.Timedelta(1, "ns")
-    start_week = _week_start_index(pd.DatetimeIndex([range_start]))[0]
+    start_week = _start_week_for_range(
+        range_start, skip_partial=start is not None
+    )
     end_week = _week_start_index(pd.DatetimeIndex([range_end]))[0]
+    if start_week > end_week:
+        return pd.DatetimeIndex([])
     return pd.date_range(
         start=start_week,
         end=end_week,
         freq="W-MON",
         tz=start_week.tz,
     )
+
+
+def _start_week_for_range(
+    range_start: pd.Timestamp, *, skip_partial: bool
+) -> pd.Timestamp:
+    if not skip_partial:
+        return _week_start_index(pd.DatetimeIndex([range_start]))[0]
+    normalized = range_start.normalize()
+    if normalized.dayofweek == 0:
+        return normalized
+    return normalized + pd.Timedelta(days=7 - normalized.dayofweek)
 
 
 def _resolve_week_range(
@@ -753,9 +750,9 @@ def _resolve_week_range(
     min_ts = min(index.min() for index in indexes)
     max_ts = max(index.max() for index in indexes)
     tzinfo = cast(TimeZone | None, min_ts.tzinfo)
-    range_start = _month_start(start, tzinfo) if start else min_ts
+    range_start = month_start(start, tzinfo) if start else min_ts
     range_end = (
-        _month_end_exclusive(end, tzinfo)
+        month_end_exclusive(end, tzinfo)
         if end
         else max_ts + pd.Timedelta(hours=1)
     )

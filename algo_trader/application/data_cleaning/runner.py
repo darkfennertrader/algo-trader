@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -150,15 +152,34 @@ def run(
     *,
     request: RunRequest,
 ) -> Path:
+    total_start = time.perf_counter()
     config = _resolve_run_config(request)
-    logger.info("Using %s assets for data_cleaning", len(config.assets))
+    workers = _resolve_parallel_workers(len(config.assets))
+    logger.info(
+        "Using %s assets for data_cleaning workers=%s",
+        len(config.assets),
+        workers,
+    )
 
+    phase_start = time.perf_counter()
     return_data = _load_return_data(config)
+    logger.info(
+        "Data cleaning loaded inputs duration=%.2fs",
+        time.perf_counter() - phase_start,
+    )
+
+    phase_start = time.perf_counter()
     output_paths = _prepare_output_paths(config.data_lake, date.today())
     writer = _build_output_writer()
     output_path = _write_returns(
         return_data.returns, output_paths.output_path, writer
     )
+    logger.info(
+        "Data cleaning wrote returns duration=%.2fs",
+        time.perf_counter() - phase_start,
+    )
+
+    phase_start = time.perf_counter()
     weekly_ohlc_path = _write_weekly_ohlc(
         return_data.weekly_ohlc, output_paths.output_dir
     )
@@ -177,6 +198,12 @@ def run(
         output_dir=output_paths.output_dir,
         writer=writer,
     )
+    logger.info(
+        "Data cleaning wrote OHLC duration=%.2fs",
+        time.perf_counter() - phase_start,
+    )
+
+    phase_start = time.perf_counter()
     tensor_info = _write_return_tensor(
         return_data.returns, output_paths.output_dir
     )
@@ -208,6 +235,10 @@ def run(
         writer=writer,
     )
     logger.info(
+        "Data cleaning wrote metadata duration=%.2fs",
+        time.perf_counter() - phase_start,
+    )
+    logger.info(
         "Saved returns CSV path=%s rows=%s assets=%s",
         output_path,
         len(return_data.returns),
@@ -224,6 +255,12 @@ def run(
         daily_ohlc_path,
         len(return_data.daily_ohlc),
         len(return_data.daily_ohlc.columns),
+    )
+    duration = time.perf_counter() - total_start
+    logger.info("----- TOTAL -----")
+    logger.info(
+        "Data cleaning completed duration=%.2fm",
+        duration / 60.0,
     )
     return output_path
 
@@ -328,6 +365,8 @@ def _parse_month(value: str | None, field: str) -> YearMonth | None:
 def _parse_month_range(
     start: str | None, end: str | None
 ) -> tuple[YearMonth | None, YearMonth | None]:
+    if start is None or not start.strip():
+        raise ConfigError("start is required for data_cleaning")
     start_month = _parse_month(start, "start")
     end_month = _parse_month(end, "end")
     _validate_month_window(start_month, end_month)
@@ -363,6 +402,7 @@ def _validate_directory(path: Path, label: str) -> None:
 
 
 def _build_returns_source(config: RunConfig) -> ReturnsSource:
+    workers = _resolve_parallel_workers(len(config.assets))
     return ReturnsSource(
         ReturnsSourceConfig(
             base_dir=config.data_source,
@@ -370,8 +410,16 @@ def _build_returns_source(config: RunConfig) -> ReturnsSource:
             return_type=config.return_type,
             start=config.start,
             end=config.end,
+            workers=workers,
         )
     )
+
+
+def _resolve_parallel_workers(asset_count: int) -> int:
+    if asset_count <= 1:
+        return 1
+    count = os.cpu_count() or 1
+    return min(asset_count, max(1, count - 1))
 
 
 def _prepare_output_paths(data_lake: Path, run_date: date) -> OutputPaths:

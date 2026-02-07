@@ -99,7 +99,7 @@ class VolatilityConfig:
 
 @dataclass(frozen=True)
 class VolatilityGoodness:
-    ratios_by_feature: Mapping[str, Mapping[str, Mapping[str, float]]]
+    ratios_by_feature: Mapping[str, Mapping[str, Mapping[str, str]]]
     horizon_days_by_feature: Mapping[str, int]
 
 
@@ -598,8 +598,8 @@ def _compute_goodness_ratios(
     assets: Sequence[str],
     weekly_index: pd.DatetimeIndex,
     horizon_days_by_feature: Mapping[str, int],
-) -> dict[str, dict[str, dict[str, float]]]:
-    ratios_by_feature: dict[str, dict[str, dict[str, float]]] = {}
+) -> dict[str, dict[str, dict[str, str]]]:
+    ratios_by_feature: dict[str, dict[str, dict[str, str]]] = {}
     if not horizon_days_by_feature:
         return ratios_by_feature
     weeks_by_feature = {

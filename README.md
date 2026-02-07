@@ -21,6 +21,8 @@ Basic commands using uv:
 Data cleaning return options:
 - `--return-type simple` (default): `(P_t / P_{t-1}) - 1`
 - `--return-type log`: `log(P_t) - log(P_{t-1})`
+- `--start` is required; `--end` is optional (defaults to the latest available data).
+- Data cleaning runs per-asset loading in parallel using `max(1, os.cpu_count() - 1)` workers, capped by asset count.
 - Return frequency is weekly: weekly returns from hourly closes grouped by week starting Monday; uses the first available price in the week (prefers Monday) and last available price (prefers Friday), labeled with the latest timestamp in that week across assets
 
 ### Feature engineering

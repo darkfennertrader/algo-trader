@@ -22,7 +22,8 @@ from ..utils import (
     require_ohlc_columns,
     require_weekly_index,
     reindex_asset_features,
-    serialize_series,
+    serialize_series_positive,
+    weekly_missing_fraction_from_daily,
     week_end_by_start,
 )
 
@@ -57,7 +58,7 @@ class RegimeConfig:
 
 @dataclass(frozen=True)
 class RegimeGoodness:
-    ratios_by_feature: Mapping[str, Mapping[str, Mapping[str, float | None]]]
+    ratios_by_feature: Mapping[str, Mapping[str, Mapping[str, float]]]
     horizon_days_by_feature: Mapping[str, int]
 
 
@@ -452,19 +453,22 @@ def _compute_goodness(
     horizon_days_by_feature = context.plan.horizon_days_by_feature
     if not horizon_days_by_feature:
         return None
-    ratios_by_feature: dict[str, dict[str, dict[str, float | None]]] = {
-        name: {} for name in horizon_days_by_feature
+    weeks_by_feature = {
+        name: max(1, days // 5) for name, days in horizon_days_by_feature.items()
+    }
+    ratios_by_feature: dict[str, dict[str, dict[str, float]]] = {
+        name: {} for name in weeks_by_feature
     }
     for asset in assets:
-        asset_daily = load_asset_daily(daily_ohlc, asset)
-        ratios_by_horizon = _daily_goodness_ratios(
-            asset_daily,
-            weekly_index=context.weekly_index,
-            week_end_by_week_start=context.week_end_by_week_start,
-            horizon_days_by_feature=horizon_days_by_feature,
+        weekly_missing = weekly_missing_fraction_from_daily(
+            daily_ohlc, asset=asset, weekly_index=context.weekly_index
         )
-        for feature_name, series in ratios_by_horizon.items():
-            ratios_by_feature[feature_name][asset] = serialize_series(series)
+        for feature_name, weeks in weeks_by_feature.items():
+            ratios_by_feature[feature_name][asset] = (
+                serialize_series_positive(
+                    weekly_missing.rolling(window=weeks, min_periods=weeks).mean()
+                )
+            )
     return RegimeGoodness(
         ratios_by_feature=ratios_by_feature,
         horizon_days_by_feature=horizon_days_by_feature,
@@ -727,32 +731,6 @@ def _vol_regime(series: pd.Series, *, eps: float) -> pd.Series:
 
 def _global_mean(frame: pd.DataFrame) -> pd.Series:
     return frame.mean(axis=1, skipna=True)
-
-
-def _daily_goodness_ratios(
-    asset_daily: pd.DataFrame,
-    *,
-    weekly_index: pd.DatetimeIndex,
-    week_end_by_week_start: pd.Series,
-    horizon_days_by_feature: Mapping[str, int],
-) -> dict[str, pd.Series]:
-    ratios_by_feature: dict[str, pd.Series] = {}
-    if not horizon_days_by_feature:
-        return ratios_by_feature
-    valid_mask = ~asset_daily.isna().any(axis=1)
-    ratios_by_horizon: dict[int, pd.Series] = {}
-    for horizon_days in sorted(set(horizon_days_by_feature.values())):
-        counts = valid_mask.astype(float).rolling(
-            window=horizon_days, min_periods=horizon_days
-        ).sum()
-        ratios_by_horizon[horizon_days] = to_weekly(
-            counts / float(horizon_days),
-            week_end_by_week_start,
-            weekly_index,
-        )
-    for feature_name, horizon_days in horizon_days_by_feature.items():
-        ratios_by_feature[feature_name] = ratios_by_horizon[horizon_days]
-    return ratios_by_feature
 
 
 def _glob_vol_name(weeks: int) -> str:

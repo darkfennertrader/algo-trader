@@ -22,7 +22,6 @@ from .asymmetry import (
 from .common import (
     log_ratio,
     to_weekly,
-    week_end_by_start,
 )
 from .level import (
     LevelContext,
@@ -47,7 +46,9 @@ from ..utils import (
     require_no_missing,
     require_weekly_index,
     require_weekly_ohlc,
-    serialize_series,
+    serialize_series_positive,
+    weekly_missing_fraction_from_daily,
+    week_end_by_start,
 )
 
 DEFAULT_HORIZON_DAYS: tuple[int, ...] = (5, 20, 60, 130)
@@ -98,7 +99,7 @@ class VolatilityConfig:
 
 @dataclass(frozen=True)
 class VolatilityGoodness:
-    ratios_by_feature: Mapping[str, Mapping[str, Mapping[str, float | None]]]
+    ratios_by_feature: Mapping[str, Mapping[str, Mapping[str, float]]]
     horizon_days_by_feature: Mapping[str, int]
 
 
@@ -152,9 +153,13 @@ def _compute_features(
     if not assets:
         return pd.DataFrame(), [], None
     context = _build_context(weekly_ohlc, config, feature_set, assets)
-    features_by_asset, ratios_by_feature = _compute_assets(
-        daily_ohlc, assets, context
+    ratios_by_feature = _compute_goodness_ratios(
+        daily_ohlc,
+        assets=assets,
+        weekly_index=context.weekly_index,
+        horizon_days_by_feature=context.plan.horizon_days_by_feature,
     )
+    features_by_asset = _compute_assets(daily_ohlc, assets, context)
     combined = pd.concat(features_by_asset, axis=1)
     combined.columns = combined.columns.set_names(["asset", "feature"])
     feature_names = list(features_by_asset[assets[0]].columns)
@@ -187,24 +192,13 @@ def _compute_assets(
     daily_ohlc: pd.DataFrame,
     assets: Sequence[str],
     context: _VolatilityContext,
-) -> tuple[
-    dict[str, pd.DataFrame],
-    dict[str, dict[str, dict[str, float | None]]],
-]:
+) -> dict[str, pd.DataFrame]:
     features_by_asset: dict[str, pd.DataFrame] = {}
-    ratios_by_feature: dict[str, dict[str, dict[str, float | None]]] = {
-        feature: {} for feature in context.plan.horizon_days_by_feature
-    }
     for asset in assets:
         asset_daily = load_asset_daily(daily_ohlc, asset)
-        feature_frame, ratio_payload = _compute_asset_features(
-            asset_daily,
-            context=context,
-        )
+        feature_frame = _compute_asset_features(asset_daily, context=context)
         features_by_asset[asset] = feature_frame
-        for feature_name, values in ratio_payload.items():
-            ratios_by_feature[feature_name][asset] = values
-    return features_by_asset, ratios_by_feature
+    return features_by_asset
 
 
 @dataclass(frozen=True)
@@ -419,16 +413,10 @@ def _compute_asset_features(
     asset_daily: pd.DataFrame,
     *,
     context: _VolatilityContext,
-) -> tuple[pd.DataFrame, dict[str, dict[str, float | None]]]:
-    ratios_by_feature = _compute_goodness_ratios(
-        asset_daily,
-        weekly_index=context.weekly_index,
-        week_end_by_week_start=context.week_end_by_week_start,
-        horizon_days_by_feature=context.plan.horizon_days_by_feature,
-    )
+) -> pd.DataFrame:
     trimmed = _drop_missing_rows(asset_daily)
     feature_frame = _compute_asset_feature_frame(trimmed, context)
-    return feature_frame, ratios_by_feature
+    return feature_frame
 
 
 def _drop_missing_rows(asset_daily: pd.DataFrame) -> pd.DataFrame:
@@ -605,27 +593,29 @@ def _finalize_feature_frame(
 
 
 def _compute_goodness_ratios(
-    asset_daily: pd.DataFrame,
+    daily_ohlc: pd.DataFrame,
     *,
+    assets: Sequence[str],
     weekly_index: pd.DatetimeIndex,
-    week_end_by_week_start: pd.Series,
     horizon_days_by_feature: Mapping[str, int],
-) -> dict[str, dict[str, float | None]]:
-    ratios_by_feature: dict[str, dict[str, float | None]] = {}
+) -> dict[str, dict[str, dict[str, float]]]:
+    ratios_by_feature: dict[str, dict[str, dict[str, float]]] = {}
     if not horizon_days_by_feature:
         return ratios_by_feature
-    unique_horizons = sorted(set(horizon_days_by_feature.values()))
-    ratios_by_horizon: dict[int, pd.Series] = {}
-    for horizon_days in unique_horizons:
-        ratio = _n_eff_ratio(asset_daily, horizon_days)
-        ratios_by_horizon[horizon_days] = to_weekly(
-            ratio,
-            week_end_by_week_start,
-            weekly_index,
+    weeks_by_feature = {
+        name: max(1, days // 5) for name, days in horizon_days_by_feature.items()
+    }
+    ratios_by_feature = {name: {} for name in weeks_by_feature}
+    for asset in assets:
+        weekly_missing = weekly_missing_fraction_from_daily(
+            daily_ohlc, asset=asset, weekly_index=weekly_index
         )
-    for feature_name, horizon_days in horizon_days_by_feature.items():
-        series = ratios_by_horizon[horizon_days]
-        ratios_by_feature[feature_name] = serialize_series(series)
+        for feature_name, weeks in weeks_by_feature.items():
+            ratios_by_feature[feature_name][asset] = (
+                serialize_series_positive(
+                    weekly_missing.rolling(window=weeks, min_periods=weeks).mean()
+                )
+            )
     return ratios_by_feature
 
 

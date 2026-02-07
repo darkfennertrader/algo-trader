@@ -150,6 +150,68 @@ def week_end_by_start(index: pd.DatetimeIndex) -> pd.Series:
     return pd.Series(index, index=week_start).groupby(level=0).max()
 
 
+def to_weekly(
+    series: pd.Series,
+    week_end_by_week_start: pd.Series | None = None,
+    weekly_index: pd.DatetimeIndex | None = None,
+    *,
+    aggregator: str = "last",
+    label: str = "daily_ohlc",
+) -> pd.Series:
+    if weekly_index is None:
+        raise DataProcessingError(
+            "weekly_index is required for weekly aggregation",
+            context={"label": label},
+        )
+    if series.empty:
+        return pd.Series(index=weekly_index, dtype=float)
+    series = series.sort_index()
+    series_index = require_datetime_index(series.index, label=label)
+    week_start = week_start_index(series_index)
+    grouped = series.groupby(week_start, sort=False)
+    if aggregator == "last":
+        weekly = grouped.last()
+    elif aggregator == "mean":
+        weekly = grouped.mean()
+    else:
+        raise DataProcessingError(
+            "Unknown weekly aggregation",
+            context={"aggregator": aggregator},
+        )
+    if week_end_by_week_start is None:
+        week_end_by_week_start = week_end_by_start(weekly_index)
+    week_end = week_end_by_week_start.reindex(weekly.index)
+    mask = week_end.notna()
+    weekly = weekly[mask]
+    week_end = week_end[mask]
+    weekly.index = pd.DatetimeIndex(week_end)
+    return weekly.reindex(weekly_index)
+
+
+def daily_series_to_weekly_mean(
+    series: pd.Series, *, weekly_index: pd.DatetimeIndex
+) -> pd.Series:
+    return to_weekly(
+        series,
+        weekly_index=weekly_index,
+        aggregator="mean",
+    )
+
+
+def weekly_missing_fraction_from_daily(
+    daily_ohlc: pd.DataFrame,
+    *,
+    asset: str,
+    weekly_index: pd.DatetimeIndex,
+) -> pd.Series:
+    asset_daily = load_asset_daily(daily_ohlc, asset)
+    valid_mask = ~asset_daily.isna().any(axis=1)
+    missing_by_day = 1.0 - valid_mask.astype(float)
+    return daily_series_to_weekly_mean(
+        missing_by_day, weekly_index=weekly_index
+    )
+
+
 def load_asset_daily(
     daily_ohlc: pd.DataFrame,
     asset: str,
@@ -251,9 +313,21 @@ def serialize_series(series: pd.Series) -> dict[str, float | None]:
     index = require_datetime_index(series.index, label="feature_series")
     values = series.to_numpy(dtype=float)
     for stamp, value in zip(index, values, strict=False):
-        key = stamp.isoformat()
+        key = stamp.isoformat(timespec="seconds").replace("T", "_")
         if pd.isna(value):
             payload[key] = None
         else:
             payload[key] = float(value)
+    return payload
+
+
+def serialize_series_positive(series: pd.Series) -> dict[str, float]:
+    payload: dict[str, float] = {}
+    index = require_datetime_index(series.index, label="feature_series")
+    values = series.to_numpy(dtype=float)
+    for stamp, value in zip(index, values, strict=False):
+        if pd.isna(value) or value <= 0:
+            continue
+        key = stamp.isoformat(timespec="seconds").replace("T", "_")
+        payload[key] = float(value)
     return payload

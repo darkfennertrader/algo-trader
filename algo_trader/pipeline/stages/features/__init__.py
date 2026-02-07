@@ -3,9 +3,16 @@ from .protocols import FeatureFrequency, FeatureGroup, FeatureInputs, FeatureOut
 from .registry import FeatureRegistry, default_registry
 from .utils import (
     asset_frame,
+    daily_series_to_weekly_mean,
+    load_asset_daily,
     ordered_assets,
+    require_daily_ohlc,
     require_weekly_ohlc,
+    require_weekly_index,
     serialize_series,
+    serialize_series_positive,
+    weekly_missing_fraction_from_daily,
+    week_end_by_start,
 )
 from .cross_sectional import (
     DEFAULT_HORIZON_DAYS as DEFAULT_CROSS_SECTIONAL_HORIZON_DAYS,
@@ -57,9 +64,16 @@ __all__ = [
     "FeatureRegistry",
     "default_registry",
     "asset_frame",
+    "daily_series_to_weekly_mean",
+    "load_asset_daily",
     "ordered_assets",
+    "require_daily_ohlc",
     "require_weekly_ohlc",
+    "require_weekly_index",
     "serialize_series",
+    "serialize_series_positive",
+    "weekly_missing_fraction_from_daily",
+    "week_end_by_start",
     "DEFAULT_CROSS_SECTIONAL_HORIZON_DAYS",
     "CROSS_SECTIONAL_FEATURES",
     "CrossSectionalConfig",

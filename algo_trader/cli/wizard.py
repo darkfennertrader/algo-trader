@@ -17,6 +17,9 @@ from algo_trader.pipeline.stages.features.mean_reversion import (
 from algo_trader.pipeline.stages.features.momentum import (
     SUPPORTED_FEATURES as MOMENTUM_FEATURES,
 )
+from algo_trader.pipeline.stages.features.seasonal import (
+    SUPPORTED_FEATURES as SEASONAL_FEATURES,
+)
 from algo_trader.pipeline.stages.features.volatility import (
     SUPPORTED_FEATURES as VOLATILITY_FEATURES,
 )
@@ -102,22 +105,17 @@ def _data_processing_command() -> WizardCommand:
 
 
 def _feature_engineering_command() -> WizardCommand:
-    horizons = _prompt_optional(
-        "horizons in days (blank for defaults: momentum 5,20,60,130; "
-        "mean_reversion 5,20,60,130; breakout 5,20,60,130; "
-        "cross_sectional 5,20,60,130; volatility 5,20,60,130; "
-        "regime 5,20,60,130). "
-        "When set, applies to all groups"
-    )
     groups = _prompt_feature_groups()
     if not groups:
         groups = _feature_group_choices()
     commands: list[list[str]] = []
+    first_group = True
     for group in groups:
+        if not first_group:
+            print()
+        first_group = False
         features = _prompt_feature_keys(group)
         args = ["algotrader", "feature_engineering"]
-        if horizons:
-            args.extend(["--horizons", horizons])
         args.extend(["--group", group])
         for feature in features:
             args.extend(["--feature", feature])
@@ -373,5 +371,6 @@ def _feature_keys_by_group() -> dict[str, list[str]]:
         "breakout": sorted(BREAKOUT_FEATURES),
         "cross_sectional": sorted(CROSS_SECTIONAL_FEATURES),
         "volatility": sorted(VOLATILITY_FEATURES),
+        "seasonal": sorted(SEASONAL_FEATURES),
         "regime": sorted(REGIME_FEATURES),
     }

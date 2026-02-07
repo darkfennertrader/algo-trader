@@ -29,19 +29,11 @@ Compute feature groups from data-cleaning outputs (weekly momentum/mean-reversio
 
 ```bash
 uv run algotrader feature_engineering \
-  --horizons 5,30,60,130 \
   --group momentum
 ```
 
 Args and defaults:
-- `horizons`: comma-separated day counts (optional). If not set, each group uses its own defaults:
-  - momentum: `5,20,60,130`
-  - mean_reversion: `5,20,60,130`
-  - breakout: `5,20,60,130`
-  - volatility: `5,20,60,130`
-  - seasonal: `60,130`
-  - regime: `5,20,60,130`
-  When provided, the same horizons are applied to all selected groups.
+- Horizons are fixed to each group's defaults (see the group sections below). The CLI does not accept horizon overrides.
 - `group`: feature group to compute (repeatable; default = all registered groups).
    Valid values: `momentum`, `mean_reversion`, `breakout`, `cross_sectional`, `volatility`, `seasonal`, `regime`.
 - `feature`: feature key within a group (repeatable; default = group default set).
@@ -100,7 +92,7 @@ Computed on weekly OHLC data per asset (horizons shown in weeks; defaults = 1, 4
 #### Volatility group features
 
 Computed on daily OHLC data per asset, then sampled to weekly output (horizons shown in weeks; defaults = 1, 4, 12, 26).
-Missing daily OHLC rows are dropped before indicator computation; data-quality ratios are written to `goodness.json` as valid / horizon for volatility and regime and missing / horizon for weekly groups.
+Missing daily OHLC rows are dropped before indicator computation; data-quality ratios are written to `goodness.json` as valid / horizon for volatility and regime and missing / horizon for weekly groups. Timestamp keys in `goodness.json` use `YYYY-MM-DD_HH:MM:SS+00:00`.
 
 - `vol_cc_d_1w`, `vol_cc_d_4w`, `vol_cc_d_12w`, `vol_cc_d_26w`: close-to-close realized vol over the stated horizon of daily returns.
 - `atrp_d_4w`, `atrp_d_12w`: ATR over the stated horizon of daily bars, divided by close.

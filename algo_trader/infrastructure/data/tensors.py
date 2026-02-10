@@ -9,6 +9,12 @@ import torch
 from algo_trader.domain import DataProcessingError
 
 _NANOSECONDS_PER_HOUR = 3_600_000_000_000
+_UNIT_TO_NANOSECONDS = {
+    "ns": 1,
+    "us": 1_000,
+    "ms": 1_000_000,
+    "s": 1_000_000_000,
+}
 
 
 def require_utc_hourly_index(
@@ -48,8 +54,17 @@ def require_utc_hourly_index(
 
 
 def timestamps_to_epoch_hours(index: pd.DatetimeIndex) -> np.ndarray:
-    epoch_ns = index.view("int64")
-    return (epoch_ns // _NANOSECONDS_PER_HOUR).astype("int64")
+    epoch = index.view("int64")
+    unit = getattr(index.dtype, "unit", "ns") or "ns"
+    multiplier = _UNIT_TO_NANOSECONDS.get(unit)
+    if multiplier is None:
+        raise DataProcessingError(
+            "Unsupported datetime unit",
+            context={"unit": str(unit)},
+        )
+    if multiplier != 1:
+        epoch = epoch * multiplier
+    return (epoch // _NANOSECONDS_PER_HOUR).astype("int64")
 
 
 def write_tensor_bundle(

@@ -43,3 +43,7 @@ class DataProcessingError(AlgoTraderError):
 
 class InferenceError(AlgoTraderError):
     pass
+
+
+class ModelSelectionError(AlgoTraderError):
+    pass

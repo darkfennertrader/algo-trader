@@ -19,7 +19,7 @@ from algo_trader.application.data_cleaning import (
     run as run_data_cleaning,
 )
 from algo_trader.application.data_processing import run as run_data_processing
-from algo_trader.application import feature_engineering, modeling
+from algo_trader.application import feature_engineering, model_selection, modeling
 from algo_trader.cli.wizard import run as run_wizard
 
 logger = logging.getLogger(__name__)
@@ -133,6 +133,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to prepared CSV (overrides feature store lookup).",
     )
 
+    model_selection_parser = subparsers.add_parser(
+        "model_selection",
+        help="Run model selection (skeleton).",
+    )
+    model_selection_parser.add_argument(
+        "--selection-config",
+        type=Path,
+        help="Path to model_selection.yml (defaults to config/model_selection.yml).",
+    )
+
     feature_parser = subparsers.add_parser(
         "feature_engineering",
         help="Compute feature groups from cleaned data.",
@@ -236,6 +246,11 @@ def _run_feature_engineering(
     return 0
 
 
+def _run_model_selection(*, config_path: Path | None) -> int:
+    model_selection.run(config_path=config_path)
+    return 0
+
+
 def _cli_context(argv: Sequence[str] | None) -> dict[str, str]:
     if not argv:
         return {}
@@ -280,6 +295,10 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
             _run_feature_engineering,
             groups=getattr(args, "group", None),
             features=getattr(args, "feature", None),
+        ),
+        "model_selection": partial(
+            _run_model_selection,
+            config_path=getattr(args, "selection_config", None),
         ),
         "wizard": _run_wizard,
     }

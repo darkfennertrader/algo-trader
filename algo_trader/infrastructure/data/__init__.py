@@ -18,6 +18,7 @@ from .tensors import (
     timestamps_to_epoch_hours,
     write_tensor_bundle,
 )
+from .panel_tensor_dataset import PanelTensorDataset, load_panel_tensor_dataset
 
 __all__ = [
     "ReturnType",
@@ -33,4 +34,6 @@ __all__ = [
     "symbol_directory",
     "timestamps_to_epoch_hours",
     "write_tensor_bundle",
+    "PanelTensorDataset",
+    "load_panel_tensor_dataset",
 ]

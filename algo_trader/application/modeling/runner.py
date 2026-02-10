@@ -337,7 +337,8 @@ def _log_interval(steps: int) -> int:
 
 
 def _frame_to_tensor(frame: pd.DataFrame) -> torch.Tensor:
-    return torch.as_tensor(frame.to_numpy(dtype=float), dtype=torch.float32)
+    values = frame.to_numpy(dtype=float, copy=True)
+    return torch.as_tensor(values, dtype=torch.float32)
 
 
 def _write_outputs(

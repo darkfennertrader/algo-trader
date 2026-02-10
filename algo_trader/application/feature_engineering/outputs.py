@@ -184,16 +184,14 @@ def _build_goodness_payload(
             horizon_days_by_feature=horizon_days_by_feature,
             trading_days_per_week=_TRADING_DAYS_PER_WEEK,
         )
-        ratio_definition = (
-            "avg_missing_daily_ohlc_fraction_over_horizon_weeks"
-        )
+        ratio_definition = _ratio_definition(uses_daily=True)
     else:
         ratios_by_feature = weekly_goodness_ratios(
             weekly,
             horizon_days_by_feature=horizon_days_by_feature,
             trading_days_per_week=_TRADING_DAYS_PER_WEEK,
         )
-        ratio_definition = "missing_weekly_ohlc / horizon_weeks"
+        ratio_definition = _ratio_definition(uses_daily=False)
     return {
         "group": context.group_name,
         "run_at": format_run_at(datetime.now(timezone.utc)),
@@ -290,7 +288,7 @@ def _build_volatility_goodness_payload(
         "run_at": format_run_at(datetime.now(timezone.utc)),
         "source": sources,
         "dest": format_tilde_path(destination_path),
-        "ratio_definition": "valid_daily_ohlc / horizon_days",
+        "ratio_definition": _ratio_definition(uses_daily=True),
         "ratios_by_feature": goodness.ratios_by_feature,
     }
 
@@ -306,9 +304,18 @@ def _build_regime_goodness_payload(
         "run_at": format_run_at(datetime.now(timezone.utc)),
         "source": sources,
         "dest": format_tilde_path(destination_path),
-        "ratio_definition": "valid_daily_ohlc / horizon_days",
+        "ratio_definition": _ratio_definition(uses_daily=True),
         "ratios_by_feature": goodness.ratios_by_feature,
     }
+
+
+def _ratio_definition(*, uses_daily: bool) -> str:
+    if uses_daily:
+        return (
+            "daily: avg_missing_daily_ohlc_fraction_over_horizon_weeks; "
+            "weekly: missing_weekly_ohlc / horizon_weeks"
+        )
+    return "weekly: missing_weekly_ohlc / horizon_weeks"
 
 
 def _weekly_horizon_days_by_feature(

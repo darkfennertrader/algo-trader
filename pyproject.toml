@@ -18,6 +18,7 @@ dependencies = [
     "torchaudio==2.10.0",
     "pyro-ppl>=1.9.1",
     "ta-lib==0.6.8",
+    "ray[default]>=2.53.0",
 ]
 
 [build-system]

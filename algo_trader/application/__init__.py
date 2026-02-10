@@ -4,6 +4,7 @@ from . import (
     data_sources,
     feature_engineering,
     historical,
+    model_selection,
     modeling,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "data_sources",
     "feature_engineering",
     "historical",
+    "model_selection",
     "modeling",
 ]

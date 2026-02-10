@@ -109,7 +109,7 @@ def _trim_to_first_complete_row(
         return presence_frame
     presence = presence_frame.copy()
     presence = presence.where(presence.notna(), False)
-    presence = presence.astype(bool, copy=False)
+    presence = presence.astype(bool)
     presence = presence.loc[presence.any(axis=1)]
     if presence.empty:
         return presence

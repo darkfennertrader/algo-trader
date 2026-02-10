@@ -12,5 +12,5 @@ wheels/
 .env
 .uv-cache
 typings
-config/tickers.yml
+config/*
 /docs

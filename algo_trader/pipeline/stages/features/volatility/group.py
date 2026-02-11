@@ -56,22 +56,17 @@ DEFAULT_EPSILON = 1e-8
 SUPPORTED_FEATURES: tuple[str, ...] = (
     "vol_cc_d",
     "atrp_d",
-    "vol_range_parkinson_d",
     "vol_regime_cc",
     "vov_norm",
     "vol_ts_cc_1w_4w",
-    "vol_ts_cc_4w_12w",
     "vol_ts_cc_4w_26w",
-    "vol_ts_atr_4w_12w",
-    "downside_vol_d_4w",
-    "upside_vol_d_4w",
     "down_up_vol_ratio_4w",
     "realized_skew_d_12w",
-    "realized_kurt_d_12w",
     "tail_5p_sigma_ratio_12w",
     "jump_freq_4w",
 )
-ATR_WEEKS: tuple[int, ...] = (4, 12)
+VOL_CC_WEEKS: tuple[int, ...] = (4, 26)
+ATR_WEEKS: tuple[int, ...] = (4,)
 PARKINSON_WEEKS = 4
 REGIME_FAST_WEEKS = 4
 REGIME_BASELINE_WEEKS = 26
@@ -88,6 +83,15 @@ ASYM_MIN_SIGN_COUNT = 3
 TAIL_SIGMA_SCALE = 1.645
 SKEW_CLIP = (-5.0, 5.0)
 KURT_CLIP = (-2.0, 10.0)
+ASYM_4W_FEATURES: tuple[str, ...] = (
+    "down_up_vol_ratio_4w",
+    "jump_freq_4w",
+)
+ASYM_12W_FEATURES: tuple[str, ...] = (
+    "realized_skew_d_12w",
+    "tail_5p_sigma_ratio_12w",
+)
+ASYM_FEATURES: tuple[str, ...] = ASYM_4W_FEATURES + ASYM_12W_FEATURES
 
 
 @dataclass(frozen=True)
@@ -260,6 +264,7 @@ def _build_feature_plan(
         regime_spec=regime_spec,
     )
     horizon_days_by_feature = _build_horizon_days_by_feature(
+        feature_set,
         spec_set,
         ts_cc_pairs=ts_cc_pairs,
         ts_atr_pairs=ts_atr_pairs,
@@ -294,13 +299,20 @@ def _vol_cc_specs(
     regime_spec: HorizonSpec | None,
     required_weeks: set[int],
 ) -> list[HorizonSpec]:
+    required = set(required_weeks)
     if "vol_cc_d" in feature_set:
-        return list(horizons)
-    if required_weeks:
-        return _require_weeks(horizons, sorted(required_weeks), "vol_ts_cc")
+        required.update(VOL_CC_WEEKS)
     if regime_spec is not None:
-        return [regime_spec]
-    return []
+        required.add(REGIME_FAST_WEEKS)
+    if not required:
+        return []
+    if "vol_cc_d" in feature_set:
+        feature_name = "vol_cc_d"
+    elif required_weeks:
+        feature_name = "vol_ts_cc"
+    else:
+        feature_name = "vol_regime_cc"
+    return _require_weeks(horizons, sorted(required), feature_name)
 
 
 def _feature_specs(
@@ -318,11 +330,16 @@ def _asym_specs(
     horizons: Sequence[HorizonSpec],
     feature_set: set[str],
 ) -> list[HorizonSpec]:
-    if not _needs_asymmetry(feature_set):
+    required: set[int] = set()
+    if any(name in feature_set for name in ASYM_4W_FEATURES):
+        required.add(ASYM_4W_WEEKS)
+    if any(name in feature_set for name in ASYM_12W_FEATURES):
+        required.add(ASYM_12W_WEEKS)
+    if not required:
         return []
     return _require_weeks(
         horizons,
-        (ASYM_4W_WEEKS, ASYM_12W_WEEKS),
+        sorted(required),
         "vol_asymmetry_tails",
     )
 
@@ -339,50 +356,30 @@ def _atrp_specs(
     return []
 
 
-def _needs_asymmetry(feature_set: set[str]) -> bool:
-    return any(
-        name in feature_set
-        for name in (
-            "downside_vol_d_4w",
-            "upside_vol_d_4w",
-            "down_up_vol_ratio_4w",
-            "realized_skew_d_12w",
-            "realized_kurt_d_12w",
-            "tail_5p_sigma_ratio_12w",
-            "jump_freq_4w",
-        )
-    )
-
-
 def _asym_horizon_days(
+    feature_set: set[str],
     asym_specs: Sequence[HorizonSpec],
 ) -> dict[str, int]:
     weeks_to_days = {spec.weeks: spec.days for spec in asym_specs}
     horizon_days_by_feature: dict[str, int] = {}
     if ASYM_4W_WEEKS in weeks_to_days:
         days_4w = weeks_to_days[ASYM_4W_WEEKS]
-        horizon_days_by_feature.update(
-            {
-                "downside_vol_d_4w": days_4w,
-                "upside_vol_d_4w": days_4w,
-                "down_up_vol_ratio_4w": days_4w,
-                "jump_freq_4w": days_4w,
-            }
-        )
+        if "down_up_vol_ratio_4w" in feature_set:
+            horizon_days_by_feature["down_up_vol_ratio_4w"] = days_4w
+        if "jump_freq_4w" in feature_set:
+            horizon_days_by_feature["jump_freq_4w"] = days_4w
     if ASYM_12W_WEEKS in weeks_to_days:
         days_12w = weeks_to_days[ASYM_12W_WEEKS]
-        horizon_days_by_feature.update(
-            {
-                "realized_skew_d_12w": days_12w,
-                "realized_kurt_d_12w": days_12w,
-                "tail_5p_sigma_ratio_12w": days_12w,
-            }
-        )
+        if "realized_skew_d_12w" in feature_set:
+            horizon_days_by_feature["realized_skew_d_12w"] = days_12w
+        if "tail_5p_sigma_ratio_12w" in feature_set:
+            horizon_days_by_feature["tail_5p_sigma_ratio_12w"] = days_12w
     return horizon_days_by_feature
 
 
 
 def _build_horizon_days_by_feature(
+    feature_set: set[str],
     spec_set: _FeatureSpecSet,
     *,
     ts_cc_pairs: Sequence[TermStructurePair],
@@ -390,14 +387,23 @@ def _build_horizon_days_by_feature(
     asym_specs: Sequence[HorizonSpec],
 ) -> dict[str, int]:
     horizon_days_by_feature: dict[str, int] = {}
-    for spec in spec_set.vol_cc_specs:
-        horizon_days_by_feature[_vol_cc_name(spec.weeks)] = spec.days
-    for spec in spec_set.atrp_specs:
-        horizon_days_by_feature[_atrp_name(spec.weeks)] = spec.days
-    for spec in spec_set.parkinson_specs:
-        horizon_days_by_feature[_parkinson_name(spec.weeks)] = spec.days
-    for spec in spec_set.vov_specs:
-        horizon_days_by_feature[_vov_name(spec.weeks)] = spec.days
+    for feature_name, specs, name_for, allowed_weeks in (
+        ("vol_cc_d", spec_set.vol_cc_specs, _vol_cc_name, VOL_CC_WEEKS),
+        ("atrp_d", spec_set.atrp_specs, _atrp_name, ATR_WEEKS),
+        (
+            "vol_range_parkinson_d",
+            spec_set.parkinson_specs,
+            _parkinson_name,
+            None,
+        ),
+        ("vov_norm", spec_set.vov_specs, _vov_name, None),
+    ):
+        if feature_name not in feature_set:
+            continue
+        for spec in specs:
+            if allowed_weeks is not None and spec.weeks not in allowed_weeks:
+                continue
+            horizon_days_by_feature[name_for(spec.weeks)] = spec.days
     if spec_set.regime_spec is not None:
         horizon_days_by_feature[
             _regime_name(REGIME_FAST_WEEKS, REGIME_BASELINE_WEEKS)
@@ -406,7 +412,7 @@ def _build_horizon_days_by_feature(
         horizon_days_by_feature[pair.name] = pair.long_spec.days
     for pair in ts_atr_pairs:
         horizon_days_by_feature[pair.name] = pair.long_spec.days
-    horizon_days_by_feature.update(_asym_horizon_days(asym_specs))
+    horizon_days_by_feature.update(_asym_horizon_days(feature_set, asym_specs))
     return horizon_days_by_feature
 
 def _compute_asset_features(
@@ -543,6 +549,13 @@ def _asym_tail_feature_data(
 ) -> dict[str, pd.Series]:
     if not context.plan.asym_specs:
         return {}
+    allowed_features = [
+        name
+        for name in ASYM_FEATURES
+        if name in context.plan.horizon_days_by_feature
+    ]
+    if not allowed_features:
+        return {}
     config = AsymmetryConfig(
         eps=ASYM_EPS,
         var_eps=ASYM_VAR_EPS,
@@ -561,6 +574,7 @@ def _asym_tail_feature_data(
         returns,
         config=config,
         log_ratio=lambda short, long: log_ratio(short, long, eps=ASYM_EPS),
+        allowed_features=allowed_features,
     )
     return _asymmetry_weekly_features(asym_daily, context)
 

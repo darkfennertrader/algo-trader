@@ -38,7 +38,7 @@ SUPPORTED_FEATURES: tuple[str, ...] = (
     "glob_disp_mom",
     "glob_disp_vol",
 )
-VOL_WEEKS: tuple[int, ...] = (4, 12)
+VOL_WEEKS: tuple[int, ...] = (4,)
 REGIME_FAST_WEEKS = 4
 REGIME_BASELINE_WEEKS = 26
 CORR_WEEKS = 12

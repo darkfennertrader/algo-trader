@@ -106,6 +106,9 @@ class MetadataContext:
     sources: FeatureInputSources
 
 
+GoodnessRatios = dict[str, dict[str, dict[str, str]]]
+
+
 def _prepare_output_paths(
     feature_store: Path,
     version_label: str,
@@ -163,6 +166,8 @@ def _build_goodness_payload(
             group.goodness,
             sources=sources,
             destination_path=context.paths.output_path,
+            feature_names=context.output.feature_names,
+            weekly_ohlc=require_weekly_ohlc(context.inputs),
         )
     if isinstance(group, RegimeFeatureGroup):
         if group.goodness is None:
@@ -171,34 +176,32 @@ def _build_goodness_payload(
             group.goodness,
             sources=sources,
             destination_path=context.paths.output_path,
+            feature_names=context.output.feature_names,
+            weekly_ohlc=require_weekly_ohlc(context.inputs),
         )
     weekly = require_weekly_ohlc(context.inputs)
     horizon_days_by_feature = _weekly_horizon_days_by_feature(
         context.group_name, context.output.feature_names
     )
-    if _group_uses_daily_source(context.group_name):
-        daily = require_daily_ohlc(context.inputs)
-        ratios_by_feature = daily_goodness_ratios(
-            daily,
+    daily = context.inputs.frames.get("daily_ohlc")
+    ratios_by_feature_daily, ratios_by_feature_weekly = (
+        _build_ratios_by_source(
             weekly,
+            daily=daily if isinstance(daily, pd.DataFrame) else None,
             horizon_days_by_feature=horizon_days_by_feature,
-            trading_days_per_week=_TRADING_DAYS_PER_WEEK,
         )
-        ratio_definition = _ratio_definition(uses_daily=True)
-    else:
-        ratios_by_feature = weekly_goodness_ratios(
-            weekly,
-            horizon_days_by_feature=horizon_days_by_feature,
-            trading_days_per_week=_TRADING_DAYS_PER_WEEK,
-        )
-        ratio_definition = _ratio_definition(uses_daily=False)
+    )
     return {
         "group": context.group_name,
         "run_at": format_run_at(datetime.now(timezone.utc)),
         "source": sources,
         "dest": format_tilde_path(context.paths.output_path),
-        "ratio_definition": ratio_definition,
-        "ratios_by_feature": ratios_by_feature,
+        "ratio_definitions": _ratio_definitions(),
+        "feature_sources": _feature_sources_by_group(
+            context.group_name, context.output.feature_names
+        ),
+        "ratios_by_feature_daily": ratios_by_feature_daily,
+        "ratios_by_feature_weekly": ratios_by_feature_weekly,
     }
 
 
@@ -241,7 +244,7 @@ def _group_source_frequencies(group_name: str) -> tuple[str, ...]:
         "momentum": ("weekly",),
         "mean_reversion": ("weekly",),
         "breakout": ("weekly",),
-        "cross_sectional": ("weekly", "daily"),
+        "cross_sectional": ("weekly",),
         "volatility": ("weekly", "daily"),
         "seasonal": ("weekly", "daily"),
         "regime": ("weekly", "daily"),
@@ -253,10 +256,6 @@ def _group_source_frequencies(group_name: str) -> tuple[str, ...]:
             context={"group": group_name},
         )
     return frequencies
-
-
-def _group_uses_daily_source(group_name: str) -> bool:
-    return "daily" in _group_source_frequencies(group_name)
 
 
 def _extra_metadata(group: FeatureGroup) -> Mapping[str, object] | None:
@@ -282,14 +281,26 @@ def _build_volatility_goodness_payload(
     *,
     sources: Sequence[str],
     destination_path: Path,
+    feature_names: Sequence[str],
+    weekly_ohlc: pd.DataFrame,
 ) -> dict[str, object]:
+    ratios_by_feature_daily = goodness.ratios_by_feature
+    ratios_by_feature_weekly = weekly_goodness_ratios(
+        weekly_ohlc,
+        horizon_days_by_feature=goodness.horizon_days_by_feature,
+        trading_days_per_week=_TRADING_DAYS_PER_WEEK,
+    )
     return {
         "group": "volatility",
         "run_at": format_run_at(datetime.now(timezone.utc)),
         "source": sources,
         "dest": format_tilde_path(destination_path),
-        "ratio_definition": _ratio_definition(uses_daily=True),
-        "ratios_by_feature": goodness.ratios_by_feature,
+        "ratio_definitions": _ratio_definitions(),
+        "feature_sources": _feature_sources_by_group(
+            "volatility", feature_names
+        ),
+        "ratios_by_feature_daily": ratios_by_feature_daily,
+        "ratios_by_feature_weekly": ratios_by_feature_weekly,
     }
 
 
@@ -298,24 +309,79 @@ def _build_regime_goodness_payload(
     *,
     sources: Sequence[str],
     destination_path: Path,
+    feature_names: Sequence[str],
+    weekly_ohlc: pd.DataFrame,
 ) -> dict[str, object]:
+    ratios_by_feature_daily = goodness.ratios_by_feature
+    ratios_by_feature_weekly = weekly_goodness_ratios(
+        weekly_ohlc,
+        horizon_days_by_feature=goodness.horizon_days_by_feature,
+        trading_days_per_week=_TRADING_DAYS_PER_WEEK,
+    )
     return {
         "group": "regime",
         "run_at": format_run_at(datetime.now(timezone.utc)),
         "source": sources,
         "dest": format_tilde_path(destination_path),
-        "ratio_definition": _ratio_definition(uses_daily=True),
-        "ratios_by_feature": goodness.ratios_by_feature,
+        "ratio_definitions": _ratio_definitions(),
+        "feature_sources": _feature_sources_by_group(
+            "regime", feature_names
+        ),
+        "ratios_by_feature_daily": ratios_by_feature_daily,
+        "ratios_by_feature_weekly": ratios_by_feature_weekly,
     }
 
 
-def _ratio_definition(*, uses_daily: bool) -> str:
-    if uses_daily:
-        return (
-            "daily: avg_missing_daily_ohlc_fraction_over_horizon_weeks; "
-            "weekly: missing_weekly_ohlc / horizon_weeks"
+def _ratio_definitions() -> dict[str, str]:
+    return {
+        "daily": (
+            "avg_missing_daily_ohlc_fraction_over_horizon_weeks"
+        ),
+        "weekly": "missing_weekly_ohlc / horizon_weeks",
+    }
+
+
+def _build_ratios_by_source(
+    weekly_ohlc: pd.DataFrame,
+    *,
+    daily: pd.DataFrame | None,
+    horizon_days_by_feature: Mapping[str, int],
+) -> tuple[GoodnessRatios, GoodnessRatios]:
+    ratios_by_feature_weekly = weekly_goodness_ratios(
+        weekly_ohlc,
+        horizon_days_by_feature=horizon_days_by_feature,
+        trading_days_per_week=_TRADING_DAYS_PER_WEEK,
+    )
+    if daily is None:
+        ratios_by_feature_daily: GoodnessRatios = {}
+    else:
+        ratios_by_feature_daily = daily_goodness_ratios(
+            daily,
+            weekly_ohlc,
+            horizon_days_by_feature=horizon_days_by_feature,
+            trading_days_per_week=_TRADING_DAYS_PER_WEEK,
         )
-    return "weekly: missing_weekly_ohlc / horizon_weeks"
+    return ratios_by_feature_daily, ratios_by_feature_weekly
+
+
+def _feature_sources_by_group(
+    group_name: str, feature_names: Sequence[str]
+) -> dict[str, str]:
+    if not feature_names:
+        return {}
+    if group_name in {"volatility", "seasonal"}:
+        return {name: "daily" for name in feature_names}
+    if group_name == "regime":
+        return {name: _regime_feature_source(name) for name in feature_names}
+    return {name: "weekly" for name in feature_names}
+
+
+def _regime_feature_source(feature_name: str) -> str:
+    if feature_name.startswith(
+        ("glob_disp_ret_", "glob_disp_mom_", "glob_disp_vol_")
+    ):
+        return "weekly"
+    return "daily"
 
 
 def _weekly_horizon_days_by_feature(
@@ -363,11 +429,10 @@ def _mean_reversion_feature_weeks(feature_name: str) -> int | None:
 
 
 def _cross_sectional_feature_weeks(feature_name: str) -> int | None:
-    prefixes = ("cs_centered_", "cs_rank_")
-    for prefix in prefixes:
-        if feature_name.startswith(prefix):
-            base = feature_name[len(prefix) :]
-            return _parse_weeks_suffix(base)
+    prefix = "cs_rank_"
+    if feature_name.startswith(prefix):
+        base = feature_name[len(prefix) :]
+        return _parse_weeks_suffix(base)
     return None
 
 

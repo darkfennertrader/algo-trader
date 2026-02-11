@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -42,42 +42,70 @@ def build_daily_features(
     *,
     config: AsymmetryConfig,
     log_ratio: LogRatio,
+    allowed_features: Sequence[str] | None = None,
 ) -> dict[str, pd.Series]:
-    sigma = _sigma_bundle(returns, config)
-    downside, upside = _down_up_vol(returns, sigma, config)
-    down_up_ratio = log_ratio(downside, upside)
-    skew = _realized_skew(
-        returns,
-        window=config.windows.window_12w,
-        var_eps=config.var_eps,
-        clip_range=config.clips.skew,
+    allowed = None if allowed_features is None else set(allowed_features)
+
+    def _wants(name: str) -> bool:
+        return allowed is None or name in allowed
+
+    feature_data: dict[str, pd.Series] = {}
+    sigma = None
+    need_down_up = any(
+        _wants(name)
+        for name in (
+            "downside_vol_d_4w",
+            "upside_vol_d_4w",
+            "down_up_vol_ratio_4w",
+        )
     )
-    kurt = _realized_kurt(
-        returns,
-        window=config.windows.window_12w,
-        var_eps=config.var_eps,
-        clip_range=config.clips.kurt,
+    need_sigma_12w = any(
+        _wants(name)
+        for name in ("tail_5p_sigma_ratio_12w", "jump_freq_4w")
     )
-    tail_ratio = _tail_sigma_ratio(
-        returns,
-        sigma_12w=sigma.sigma_12w,
-        config=config,
-        log_ratio=log_ratio,
-    )
-    jump_freq = _jump_freq(
-        returns,
-        sigma_12w=sigma.sigma_12w,
-        window=config.windows.window_4w,
-    )
-    return {
-        "downside_vol_d_4w": downside,
-        "upside_vol_d_4w": upside,
-        "down_up_vol_ratio_4w": down_up_ratio,
-        "realized_skew_d_12w": skew,
-        "realized_kurt_d_12w": kurt,
-        "tail_5p_sigma_ratio_12w": tail_ratio,
-        "jump_freq_4w": jump_freq,
-    }
+    if need_down_up or need_sigma_12w:
+        sigma = _sigma_bundle(returns, config)
+
+    if need_down_up and sigma is not None:
+        downside, upside = _down_up_vol(returns, sigma, config)
+        if _wants("downside_vol_d_4w"):
+            feature_data["downside_vol_d_4w"] = downside
+        if _wants("upside_vol_d_4w"):
+            feature_data["upside_vol_d_4w"] = upside
+        if _wants("down_up_vol_ratio_4w"):
+            feature_data["down_up_vol_ratio_4w"] = log_ratio(
+                downside, upside
+            )
+
+    if _wants("realized_skew_d_12w"):
+        feature_data["realized_skew_d_12w"] = _realized_skew(
+            returns,
+            window=config.windows.window_12w,
+            var_eps=config.var_eps,
+            clip_range=config.clips.skew,
+        )
+    if _wants("realized_kurt_d_12w"):
+        feature_data["realized_kurt_d_12w"] = _realized_kurt(
+            returns,
+            window=config.windows.window_12w,
+            var_eps=config.var_eps,
+            clip_range=config.clips.kurt,
+        )
+    if _wants("tail_5p_sigma_ratio_12w") and sigma is not None:
+        feature_data["tail_5p_sigma_ratio_12w"] = _tail_sigma_ratio(
+            returns,
+            sigma_12w=sigma.sigma_12w,
+            config=config,
+            log_ratio=log_ratio,
+        )
+    if _wants("jump_freq_4w") and sigma is not None:
+        feature_data["jump_freq_4w"] = _jump_freq(
+            returns,
+            sigma_12w=sigma.sigma_12w,
+            window=config.windows.window_4w,
+        )
+
+    return feature_data
 
 
 def _sigma_bundle(

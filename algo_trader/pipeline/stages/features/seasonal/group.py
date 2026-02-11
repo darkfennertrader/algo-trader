@@ -24,12 +24,13 @@ from ..utils import (
     week_start_index,
 )
 
-DEFAULT_HORIZON_DAYS: tuple[int, ...] = (60, 130)
+DEFAULT_HORIZON_DAYS: tuple[int, ...] = (130,)
 SUPPORTED_FEATURES: tuple[str, ...] = (
     "dow_alpha",
     "dow_spread",
 )
 _WEEKDAY_ORDER: tuple[int, ...] = (0, 1, 2, 3, 4)
+_DOW_ALPHA_WEEKDAYS: tuple[int, ...] = (0, 4)
 _WEEKDAY_NAMES: dict[int, str] = {
     0: "Mon",
     1: "Tue",
@@ -145,6 +146,8 @@ def _compute_asset_features(
     weekday_returns = _weekday_returns(asset_daily, context.weekly_starts)
     feature_data: dict[str, np.ndarray] = {}
     for spec in context.horizons:
+        if spec.weeks != 26:
+            continue
         rolling = _rolling_weekday_means(
             weekday_returns,
             weekly_starts=context.weekly_starts,
@@ -217,7 +220,7 @@ def _dow_alpha_values(
     rolling: pd.DataFrame, weeks: int, weekly_len: int
 ) -> dict[str, np.ndarray]:
     values: dict[str, np.ndarray] = {}
-    for weekday in _WEEKDAY_ORDER:
+    for weekday in _DOW_ALPHA_WEEKDAYS:
         name = _dow_alpha_name(_WEEKDAY_NAMES[weekday], weeks)
         series = rolling.get(weekday)
         if series is None:

@@ -20,7 +20,7 @@ def _weekly_index_from_daily(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
 
 
 def test_volatility_goodness_ratio_weekly() -> None:
-    dates = pd.date_range("2024-01-01", periods=10, freq="B", tz="UTC")
+    dates = pd.date_range("2024-01-01", periods=130, freq="B", tz="UTC")
     columns = pd.MultiIndex.from_product(
         [["ASSET"], ["Open", "High", "Low", "Close"]]
     )
@@ -34,7 +34,10 @@ def test_volatility_goodness_ratio_weekly() -> None:
     weekly_ohlc = pd.DataFrame(1.0, index=weekly_index, columns=columns)
 
     config = VolatilityConfig(
-        horizons=[HorizonSpec(days=5, weeks=1)],
+        horizons=[
+            HorizonSpec(days=20, weeks=4),
+            HorizonSpec(days=130, weeks=26),
+        ],
         features=["vol_cc_d"],
     )
     group = VolatilityFeatureGroup(config)
@@ -48,12 +51,12 @@ def test_volatility_goodness_ratio_weekly() -> None:
         )
     )
 
-    assert "vol_cc_d_1w" in output.feature_names
+    assert "vol_cc_d_4w" in output.feature_names
     assert output.frame.index.equals(weekly_index)
 
     goodness = group.goodness
     assert goodness is not None
-    ratios = goodness.ratios_by_feature["vol_cc_d_1w"]["ASSET"]
-    second_week = weekly_index[1]
-    key = second_week.isoformat(timespec="seconds").replace("T", "_")
-    assert ratios[key] == "0.200"
+    ratios = goodness.ratios_by_feature["vol_cc_d_4w"]["ASSET"]
+    fourth_week = weekly_index[3]
+    key = fourth_week.isoformat(timespec="seconds").replace("T", "_")
+    assert ratios[key] == "0.050"

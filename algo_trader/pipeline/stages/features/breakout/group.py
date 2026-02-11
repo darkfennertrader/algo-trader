@@ -6,12 +6,14 @@ from typing import Sequence
 import numpy as np
 import pandas as pd
 
+from algo_trader.domain import ConfigError
 from algo_trader.pipeline.stages.features.horizons import HorizonSpec
 from ..group_base import WeeklyFeatureGroup
 from ..utils import require_ohlc_columns
 
-DEFAULT_HORIZON_DAYS: tuple[int, ...] = (5, 20, 60, 130)
+DEFAULT_HORIZON_DAYS: tuple[int, ...] = (20, 130)
 SUPPORTED_FEATURES: tuple[str, ...] = ("brk_up", "brk_dn")
+BREAKOUT_WEEKS: tuple[int, ...] = (4, 26)
 
 
 @dataclass(frozen=True)
@@ -34,7 +36,13 @@ def _compute_asset_features(
     low_shifted = low.shift(1)
 
     feature_data: dict[str, np.ndarray] = {}
-    for spec in config.horizons:
+    specs = [spec for spec in config.horizons if spec.weeks in BREAKOUT_WEEKS]
+    if not specs and feature_set:
+        raise ConfigError(
+            "No horizons available for breakout features",
+            context={"required_weeks": ",".join(map(str, BREAKOUT_WEEKS))},
+        )
+    for spec in specs:
         if "brk_up" in feature_set:
             prev_high = high_shifted.rolling(
                 window=spec.weeks, min_periods=spec.weeks

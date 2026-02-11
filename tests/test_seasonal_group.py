@@ -21,7 +21,7 @@ def _weekly_index_from_daily(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
 
 
 def test_seasonal_weekday_means_and_spread() -> None:
-    dates = pd.date_range("2023-12-29", periods=16, freq="B", tz="UTC")
+    dates = pd.date_range("2023-01-02", periods=130, freq="B", tz="UTC")
     returns_by_weekday = {
         0: 0.01,
         1: 0.02,
@@ -43,7 +43,7 @@ def test_seasonal_weekday_means_and_spread() -> None:
     weekly_ohlc = pd.DataFrame(1.0, index=weekly_index, columns=columns)
 
     config = SeasonalConfig(
-        horizons=[HorizonSpec(days=10, weeks=2)],
+        horizons=[HorizonSpec(days=130, weeks=26)],
         features=["dow_alpha", "dow_spread"],
     )
     group = SeasonalFeatureGroup(config)
@@ -60,13 +60,15 @@ def test_seasonal_weekday_means_and_spread() -> None:
     assert output.frame.index.equals(weekly_index)
 
     target_week = weekly_index[-1]
-    for weekday, expected in returns_by_weekday.items():
-        day_name = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}[weekday]
-        feature = f"dow_alpha_{day_name}_2w"
+    for weekday in (0, 4):
+        expected = returns_by_weekday[weekday]
+        day_name = {0: "Mon", 4: "Fri"}[weekday]
+        feature = f"dow_alpha_{day_name}_26w"
         value = output.frame.loc[target_week, ("ASSET", feature)]
         assert value == pytest.approx(expected)
 
-    spread = output.frame.loc[target_week, ("ASSET", "dow_spread_2w")]
+    assert "dow_alpha_Tue_26w" not in output.feature_names
+    spread = output.frame.loc[target_week, ("ASSET", "dow_spread_26w")]
     assert spread == pytest.approx(0.04)
 
 

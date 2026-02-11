@@ -73,7 +73,6 @@ from .outputs import (
     MetadataContext,
     _build_goodness_payload,
     _extra_metadata,
-    _group_uses_daily_source,
     _prepare_output_paths,
     _write_goodness_payload,
     _write_outputs,
@@ -88,6 +87,7 @@ from .types import (
 from ..data_sources import resolve_data_lake, resolve_feature_store
 
 logger = logging.getLogger(__name__)
+_DAILY_REQUIRED_GROUPS = {"volatility", "seasonal", "regime"}
 
 
 @dataclass(frozen=True)
@@ -127,7 +127,7 @@ def run(*, request: RunRequest) -> list[Path]:
         return output_paths
     needs_daily = bool(
         set(config.selection.groups).intersection(
-            {"volatility", "seasonal", _CROSS_SECTIONAL_GROUP, "regime"}
+            _DAILY_REQUIRED_GROUPS
         )
     )
     inputs, sources, version_label = _load_feature_inputs(
@@ -216,7 +216,7 @@ def _run_group_job(
     group_name: str, config: RunConfig, latest_dir: Path
 ) -> Path:
     inputs, sources, version_label = _load_feature_inputs_from_dir(
-        latest_dir, needs_daily=_group_uses_daily_source(group_name)
+        latest_dir, needs_daily=_group_requires_daily(group_name)
     )
     return _run_group_with_inputs(
         group_name=group_name,
@@ -466,10 +466,13 @@ def _load_feature_inputs_from_dir(
     weekly_path = latest_dir / _WEEKLY_OHLC_NAME
     weekly_ohlc = _read_weekly_ohlc(weekly_path)
     daily_ohlc: pd.DataFrame | None = None
-    daily_path: Path | None = None
-    if needs_daily:
-        daily_path = latest_dir / _DAILY_OHLC_NAME
+    daily_path = latest_dir / _DAILY_OHLC_NAME
+    if daily_path.exists():
         daily_ohlc = _read_daily_ohlc(daily_path)
+    elif needs_daily:
+        daily_ohlc = _read_daily_ohlc(daily_path)
+    else:
+        daily_path = None
     frames: dict[str, pd.DataFrame] = {"weekly_ohlc": weekly_ohlc}
     if daily_ohlc is not None:
         frames["daily_ohlc"] = daily_ohlc
@@ -488,6 +491,10 @@ def _resolve_latest_directory(base_dir: Path) -> Path:
         error_type=DataSourceError,
         error_message="No YYYY-WW data directories found",
     )
+
+
+def _group_requires_daily(group_name: str) -> bool:
+    return group_name in _DAILY_REQUIRED_GROUPS
 
 
 def _read_weekly_ohlc(path: Path) -> pd.DataFrame:

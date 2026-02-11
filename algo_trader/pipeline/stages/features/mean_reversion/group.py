@@ -24,9 +24,12 @@ SUPPORTED_FEATURES: tuple[str, ...] = (
     "range_pos",
     "range_z",
 )
-MIN_WEEKS_TREND = 4
-MIN_WEEKS_MEDIAN = 26
-MIN_WEEKS_RANGE_Z = 12
+Z_PRICE_EMA_WEEKS: tuple[int, ...] = (12, 26)
+Z_PRICE_MED_WEEKS: tuple[int, ...] = (26,)
+DONCH_POS_WEEKS: tuple[int, ...] = (4,)
+RSI_CENTERED_WEEKS: tuple[int, ...] = (4,)
+REV_WEEKS: tuple[int, ...] = (1,)
+RANGE_Z_WEEKS: tuple[int, ...] = (12,)
 SHOCK_WEEKS = 4
 
 
@@ -95,12 +98,7 @@ def _z_price_ema_features(
 ) -> dict[str, np.ndarray]:
     if "z_price_ema" not in feature_set:
         return {}
-    specs = [spec for spec in horizons if spec.weeks >= MIN_WEEKS_TREND]
-    if not specs:
-        raise ConfigError(
-            "No horizons available for z_price_ema features",
-            context={"min_weeks": str(MIN_WEEKS_TREND)},
-        )
+    specs = _select_weeks(horizons, Z_PRICE_EMA_WEEKS, "z_price_ema")
     feature_data: dict[str, np.ndarray] = {}
     for spec in specs:
         ema = _ewm_mean(log_series, spec.weeks)
@@ -120,12 +118,7 @@ def _z_price_med_features(
 ) -> dict[str, np.ndarray]:
     if "z_price_med" not in feature_set:
         return {}
-    specs = [spec for spec in horizons if spec.weeks >= MIN_WEEKS_MEDIAN]
-    if not specs:
-        raise ConfigError(
-            "No horizons available for z_price_med features",
-            context={"min_weeks": str(MIN_WEEKS_MEDIAN)},
-        )
+    specs = _select_weeks(horizons, Z_PRICE_MED_WEEKS, "z_price_med")
     feature_data: dict[str, np.ndarray] = {}
     for spec in specs:
         median = log_series.rolling(
@@ -151,12 +144,7 @@ def _donch_pos_features(
 ) -> dict[str, np.ndarray]:
     if "donch_pos" not in feature_set:
         return {}
-    specs = [spec for spec in horizons if spec.weeks >= MIN_WEEKS_TREND]
-    if not specs:
-        raise ConfigError(
-            "No horizons available for donch_pos features",
-            context={"min_weeks": str(MIN_WEEKS_TREND)},
-        )
+    specs = _select_weeks(horizons, DONCH_POS_WEEKS, "donch_pos")
     high_series = pd.Series(prices.high)
     low_series = pd.Series(prices.low)
     feature_data: dict[str, np.ndarray] = {}
@@ -183,12 +171,7 @@ def _rsi_centered_features(
 ) -> dict[str, np.ndarray]:
     if "rsi_centered" not in feature_set:
         return {}
-    specs = [spec for spec in horizons if spec.weeks >= MIN_WEEKS_TREND]
-    if not specs:
-        raise ConfigError(
-            "No horizons available for rsi_centered features",
-            context={"min_weeks": str(MIN_WEEKS_TREND)},
-        )
+    specs = _select_weeks(horizons, RSI_CENTERED_WEEKS, "rsi_centered")
     feature_data: dict[str, np.ndarray] = {}
     for spec in specs:
         rsi = _rsi(close, spec.weeks)
@@ -203,8 +186,9 @@ def _return_reversal_features(
 ) -> dict[str, np.ndarray]:
     if "rev" not in feature_set:
         return {}
+    specs = _select_weeks(horizons, REV_WEEKS, "rev")
     feature_data: dict[str, np.ndarray] = {}
-    for spec in horizons:
+    for spec in specs:
         cumulative = log_series.diff(spec.weeks)
         reversal = -cumulative.shift(1)
         feature_data[_rev_name(spec.weeks)] = reversal.to_numpy(dtype=float)
@@ -254,12 +238,7 @@ def _range_z_features(
 ) -> dict[str, np.ndarray]:
     if "range_z" not in feature_set:
         return {}
-    specs = [spec for spec in horizons if spec.weeks >= MIN_WEEKS_RANGE_Z]
-    if not specs:
-        raise ConfigError(
-            "No horizons available for range_z features",
-            context={"min_weeks": str(MIN_WEEKS_RANGE_Z)},
-        )
+    specs = _select_weeks(horizons, RANGE_Z_WEEKS, "range_z")
     range_series = pd.Series(prices.high - prices.low)
     feature_data: dict[str, np.ndarray] = {}
     for spec in specs:
@@ -336,6 +315,20 @@ def _range_pos_name() -> str:
 
 def _range_z_name(weeks: int) -> str:
     return f"range_z_{weeks}w"
+
+
+def _select_weeks(
+    horizons: Sequence[HorizonSpec],
+    weeks: Sequence[int],
+    feature_name: str,
+) -> list[HorizonSpec]:
+    specs = [spec for spec in horizons if spec.weeks in weeks]
+    if not specs:
+        raise ConfigError(
+            f"No horizons available for {feature_name} features",
+            context={"required_weeks": ",".join(map(str, weeks))},
+        )
+    return specs
 
 
 class MeanReversionFeatureGroup(WeeklyFeatureGroup[MeanReversionConfig]):

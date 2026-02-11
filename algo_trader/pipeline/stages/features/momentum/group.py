@@ -17,11 +17,10 @@ DEFAULT_HORIZON_DAYS: tuple[int, ...] = (5, 20, 60, 130)
 DEFAULT_EPSILON = 1e-8
 Z_MOM_REF_WEEKS = 26
 SUPPORTED_FEATURES: tuple[str, ...] = (
-    "momentum",
     "vol_scaled_momentum",
-    "slope",
     "ema_spread",
 )
+Z_MOM_WEEKS: tuple[int, ...] = (4, 12, 26)
 
 
 @dataclass(frozen=True)
@@ -46,9 +45,6 @@ def _compute_asset_features(
     feature_data: dict[str, np.ndarray] = {}
     feature_data.update(
         _momentum_features(price_series.close, horizon_specs, config, feature_set)
-    )
-    feature_data.update(
-        _slope_features(price_series.close, horizon_specs, feature_set)
     )
     feature_data.update(
         _ema_spread_features(
@@ -96,6 +92,8 @@ def _momentum_features(
     )
     feature_data: dict[str, np.ndarray] = {}
     for spec in horizons:
+        if spec.weeks not in Z_MOM_WEEKS:
+            continue
         momentum = _cumulative_return(close, spec.weeks)
         if needs_momentum:
             feature_data[_momentum_name(spec.days, spec.weeks)] = momentum
@@ -139,10 +137,6 @@ def _ema_spread_features(
     )
     denom = atr_long + config.eps
     return {
-        _ema_spread_name(short.weeks, mid.weeks): (
-            ema_short - ema_mid
-        )
-        / denom,
         _ema_spread_name(short.weeks, long.weeks): (
             ema_short - ema_long
         )

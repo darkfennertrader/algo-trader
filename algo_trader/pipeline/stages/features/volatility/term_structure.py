@@ -47,11 +47,6 @@ def build_cc_pairs(
             long_weeks=4,
         ),
         TermStructureSpec(
-            feature_name="vol_ts_cc_4w_12w",
-            short_weeks=4,
-            long_weeks=12,
-        ),
-        TermStructureSpec(
             feature_name="vol_ts_cc_4w_26w",
             short_weeks=4,
             long_weeks=26,
@@ -71,21 +66,13 @@ def build_cc_pairs(
 
 
 def build_atr_pairs(
-    horizons: Sequence[HorizonSpec],
-    feature_set: set[str],
+    _horizons: Sequence[HorizonSpec],
+    _feature_set: set[str],
     *,
     require_weeks: RequireWeeks,
 ) -> list[TermStructurePair]:
-    return _pair(
-        horizons,
-        feature_set,
-        require_weeks=require_weeks,
-        spec=TermStructureSpec(
-            feature_name="vol_ts_atr_4w_12w",
-            short_weeks=4,
-            long_weeks=12,
-        ),
-    )
+    _ = require_weeks
+    return []
 
 
 def build_features(

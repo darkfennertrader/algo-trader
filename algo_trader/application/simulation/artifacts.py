@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -29,6 +30,15 @@ class SimulationInputs:
     features: Sequence[str]
 
 
+@dataclass(frozen=True)
+class CVStructureInputs:
+    warmup_idx: np.ndarray
+    groups: Sequence[np.ndarray]
+    outer_ids: Sequence[int]
+    outer_folds: Sequence[Mapping[str, Any]]
+    timestamps: Sequence[Any]
+
+
 class SimulationArtifacts:
     def __init__(self, base_dir: Path) -> None:
         self._base_dir = base_dir
@@ -36,21 +46,15 @@ class SimulationArtifacts:
         self._preprocess_dir = self._base_dir / "preprocessing"
         self._inner_dir = self._base_dir / "inner"
         self._outer_dir = self._base_dir / "outer"
-        self._results_dir = self._base_dir / "results"
-        for path in (
-            self._inputs_dir,
-            self._preprocess_dir,
-            self._inner_dir,
-            self._outer_dir,
-            self._results_dir,
-        ):
-            _ensure_dir(path, message="Failed to create simulation output")
+        self._cv_dir = self._base_dir / "cv"
+        _ensure_dir(self._base_dir, message="Failed to create simulation output")
 
     @property
     def base_dir(self) -> Path:
         return self._base_dir
 
     def write_inputs(self, *, inputs: SimulationInputs) -> None:
+        _ensure_dir(self._inputs_dir, message="Failed to create inputs output")
         payload = {
             "values": inputs.X.detach().cpu(),
             "missing_mask": inputs.M.detach().cpu(),
@@ -67,6 +71,7 @@ class SimulationArtifacts:
         feature_frame = _build_feature_frame(inputs)
         target_frame = _build_target_frame(inputs)
         mask_frame = _build_mask_frame(inputs)
+        mapping_frame = _build_timestamp_mapping(inputs)
         _write_csv(
             self._inputs_dir / "features.csv",
             feature_frame,
@@ -82,25 +87,40 @@ class SimulationArtifacts:
             mask_frame,
             message="Failed to write missing mask CSV",
         )
+        _write_csv(
+            self._inputs_dir / "timestamps.csv",
+            mapping_frame,
+            message="Failed to write timestamp mapping CSV",
+        )
 
     def write_cv_structure(
         self,
         *,
-        warmup_idx: np.ndarray,
-        groups: Sequence[np.ndarray],
-        outer_ids: Sequence[int],
-        outer_folds: Sequence[Mapping[str, Any]],
+        inputs: CVStructureInputs,
     ) -> None:
+        _ensure_dir(self._cv_dir, message="Failed to create CV output")
         payload = {
-            "warmup_idx": warmup_idx.tolist(),
-            "groups": [group.tolist() for group in groups],
-            "outer_test_group_ids": list(outer_ids),
-            "outer_folds": [_to_serializable(item) for item in outer_folds],
+            "warmup_idx": inputs.warmup_idx.tolist(),
+            "groups": [group.tolist() for group in inputs.groups],
+            "outer_test_group_ids": list(inputs.outer_ids),
+            "outer_folds": [
+                _to_serializable(item) for item in inputs.outer_folds
+            ],
         }
         _write_json(
-            self._results_dir / "cv_structure.json",
+            self._cv_dir / "cv_structure.json",
             payload,
             message="Failed to write CV structure",
+        )
+        mapping_frame = _build_cv_timestamp_mapping(
+            inputs.timestamps,
+            cv_groups=inputs.groups,
+            warmup_idx=inputs.warmup_idx,
+        )
+        _write_csv(
+            self._cv_dir / "timestamps_cv.csv",
+            mapping_frame,
+            message="Failed to write CV timestamp mapping CSV",
         )
     def write_cleaning_state(
         self, *, outer_k: int, cleaning: FeatureCleaningState
@@ -152,9 +172,20 @@ class SimulationArtifacts:
         )
 
     def write_results(self, summary: Mapping[str, Any]) -> None:
+        manifest = dict(summary)
+        manifest["run_at"] = _format_run_at()
+        payload = _to_serializable(manifest)
+        _write_json(
+            self._base_dir / "run_manifest.json",
+            payload,
+            message="Failed to write simulation run manifest",
+        )
+
+    def write_cv_summary(self, summary: Mapping[str, Any]) -> None:
+        _ensure_dir(self._cv_dir, message="Failed to create CV output")
         payload = _to_serializable(summary)
         _write_json(
-            self._results_dir / "summary.json",
+            self._cv_dir / "summary.json",
             payload,
             message="Failed to write simulation summary",
         )
@@ -214,6 +245,17 @@ def _normalize_timestamps(values: Sequence[Any]) -> list[int | str]:
     return normalized
 
 
+def _normalize_epoch_hours(values: Sequence[Any]) -> list[int]:
+    if not values:
+        return []
+    first = values[0]
+    if isinstance(first, (int, np.integer)):
+        return [int(item) for item in values]
+    stamps = pd.to_datetime(list(values), utc=True)
+    epoch_hours = (stamps.view("int64") // 3_600_000_000_000).astype("int64")
+    return epoch_hours.tolist()
+
+
 def _format_timestamp_strings(values: Sequence[Any]) -> list[str]:
     if not values:
         return []
@@ -263,6 +305,50 @@ def _build_mask_frame(inputs: SimulationInputs) -> pd.DataFrame:
         _format_timestamp_strings(inputs.timestamps), name="timestamp"
     )
     return pd.DataFrame(flat, index=index, columns=columns)
+
+
+def _build_timestamp_mapping(inputs: SimulationInputs) -> pd.DataFrame:
+    epoch_hours = _normalize_epoch_hours(inputs.timestamps)
+    dt_strings = _format_timestamp_strings(inputs.timestamps)
+    rows = {
+        "row_id": list(range(1, len(dt_strings) + 1)),
+        "epoch_hour": epoch_hours,
+        "datetime_utc": dt_strings,
+    }
+    return pd.DataFrame(rows)
+
+
+def _build_cv_timestamp_mapping(
+    timestamps: Sequence[Any],
+    *,
+    cv_groups: Sequence[np.ndarray],
+    warmup_idx: np.ndarray,
+) -> pd.DataFrame:
+    epoch_hours = _normalize_epoch_hours(timestamps)
+    dt_strings = _format_timestamp_strings(timestamps)
+    total = len(dt_strings)
+    cv_week_id: list[int | None] = [None] * total
+    cv_label: list[str | None] = [None] * total
+    for idx in warmup_idx:
+        pos = int(idx)
+        if 0 <= pos < total:
+            cv_label[pos] = "warmup"
+    for group_id, group in enumerate(cv_groups):
+        for idx in group:
+            pos = int(idx)
+            if 0 <= pos < total:
+                cv_week_id[pos] = group_id
+    for idx in range(total):
+        if cv_week_id[idx] is None and cv_label[idx] is None:
+            cv_label[idx] = "dropped"
+    rows = {
+        "row_id": list(range(1, len(dt_strings) + 1)),
+        "epoch_hour": epoch_hours,
+        "datetime_utc": dt_strings,
+        "cv_week_id": cv_week_id,
+        "cv_label": cv_label,
+    }
+    return pd.DataFrame(rows)
 
 
 def _to_serializable(value: Any) -> Any:
@@ -316,3 +402,10 @@ def _ensure_dir(path: Path, *, message: str) -> None:
         invalid_message="Simulation output path must be a directory",
         create_message=message,
     )
+
+
+def _format_run_at() -> str:
+    now = datetime.now().astimezone()
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    tzname = now.tzname() or "local"
+    return f"{stamp} {tzname}"

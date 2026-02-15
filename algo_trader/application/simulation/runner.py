@@ -32,6 +32,7 @@ from .outer_walk_forward import (
     evaluate_outer_walk_forward,
 )
 from .artifacts import (
+    CVStructureInputs,
     SimulationArtifacts,
     SimulationInputs,
     resolve_simulation_output_dir,
@@ -80,10 +81,16 @@ def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
         artifacts.write_results(results)
         return results
     artifacts.write_cv_structure(
-        warmup_idx=context.cv.warmup_idx,
-        groups=context.cv.groups,
-        outer_ids=context.cv.outer_ids,
-        outer_folds=[_outer_fold_payload(fold) for fold in context.cv.outer_folds],
+        inputs=CVStructureInputs(
+            warmup_idx=context.cv.warmup_idx,
+            groups=context.cv.groups,
+            outer_ids=context.cv.outer_ids,
+            outer_folds=[
+                _outer_fold_payload(fold)
+                for fold in context.cv.outer_folds
+            ],
+            timestamps=dataset.dates,
+        )
     )
     base_config = _build_base_config(
         config.modeling.model, config.modeling.training
@@ -95,6 +102,7 @@ def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
         )
         results = _with_run_meta(results, config.flags)
         artifacts.write_results(results)
+        artifacts.write_cv_summary(results)
         return results
 
     chosen_configs, outer_results = _evaluate_outer_folds(
@@ -111,6 +119,7 @@ def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
     results = _build_results(config, context, chosen_configs, outer_results)
     results = _with_run_meta(results, config.flags)
     artifacts.write_results(results)
+    artifacts.write_cv_summary(results)
     return results
 
 

@@ -20,11 +20,13 @@ def build_equal_groups(
 
     usable_start = warmup_len
     usable_len = T - usable_start
-    group_count = usable_len // group_len
+    remainder = usable_len % group_len
+    aligned_start = usable_start + remainder
+    group_count = (T - aligned_start) // group_len
 
     groups: List[np.ndarray] = []
     for group_id in range(group_count):
-        start = usable_start + group_id * group_len
+        start = aligned_start + group_id * group_len
         end = start + group_len
         groups.append(np.arange(start, end, dtype=int))
 

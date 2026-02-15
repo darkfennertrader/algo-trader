@@ -11,8 +11,8 @@ def test_build_equal_groups_truncates() -> None:
     warmup_idx, groups = build_equal_groups(T=10, warmup_len=2, group_len=3)
     assert warmup_idx.tolist() == [0, 1]
     assert len(groups) == 2
-    assert groups[0].tolist() == [2, 3, 4]
-    assert groups[1].tolist() == [5, 6, 7]
+    assert groups[0].tolist() == [4, 5, 6]
+    assert groups[1].tolist() == [7, 8, 9]
 
 
 def test_cpcv_purge_and_embargo() -> None:

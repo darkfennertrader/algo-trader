@@ -373,6 +373,22 @@ class ReturnsSource:
             columns=self._config.columns,
             return_type=self._config.return_type,
         )
+        expected_weeks = _expected_week_starts(
+            asset_data,
+            start=self._config.start,
+            end=self._config.end,
+        )
+        if not expected_weeks.empty and not weekly_returns.empty:
+            before_rows = len(weekly_returns)
+            mask = weekly_returns.index.isin(expected_weeks)
+            weekly_returns = weekly_returns.loc[mask]
+            after_rows = len(weekly_returns)
+            if after_rows != before_rows:
+                logger.info(
+                    "Trimmed weekly returns to expected weeks rows_before=%s rows_after=%s",
+                    before_rows,
+                    after_rows,
+                )
         weekly_returns = self._align_and_trim_frame(weekly_returns)
         combined_index = combine_hourly_indexes(asset_data)
         combined_index = weekday_only_index(combined_index)

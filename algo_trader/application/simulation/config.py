@@ -1,0 +1,283 @@
+from __future__ import annotations
+
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any, Mapping
+
+import yaml
+
+from algo_trader.domain import ConfigError
+from algo_trader.domain.simulation import (
+    AllocationConfig,
+    CleaningSpec,
+    CostConfig,
+    CPCVParams,
+    CVLeakage,
+    CVParams,
+    CVWindow,
+    DataConfig,
+    DataPaths,
+    DataSelection,
+    EvaluationSpec,
+    ModelConfig,
+    ModelingSpec,
+    OuterConfig,
+    PredictiveConfig,
+    PreprocessSpec,
+    ScalingSpec,
+    ScoringConfig,
+    SimulationConfig,
+    SimulationFlags,
+    TrainingConfig,
+    TuningConfig,
+)
+
+DEFAULT_CONFIG_PATH = (
+    Path(__file__).resolve().parents[3] / "config" / "model_selection.yml"
+)
+
+
+def load_config(path: Path | None = None) -> SimulationConfig:
+    config_path = path or DEFAULT_CONFIG_PATH
+    raw = _load_yaml_mapping(config_path)
+    return _build_config(raw, config_path)
+
+
+def config_to_dict(config: SimulationConfig) -> dict[str, object]:
+    return asdict(config)
+
+
+def _build_config(
+    raw: Mapping[str, Any], config_path: Path
+) -> SimulationConfig:
+    data = _build_data_config(raw, config_path)
+    cv = _build_cv_params(raw, config_path)
+    preprocessing = _build_preprocess_spec(raw, config_path)
+    modeling = _build_modeling_spec(raw, config_path)
+    evaluation = _build_evaluation_spec(raw, config_path)
+    outer = _build_outer_config(raw, config_path)
+    flags = _build_flags(raw)
+
+    return SimulationConfig(
+        data=data,
+        cv=cv,
+        preprocessing=preprocessing,
+        modeling=modeling,
+        evaluation=evaluation,
+        outer=outer,
+        flags=flags,
+    )
+
+
+def _build_flags(raw: Mapping[str, Any]) -> SimulationFlags:
+    return SimulationFlags(
+        use_feature_names_for_scaling=bool(
+            raw.get("use_feature_names_for_scaling", True)
+        ),
+        use_gpu=bool(raw.get("use_gpu", False)),
+    )
+
+
+def _build_outer_config(
+    raw: Mapping[str, Any], config_path: Path
+) -> OuterConfig:
+    outer = raw.get("outer", {})
+    if outer is None:
+        outer = {}
+    if not isinstance(outer, Mapping):
+        raise ConfigError(f"outer must be a mapping in {config_path}")
+    test_group_ids = outer.get("test_group_ids")
+    last_n = outer.get("last_n")
+    if test_group_ids is not None:
+        if not isinstance(test_group_ids, list) or not all(
+            isinstance(item, int) for item in test_group_ids
+        ):
+            raise ConfigError(
+                f"outer.test_group_ids must be a list of ints in {config_path}"
+            )
+    if last_n is not None:
+        try:
+            last_n = int(last_n)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"outer.last_n must be an int in {config_path}"
+            ) from exc
+    if test_group_ids is not None and last_n is not None:
+        raise ConfigError(
+            f"Specify only one of outer.test_group_ids or outer.last_n in {config_path}"
+        )
+    return OuterConfig(test_group_ids=test_group_ids, last_n=last_n)
+
+
+def _build_modeling_spec(
+    raw: Mapping[str, Any], config_path: Path
+) -> ModelingSpec:
+    model = _build_section(raw, "model", ModelConfig, config_path)
+    training = _build_section(raw, "training", TrainingConfig, config_path)
+    tuning = _build_section(raw, "tuning", TuningConfig, config_path)
+    return ModelingSpec(model=model, training=training, tuning=tuning)
+
+
+def _build_evaluation_spec(
+    raw: Mapping[str, Any], config_path: Path
+) -> EvaluationSpec:
+    scoring = _build_section(raw, "scoring", ScoringConfig, config_path)
+    predictive = _build_section(raw, "predictive", PredictiveConfig, config_path)
+    allocation = _build_section(raw, "allocation", AllocationConfig, config_path)
+    cost = _build_section(raw, "cost", CostConfig, config_path)
+    return EvaluationSpec(
+        scoring=scoring,
+        predictive=predictive,
+        allocation=allocation,
+        cost=cost,
+    )
+
+
+def _build_section(
+    raw: Mapping[str, Any],
+    key: str,
+    constructor: type[Any],
+    config_path: Path,
+) -> Any:
+    section = raw.get(key)
+    if not isinstance(section, Mapping):
+        raise ConfigError(f"{key} must be a mapping in {config_path}")
+    try:
+        return constructor(**section)
+    except TypeError as exc:
+        raise ConfigError(
+            f"Invalid {key} configuration in {config_path}",
+            context={"section": key},
+        ) from exc
+
+
+def _build_cv_params(
+    raw: Mapping[str, Any], config_path: Path
+) -> CVParams:
+    section = raw.get("cv")
+    if not isinstance(section, Mapping):
+        raise ConfigError(f"cv must be a mapping in {config_path}")
+    try:
+        window = CVWindow(
+            warmup_len=int(section.get("warmup_len", 0)),
+            group_len=int(section.get("group_len", 0)),
+        )
+        leakage = CVLeakage(
+            horizon=int(section.get("horizon", 1)),
+            embargo_len=int(section.get("embargo_len", 0)),
+        )
+        cpcv = CPCVParams(
+            q=int(section.get("q", 0)),
+            max_inner_combos=(
+                int(section["max_inner_combos"])
+                if section.get("max_inner_combos") is not None
+                else None
+            ),
+            seed=int(section.get("seed", 0)),
+        )
+        include_warmup = bool(
+            section.get("include_warmup_in_inner_train", True)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"Invalid cv configuration in {config_path}",
+            context={"section": "cv"},
+        ) from exc
+    return CVParams(
+        window=window,
+        leakage=leakage,
+        cpcv=cpcv,
+        include_warmup_in_inner_train=include_warmup,
+    )
+
+
+def _build_preprocess_spec(
+    raw: Mapping[str, Any], config_path: Path
+) -> PreprocessSpec:
+    section = raw.get("preprocessing")
+    if not isinstance(section, Mapping):
+        raise ConfigError(f"preprocessing must be a mapping in {config_path}")
+    try:
+        cleaning = CleaningSpec(
+            min_usable_ratio=float(section.get("min_usable_ratio", 0.0)),
+            min_variance=float(section.get("min_variance", 0.0)),
+            max_abs_corr=float(section.get("max_abs_corr", 0.0)),
+            corr_subsample=(
+                int(section["corr_subsample"])
+                if section.get("corr_subsample") is not None
+                else None
+            ),
+        )
+        scaling = ScalingSpec(
+            mad_eps=float(section.get("mad_eps", 0.0)),
+            impute_missing_to_zero=bool(section.get("impute_missing_to_zero", True)),
+            feature_names=section.get("feature_names"),
+            append_mask_as_features=bool(
+                section.get("append_mask_as_features", False)
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"Invalid preprocessing configuration in {config_path}",
+            context={"section": "preprocessing"},
+        ) from exc
+    return PreprocessSpec(cleaning=cleaning, scaling=scaling)
+
+
+def _build_data_config(
+    raw: Mapping[str, Any], config_path: Path
+) -> DataConfig:
+    section = raw.get("data")
+    if not isinstance(section, Mapping):
+        raise ConfigError(f"data must be a mapping in {config_path}")
+    paths = section.get("paths", {})
+    if paths is None:
+        paths = {}
+    if not isinstance(paths, Mapping):
+        raise ConfigError(f"data.paths must be a mapping in {config_path}")
+    selection = section.get("selection", {})
+    if selection is None:
+        selection = {}
+    if not isinstance(selection, Mapping):
+        raise ConfigError(f"data.selection must be a mapping in {config_path}")
+    dataset_params = section.get("dataset_params", {})
+    if dataset_params is None:
+        dataset_params = {}
+    if not isinstance(dataset_params, Mapping):
+        raise ConfigError(
+            f"data.dataset_params must be a mapping in {config_path}"
+        )
+    dataset_name = section.get("dataset_name", "")
+    if not dataset_name:
+        raise ConfigError(f"data.dataset_name is required in {config_path}")
+    try:
+        return DataConfig(
+            dataset_name=str(dataset_name),
+            paths=DataPaths(**paths),
+            selection=DataSelection(**selection),
+            dataset_params=dataset_params,
+        )
+    except TypeError as exc:
+        raise ConfigError(
+            f"Invalid data configuration in {config_path}",
+            context={"section": "data"},
+        ) from exc
+
+
+def _load_yaml_mapping(config_path: Path) -> Mapping[str, Any]:
+    if not config_path.exists():
+        raise ConfigError(f"Config file not found: {config_path}")
+    try:
+        raw_text = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"Failed to read config file {config_path}") from exc
+    try:
+        raw_config: Any = yaml.safe_load(raw_text) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(
+            f"Invalid YAML in {config_path}",
+            context={"path": str(config_path)},
+        ) from exc
+    if not isinstance(raw_config, Mapping):
+        raise ConfigError(f"Config file must contain a mapping: {config_path}")
+    return raw_config

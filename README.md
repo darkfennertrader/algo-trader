@@ -16,8 +16,19 @@ Basic commands using uv:
 - Data processing: `uv run algotrader data_processing` (defaults to `identity`; add `--preprocessor <name>` to override)
 - Feature engineering: `uv run algotrader feature_engineering`
 - Modeling (Pyro inference): `uv run algotrader modeling --model normal --guide normal_mean_field`
-- Model selection (skeleton): `uv run algotrader model_selection --selection-config config/model_selection.yml`
+- Simulation (nested CV): `uv run algotrader simulation --simulation-config config/model_selection.yml`
 - Backtest (placeholder): `uv run algotrader backtest`
+
+### Nested CV simulation
+
+The `simulation` command runs a **nested time‑series CV**:
+
+- **Outer loop:** walk‑forward (train on past, test on future group)
+- **Inner loop:** CPCV over past groups with purge + embargo for leakage control
+
+Details and flow diagrams:
+- `docs/nestedcv.md`
+- `docs/nestedcv_sequence.md`
 
 Data cleaning return options:
 - `--return-type simple` (default): `(P_t / P_{t-1}) - 1`
@@ -291,10 +302,10 @@ algo_trader/
     feature_engineering/
     historical/
     modeling/
-    model_selection/
+    simulation/
   domain/
     market_data/
-    model_selection/
+    simulation/
   infrastructure/
     data/
     exporters/
@@ -313,10 +324,10 @@ algo_trader/
 - `application/feature_engineering/` computes feature groups from cleaned inputs.
 - `application/historical/` handles historical data downloads and requests.
 - `application/modeling/` runs inference workflows and model I/O.
-- `application/model_selection/` runs model selection experiments and Ray Tune wiring.
+- `application/simulation/` runs nested CV simulation and evaluation wiring.
 - `domain/` holds core models and protocols; stays stable and vendor-agnostic.
 - `domain/market_data/` domain models and interfaces for market data.
-- `domain/model_selection/` model selection interfaces and configuration types.
+- `domain/simulation/` simulation interfaces and configuration types.
 - `infrastructure/` shared plumbing (env, logging, storage, event bus).
 - `infrastructure/data/` shared data utilities, schemas, and storage helpers.
 - `infrastructure/exporters/` exporters for saving or emitting artifacts.
@@ -347,13 +358,11 @@ algo_trader/
   (outputs) in `.env`. Output is located at `MODEL_STORE_SOURCE` under `.env`. The
   command reads the latest prepared data from the feature store (or `--input`), then
   writes parameter outputs to the model store.
-- For model selection, edit `config/model_selection.yml` or pass
-  `--selection-config` to the CLI. The skeleton expects `data.paths.tensor_path`
-  to point at a tensor bundle and uses `data.selection` for slicing. For CPCV,
-  `cv.test_block_size` is the number of blocks per validation fold (k in C(N, k));
-  use `cv.sampling` to bound or shuffle the combinations. Setting
-  `cv.test_block_size = 1` reduces CPCV to standard Purged CV (one contiguous
-  validation block per fold).
+- For simulation, edit `config/model_selection.yml` or pass
+  `--simulation-config` to the CLI. The simulation expects `data.paths.tensor_path`
+  to point at a tensor bundle (optionally with `missing_mask`) and uses
+  `data.selection` for slicing. Nested CV parameters live under `cv` and
+  `preprocessing`, with outer fold selection under `outer`.
 
 ## Adding a new preprocessor
 
@@ -375,9 +384,9 @@ algo_trader/
 4) Run it via CLI:
    - `uv run algotrader modeling --model <model_name> --guide <guide_name>`
 
-## Model selection extensions
+## Simulation extensions
 
-To extend model selection, define concrete dataset loaders in `algo_trader/infrastructure/data/` (e.g., a `PanelTensorDataset` loader), CV splitters/trainers/metrics in `algo_trader/application/model_selection/`, and model/guide factories in `algo_trader/pipeline/stages/modeling/` (or wherever your model code lives), then register each component in `algo_trader/application/model_selection/registry.py` inside `default_registries()` under the keys you want to reference; finally, wire those keys in `config/model_selection.yml` (`data.dataset_name`, `cv.cv_name`, `model.model_name`, `model.guide_name`, `training.trainer_name`, `metrics.metric_names`) so the CLI can build the experiment from config.
+To extend simulation, define concrete dataset loaders in `algo_trader/infrastructure/data/` (e.g., a `PanelTensorDataset` loader), then register them in `algo_trader/application/simulation/registry.py` under the keys you want to reference; finally, wire those keys in `config/model_selection.yml` (`data.dataset_name`) so the CLI can build the simulation from config.
 
 ## Scripts
 

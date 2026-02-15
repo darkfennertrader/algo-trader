@@ -7,6 +7,7 @@ from .errors import (
     ExportError,
     InferenceError,
     ModelSelectionError,
+    SimulationError,
     ProviderConnectionError,
     ProviderError,
 )
@@ -20,6 +21,7 @@ __all__ = (
     "ExportError",
     "InferenceError",
     "ModelSelectionError",
+    "SimulationError",
     "ProviderConnectionError",
     "ProviderError",
 )

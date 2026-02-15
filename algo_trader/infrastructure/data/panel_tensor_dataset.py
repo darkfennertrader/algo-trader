@@ -9,7 +9,7 @@ from typing import Any, Sequence
 import torch
 
 from algo_trader.domain import ConfigError, DataSourceError
-from algo_trader.domain.model_selection import DataConfig, DataPaths
+from algo_trader.domain.simulation import DataConfig, DataPaths
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 class PanelTensorDataset:
     data: torch.Tensor
     targets: torch.Tensor
+    missing_mask: torch.Tensor
     dates: Sequence[Any]
     assets: Sequence[str]
     features: Sequence[str]
@@ -41,6 +42,19 @@ class PanelTensorDataset:
                     "data_shape": str(tuple(self.data.shape)),
                     "targets_shape": str(tuple(self.targets.shape)),
                 },
+            )
+        if self.missing_mask.shape != self.data.shape:
+            raise ConfigError(
+                "missing_mask must align with data (T, A, F)",
+                context={
+                    "data_shape": str(tuple(self.data.shape)),
+                    "mask_shape": str(tuple(self.missing_mask.shape)),
+                },
+            )
+        if self.missing_mask.dtype != torch.bool:
+            raise ConfigError(
+                "missing_mask must be a boolean tensor",
+                context={"dtype": str(self.missing_mask.dtype)},
             )
         if len(self.dates) != self.data.shape[0]:
             raise ConfigError(
@@ -111,9 +125,13 @@ def load_panel_tensor_dataset(
         count=values.shape[2],
     )
     data = values.to(device)
+    missing_mask = _load_missing_mask(
+        _optional_path(paths.missing_mask_path), payload=payload, values=values
+    )
     return PanelTensorDataset(
         data=data,
         targets=targets.to(device),
+        missing_mask=missing_mask.to(device),
         dates=timestamps,
         assets=assets,
         features=features,
@@ -175,6 +193,41 @@ def _load_targets(
             },
         )
     return targets
+
+
+def _load_missing_mask(
+    path: Path | None,
+    *,
+    payload: dict[str, object],
+    values: torch.Tensor,
+) -> torch.Tensor:
+    if path is None:
+        raw = payload.get("missing_mask")
+        if raw is None:
+            return torch.isnan(values)
+        mask = _require_tensor(raw, label="missing_mask")
+    else:
+        try:
+            mask = torch.load(path, map_location="cpu")
+        except Exception as exc:
+            raise DataSourceError(
+                "Failed to load missing_mask tensor",
+                context={"path": str(path)},
+            ) from exc
+        if not isinstance(mask, torch.Tensor):
+            raise DataSourceError(
+                "Missing mask payload must be a tensor",
+                context={"path": str(path)},
+            )
+    if mask.shape != values.shape:
+        raise ConfigError(
+            "Missing mask must align with values (T, A, F)",
+            context={
+                "mask_shape": str(tuple(mask.shape)),
+                "values_shape": str(tuple(values.shape)),
+            },
+        )
+    return mask.to(dtype=torch.bool)
 
 
 def _load_timestamps(

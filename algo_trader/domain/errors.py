@@ -47,3 +47,7 @@ class InferenceError(AlgoTraderError):
 
 class ModelSelectionError(AlgoTraderError):
     pass
+
+
+class SimulationError(AlgoTraderError):
+    pass

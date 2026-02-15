@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 import yaml
 
@@ -70,11 +70,49 @@ def _build_config(
 
 
 def _build_flags(raw: Mapping[str, Any]) -> SimulationFlags:
+    mode = raw.get("simulation_mode", "full")
+    stop_after = raw.get("stop_after")
     return SimulationFlags(
         use_feature_names_for_scaling=bool(
             raw.get("use_feature_names_for_scaling", True)
         ),
         use_gpu=bool(raw.get("use_gpu", False)),
+        simulation_mode=_normalize_simulation_mode(mode),
+        stop_after=_normalize_stop_after(stop_after),
+    )
+
+
+SimulationMode = Literal["dry_run", "stub", "full"]
+StopAfter = Literal["inputs", "cv", "inner", "outer", "results"] | None
+
+
+def _normalize_simulation_mode(value: object) -> SimulationMode:
+    raw = str(value).strip().lower()
+    if raw == "dry_run":
+        return "dry_run"
+    if raw == "stub":
+        return "stub"
+    if raw == "full":
+        return "full"
+    raise ConfigError("simulation_mode must be dry_run, stub, or full")
+
+
+def _normalize_stop_after(value: object) -> StopAfter:
+    if value is None:
+        return None
+    raw = str(value).strip().lower()
+    if raw == "inputs":
+        return "inputs"
+    if raw == "cv":
+        return "cv"
+    if raw == "inner":
+        return "inner"
+    if raw == "outer":
+        return "outer"
+    if raw == "results":
+        return "results"
+    raise ConfigError(
+        "stop_after must be inputs, cv, inner, outer, results, or null"
     )
 
 

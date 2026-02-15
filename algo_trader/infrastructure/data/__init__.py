@@ -19,6 +19,7 @@ from .tensors import (
     write_tensor_bundle,
 )
 from .panel_tensor_dataset import PanelTensorDataset, load_panel_tensor_dataset
+from .feature_store_panel_dataset import load_feature_store_panel_dataset
 
 __all__ = [
     "ReturnType",
@@ -36,4 +37,5 @@ __all__ = [
     "write_tensor_bundle",
     "PanelTensorDataset",
     "load_panel_tensor_dataset",
+    "load_feature_store_panel_dataset",
 ]

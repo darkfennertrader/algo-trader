@@ -49,7 +49,7 @@ def evaluate_outer_walk_forward(
     context: OuterEvaluationContext,
     best_config: Mapping[str, Any],
     hooks: SimulationHooks,
-) -> Mapping[str, Any]:
+) -> tuple[Mapping[str, Any], FeatureCleaningState | None]:
     test_weeks = _sorted_indices(context.outer_fold.test_idx)
     base_train = _sorted_indices(context.outer_fold.train_idx)
     alloc_spec = _build_alloc_spec(context.portfolio, int(context.X.shape[1]))
@@ -63,7 +63,7 @@ def evaluate_outer_walk_forward(
     )
 
     if cleaning_outer.feature_idx.size == 0:
-        return _empty_result(context.outer_fold)
+        return _empty_result(context.outer_fold), cleaning_outer
 
     loop_context = WeeklyLoopContext(
         test_weeks=test_weeks,
@@ -76,11 +76,14 @@ def evaluate_outer_walk_forward(
     )
     pnl, weights = _run_weekly_loop(loop_context)
 
-    return _build_result(
-        outer_fold=context.outer_fold,
-        cleaning_outer=cleaning_outer,
-        pnl=pnl,
-        weights=weights,
+    return (
+        _build_result(
+            outer_fold=context.outer_fold,
+            cleaning_outer=cleaning_outer,
+            pnl=pnl,
+            weights=weights,
+        ),
+        cleaning_outer,
     )
 
 

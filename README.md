@@ -359,10 +359,14 @@ algo_trader/
   command reads the latest prepared data from the feature store (or `--input`), then
   writes parameter outputs to the model store.
 - For simulation, edit `config/model_selection.yml` or pass
-  `--simulation-config` to the CLI. The simulation expects `data.paths.tensor_path`
-  to point at a tensor bundle (optionally with `missing_mask`) and uses
-  `data.selection` for slicing. Nested CV parameters live under `cv` and
-  `preprocessing`, with outer fold selection under `outer`.
+  `--simulation-config` to the CLI. The default dataset loader
+  (`data.dataset_name: feature_store_panel`) builds a combined `T x A x F` tensor
+  from the feature store groups plus the data lake return tensor. It uses
+  `data.selection` for slicing. The optional `simulation_mode` and `stop_after`
+  flags control dry‑run vs stub/full execution and early stopping. Outputs are
+  written under `SIMULATION_SOURCE/YYYY-WW/` (inputs, inner/outer artifacts,
+  and summary). If you switch to `data.dataset_name: tensor_bundle`, then
+  `data.paths.tensor_path`/`targets_path` must be set to point at the bundles.
 
 ## Adding a new preprocessor
 

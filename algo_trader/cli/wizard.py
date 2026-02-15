@@ -60,12 +60,18 @@ def run() -> int:
             ("data_cleaning", "data_cleaning"),
             ("feat. engineering", "feature_engineering"),
             ("data_processing", "data_processing"),
+            ("simulation", "simulation"),
         ],
     )
     command = _build_workflow_command(workflow)
 
     print("\nGenerated command:")
     print(command.render())
+    if workflow == "simulation":
+        print(
+            "\nReminder: simulation behavior is controlled by "
+            "config/model_selection.yml."
+        )
     return 0
 
 
@@ -127,6 +133,16 @@ def _feature_engineering_command() -> WizardCommand:
     return WizardCommand(commands=commands)
 
 
+def _simulation_command() -> WizardCommand:
+    args: list[str] = ["algotrader", "simulation"]
+    config_path = _prompt_optional(
+        "Simulation config path (blank for config/model_selection.yml)"
+    )
+    if config_path:
+        args.extend(["--simulation-config", config_path])
+    return WizardCommand(commands=[args])
+
+
 def _prompt_preprocessor() -> str:
     registry = preprocessor_registry()
     names = registry.list_names()
@@ -154,6 +170,7 @@ def _workflow_builders() -> dict[str, Callable[[], WizardCommand]]:
         "data_cleaning": _data_cleaning_command,
         "data_processing": _data_processing_command,
         "feature_engineering": _feature_engineering_command,
+        "simulation": _simulation_command,
     }
 
 

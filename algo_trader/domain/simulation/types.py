@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 import numpy as np
 import torch
@@ -186,6 +186,10 @@ class OuterConfig:
 class SimulationFlags:
     use_feature_names_for_scaling: bool = True
     use_gpu: bool = False
+    simulation_mode: Literal["dry_run", "stub", "full"] = "full"
+    stop_after: (
+        Literal["inputs", "cv", "inner", "outer", "results"] | None
+    ) = None
 
 
 @dataclass(frozen=True)

@@ -96,6 +96,12 @@ class CPCVSplit:
     train_idx: np.ndarray
     test_idx: np.ndarray
     test_group_ids: tuple[int, ...]
+    purged_idx: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=int)
+    )
+    embargoed_idx: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=int)
+    )
 
 
 @dataclass(frozen=True)

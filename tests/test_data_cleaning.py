@@ -61,6 +61,8 @@ def test_returns_source_month_filter_is_inclusive(tmp_path: Path) -> None:
             ("2024-01-31 23:00:00", 100.0, 100.0, 100.0, 100.0),
             ("2024-02-01 09:00:00", 110.0, 110.0, 110.0, 110.0),
             ("2024-02-02 16:00:00", 121.0, 121.0, 121.0, 121.0),
+            ("2024-02-05 09:00:00", 100.0, 100.0, 100.0, 100.0),
+            ("2024-02-09 16:00:00", 110.0, 110.0, 110.0, 110.0),
         ],
     )
 
@@ -76,7 +78,7 @@ def test_returns_source_month_filter_is_inclusive(tmp_path: Path) -> None:
     returns = source.get_returns_frame()
 
     assert returns.index.equals(
-        pd.DatetimeIndex([pd.Timestamp("2024-02-02 16:00:00")])
+        pd.DatetimeIndex([pd.Timestamp("2024-02-09 16:00:00")])
     )
     assert returns.iloc[0, 0] == pytest.approx(0.1)
 

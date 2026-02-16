@@ -167,14 +167,22 @@ def load_panel_tensor_dataset(
         payload=payload,
         count=values.shape[0],
     )
-    targets = _load_targets(_optional_path(paths.targets_path), values=values)
+    targets = _load_targets(
+        _optional_path(paths.targets_path),
+        payload=payload,
+        values=values,
+    )
     assets = _load_labels(
         _optional_path(paths.assets_path),
+        payload=payload,
+        payload_key="assets",
         default_prefix="Asset",
         count=values.shape[1],
     )
     features = _load_labels(
         _optional_path(paths.features_path),
+        payload=payload,
+        payload_key="features",
         default_prefix="Feature",
         count=values.shape[2],
     )
@@ -194,25 +202,32 @@ def load_panel_tensor_dataset(
 
 
 def _load_targets(
-    path: Path | None, *, values: torch.Tensor
+    path: Path | None,
+    *,
+    payload: dict[str, object],
+    values: torch.Tensor,
 ) -> torch.Tensor:
     if path is None:
-        logger.warning("No targets_path provided; using zeros tensor.")
-        return torch.zeros(
-            (values.shape[0], values.shape[1]), dtype=values.dtype
-        )
-    try:
-        targets = torch.load(path, map_location="cpu")
-    except Exception as exc:
-        raise DataSourceError(
-            "Failed to load targets tensor",
-            context={"path": str(path)},
-        ) from exc
-    if not isinstance(targets, torch.Tensor):
-        raise DataSourceError(
-            "Targets payload must be a tensor",
-            context={"path": str(path)},
-        )
+        raw = payload.get("targets")
+        if raw is None:
+            logger.warning("No targets found; using zeros tensor.")
+            return torch.zeros(
+                (values.shape[0], values.shape[1]), dtype=values.dtype
+            )
+        targets = require_tensor(raw, label="targets")
+    else:
+        try:
+            targets = torch.load(path, map_location="cpu")
+        except Exception as exc:
+            raise DataSourceError(
+                "Failed to load targets tensor",
+                context={"path": str(path)},
+            ) from exc
+        if not isinstance(targets, torch.Tensor):
+            raise DataSourceError(
+                "Targets payload must be a tensor",
+                context={"path": str(path)},
+            )
     if targets.shape[:2] != values.shape[:2]:
         raise ConfigError(
             "Targets tensor must align with data (T, A)",
@@ -301,11 +316,40 @@ def _coerce_timestamps(raw: object, *, count: int) -> list[Any]:
 
 
 def _load_labels(
-    path: Path | None, *, default_prefix: str, count: int
+    path: Path | None,
+    *,
+    payload: dict[str, object],
+    payload_key: str,
+    default_prefix: str,
+    count: int,
 ) -> list[str]:
     if path is None:
+        raw = payload.get(payload_key)
+        if raw is not None:
+            return _coerce_labels(raw, count=count, label=payload_key)
         return [f"{default_prefix}_{idx}" for idx in range(count)]
     values = _load_json_values(path)
+    labels = [str(value) for value in values]
+    if len(labels) != count:
+        raise ConfigError(
+            "Label count must match tensor dimension",
+            context={"labels": str(len(labels)), "expected": str(count)},
+        )
+    return labels
+
+
+def _coerce_labels(
+    raw: object, *, count: int, label: str
+) -> list[str]:
+    if isinstance(raw, torch.Tensor):
+        values = raw.cpu().tolist()
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        raise DataSourceError(
+            f"Unsupported {label} payload",
+            context={"type": type(raw).__name__},
+        )
     labels = [str(value) for value in values]
     if len(labels) != count:
         raise ConfigError(

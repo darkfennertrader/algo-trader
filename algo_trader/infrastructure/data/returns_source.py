@@ -725,7 +725,7 @@ def _expected_week_starts(
     if range_start >= range_end:
         return pd.DatetimeIndex([])
     range_end = range_end - pd.Timedelta(1, "ns")
-    start_week = _start_week_for_range(range_start, skip_partial=False)
+    start_week = _start_week_for_range(range_start, skip_partial=True)
     end_week = _week_start_index(pd.DatetimeIndex([range_end]))[0]
     if start_week > end_week:
         return pd.DatetimeIndex([])

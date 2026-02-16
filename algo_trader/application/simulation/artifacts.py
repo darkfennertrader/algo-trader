@@ -145,6 +145,8 @@ class SimulationArtifacts:
                 "train_idx": split.train_idx.tolist(),
                 "test_idx": split.test_idx.tolist(),
                 "test_group_ids": list(split.test_group_ids),
+                "purged_idx": split.purged_idx.tolist(),
+                "embargoed_idx": split.embargoed_idx.tolist(),
             }
             for split in inner_splits
         ]

@@ -11,6 +11,10 @@ Quickstart:
 - Start here: `docs/README.md`.
 - Coding rules and workflow: `AGENTS.md`.
 
+Note: Simulation models and guides implement `PyroModel`/`PyroGuide` using the
+`ModelBatch` dataclass (features/targets/mask). See `docs/workflows.md` for
+the current model/guide contract.
+
 LLM reading order:
 - `AGENTS.md` - coding rules and workflow
 - `docs/repo_structure.md` - architecture and module map

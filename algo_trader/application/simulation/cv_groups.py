@@ -151,21 +151,24 @@ def _apply_purge_and_embargo(
     test_blocks: Sequence[np.ndarray],
     horizon: int,
     embargo_len: int,
-) -> np.ndarray:
-    exclude = np.zeros(train_idx.shape[0], dtype=bool)
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    purged = np.zeros(train_idx.shape[0], dtype=bool)
+    embargoed = np.zeros(train_idx.shape[0], dtype=bool)
     for block in test_blocks:
         blk_start = int(block[0])
         blk_end = int(block[-1]) + 1
 
-        exclude |= _overlaps_label_interval_vec(
+        purged |= _overlaps_label_interval_vec(
             train_idx, blk_start, blk_end, horizon
         )
 
         emb_start = blk_end
         emb_end = blk_end + embargo_len
-        exclude |= (train_idx >= emb_start) & (train_idx < emb_end)
+        embargoed |= (train_idx >= emb_start) & (train_idx < emb_end)
 
-    return train_idx[~exclude]
+    excluded = purged | embargoed
+    kept = train_idx[~excluded]
+    return kept, train_idx[purged], train_idx[embargoed]
 
 
 def _build_train_indices(
@@ -212,7 +215,7 @@ def make_cpcv_splits(
         if train_idx is None:
             continue
 
-        train_idx = _apply_purge_and_embargo(
+        train_idx, purged_idx, embargoed_idx = _apply_purge_and_embargo(
             train_idx=train_idx,
             test_blocks=test_blocks,
             horizon=params.leakage.horizon,
@@ -233,6 +236,8 @@ def make_cpcv_splits(
                 train_idx=train_idx,
                 test_idx=test_idx,
                 test_group_ids=tuple(combo),
+                purged_idx=purged_idx,
+                embargoed_idx=embargoed_idx,
             )
         )
 

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable, TypeVar
 
 from algo_trader.domain import ConfigError
-from .dummy import NormalMeanFieldGuide, NormalModel
 from .protocols import PyroGuide, PyroModel
+
+ModelBuilder = Callable[[], PyroModel]
+GuideBuilder = Callable[[], PyroGuide]
+TModelBuilder = TypeVar("TModelBuilder", bound=ModelBuilder)
+TGuideBuilder = TypeVar("TGuideBuilder", bound=GuideBuilder)
 
 
 @dataclass
@@ -61,16 +66,32 @@ class GuideRegistry:
         return sorted(self._items.keys())
 
 
+_MODEL_REGISTRY = ModelRegistry()
+_GUIDE_REGISTRY = GuideRegistry()
+
+
+def register_model(name: str) -> Callable[[TModelBuilder], TModelBuilder]:
+    def decorator(builder: TModelBuilder) -> TModelBuilder:
+        _MODEL_REGISTRY.register(name, builder())
+        return builder
+
+    return decorator
+
+
+def register_guide(name: str) -> Callable[[TGuideBuilder], TGuideBuilder]:
+    def decorator(builder: TGuideBuilder) -> TGuideBuilder:
+        _GUIDE_REGISTRY.register(name, builder())
+        return builder
+
+    return decorator
+
+
 def default_model_registry() -> ModelRegistry:
-    registry = ModelRegistry()
-    registry.register("normal", NormalModel())
-    return registry
+    return _MODEL_REGISTRY
 
 
 def default_guide_registry() -> GuideRegistry:
-    registry = GuideRegistry()
-    registry.register("normal_mean_field", NormalMeanFieldGuide())
-    return registry
+    return _GUIDE_REGISTRY
 
 
 def _normalize_name(name: str) -> str:

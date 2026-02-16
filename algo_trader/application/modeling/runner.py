@@ -314,8 +314,9 @@ def _run_inference(
     svi = pyro.infer.SVI(model, guide, optimizer, loss=pyro.infer.Trace_ELBO())  # type: ignore
     final_loss = Decimal("0")
     log_interval = _log_interval(options.steps)
+    batch = modeling.ModelBatch(X=None, y=data, M=None)
     for step in range(options.steps):
-        loss = svi.step(data)
+        loss = svi.step(batch)
         final_loss = Decimal(str(loss))
         if (step + 1) % log_interval == 0 or step == 0:
             logger.info(

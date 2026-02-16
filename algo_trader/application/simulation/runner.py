@@ -24,7 +24,7 @@ from algo_trader.infrastructure import log_boundary
 
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .cv_groups import build_equal_groups, make_cpcv_splits, make_outer_folds
-from .hooks import SimulationHooks, default_hooks
+from .hooks import SimulationHooks, default_hooks, stub_hooks
 from .inner_objective import InnerObjectiveContext, make_inner_objective
 from .outer_walk_forward import (
     OuterEvaluationContext,
@@ -68,7 +68,11 @@ def _run_context(config_path: Path | None) -> Mapping[str, str]:
 def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
     config = load_config(config_path)
     device = _resolve_device(config.flags.use_gpu)
-    hooks = default_hooks()
+    hooks = (
+        stub_hooks()
+        if config.flags.simulation_mode == "stub"
+        else default_hooks()
+    )
 
     dataset = _load_dataset(config, device)
     context = _build_context(config, dataset)

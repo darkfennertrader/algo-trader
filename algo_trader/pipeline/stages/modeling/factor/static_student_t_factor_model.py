@@ -36,7 +36,8 @@ from dataclasses import dataclass
 import torch
 import pyro
 import pyro.distributions as dist
-from algo_trader.pipeline.stages.modeling import PyroModel
+from algo_trader.domain import ConfigError
+from algo_trader.pipeline.stages.modeling import ModelBatch, PyroModel
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,7 @@ class StaticStudentTFactorReturnsModel(PyroModel):
 
         # In your pipeline, make sure `returns` are z-scored per asset
         # using fixed means/stds (not recomputed on the same 60-day window).
-        loss = svi.step(standardized_returns)
+        loss = svi.step(ModelBatch(X=None, y=standardized_returns, M=None))
 
     Hyperparameters (defaults are tuned for z-scored daily returns):
 
@@ -89,12 +90,13 @@ class StaticStudentTFactorReturnsModel(PyroModel):
     df_idio_beta: float = 0.2  # prior mean ~ 10
     df_shift: float = 2.0  # ensures df > 2 (finite variance)
 
-    def __call__(self, returns: torch.Tensor):
+    def __call__(self, batch: ModelBatch):
         """
         Pyro model definition.
 
         Args:
-            returns: tensor of shape [T, N], *already standardized* (z-scored)
+            batch: data batch containing y and/or X. Returns are inferred from y
+                and expected to be standardized (z-scored).
                 - T: number of time steps in the current window (e.g., ~60 days)
                 - N: number of assets
 
@@ -114,6 +116,7 @@ class StaticStudentTFactorReturnsModel(PyroModel):
             - mean_t:      [T, N]
             - returns:     [T, N]  (standardized)
         """
+        returns, y_obs = _resolve_returns(batch)
         T, N = returns.shape  # T: time, N: assets
         K = self.num_factors
         device = returns.device
@@ -200,8 +203,24 @@ class StaticStudentTFactorReturnsModel(PyroModel):
                 ).to_event(
                     1
                 ),  # event dim is asset dimension
-                obs=returns,
+                obs=y_obs,
             )
+
+
+def _resolve_returns(
+    batch: ModelBatch,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if batch.y is not None:
+        if batch.y.ndim != 2:
+            raise ConfigError("batch.y must have shape [T, A]")
+        return batch.y, batch.y
+    if batch.X is not None:
+        if batch.X.ndim != 3:
+            raise ConfigError("batch.X must have shape [T, A, F]")
+        T, A = int(batch.X.shape[0]), int(batch.X.shape[1])
+        zeros = torch.zeros((T, A), device=batch.X.device, dtype=batch.X.dtype)
+        return zeros, None
+    raise ConfigError("ModelBatch must provide X or y")
 
 
 # SIDE NOTES:

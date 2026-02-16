@@ -7,37 +7,18 @@ import pyro.distributions as dist
 import torch
 from torch.distributions import constraints
 
-from .protocols import PyroGuide, PyroModel
-
-
-@dataclass(frozen=True)
-class NormalModel(PyroModel):
-    def __call__(self, data: torch.Tensor) -> None:
-        feature_count = data.shape[1]
-        zeros = data.new_zeros(feature_count)
-        ones = data.new_ones(feature_count)
-        loc = pyro.sample(
-            "loc",
-            dist.Normal(zeros, ones).to_event(1),
-        )
-        scale = pyro.sample(
-            "scale",
-            dist.LogNormal(zeros, ones).to_event(1),
-        )
-        with pyro.plate("data", data.shape[0]):
-            pyro.sample(
-                "obs",
-                dist.Normal(loc, scale).to_event(1),
-                obs=data,
-            )
+from .batch_utils import resolve_batch_shape
+from .protocols import ModelBatch, PyroGuide
+from .registry import register_guide
 
 
 @dataclass(frozen=True)
 class NormalMeanFieldGuide(PyroGuide):
-    def __call__(self, data: torch.Tensor) -> None:
-        feature_count = data.shape[1]
-        zeros = data.new_zeros(feature_count)
-        ones = data.new_ones(feature_count)
+    def __call__(self, batch: ModelBatch) -> None:
+        shape = resolve_batch_shape(batch)
+        A, device, dtype = shape.A, shape.device, shape.dtype
+        zeros = torch.zeros(A, device=device, dtype=dtype)
+        ones = torch.ones(A, device=device, dtype=dtype)
         loc_loc = pyro.param(
             "loc_loc",
             zeros.clone(),
@@ -64,3 +45,8 @@ class NormalMeanFieldGuide(PyroGuide):
             "scale",
             dist.LogNormal(scale_loc, scale_scale).to_event(1),
         )
+
+
+@register_guide("normal_mean_field")
+def build_normal_mean_field_guide() -> PyroGuide:
+    return NormalMeanFieldGuide()

@@ -19,8 +19,8 @@ def test_feature_cleaning_drops_low_usable() -> None:
     )
     M = torch.tensor(
         [
-            [[True, False]],
-            [[True, True]],
+            [[False, True]],
+            [[False, False]],
         ]
     )
     spec = PreprocessSpec(
@@ -51,8 +51,8 @@ def test_transform_imputes_missing_and_scales() -> None:
     )
     M = torch.tensor(
         [
-            [[True, True]],
-            [[True, False]],
+            [[False, False]],
+            [[False, True]],
         ]
     )
     spec = PreprocessSpec(

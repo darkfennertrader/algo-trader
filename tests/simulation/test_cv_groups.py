@@ -21,7 +21,7 @@ def test_cpcv_purge_and_embargo() -> None:
         window=CVWindow(warmup_len=0, group_len=2),
         leakage=CVLeakage(horizon=1, embargo_len=1),
         cpcv=CPCVParams(q=1, max_inner_combos=None, seed=1),
-        include_warmup_in_inner_train=False,
+        exclude_warmup=False,
     )
     splits = make_cpcv_splits(
         warmup_idx=warmup_idx,

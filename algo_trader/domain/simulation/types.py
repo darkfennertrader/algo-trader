@@ -18,19 +18,9 @@ class DataPaths:
 
 
 @dataclass(frozen=True)
-class DataSelection:
-    start_date: str | None = None
-    end_date: str | None = None
-    frequency: str = "daily"
-    asset_subset: list[str] | None = None
-    feature_subset: list[str] | None = None
-
-
-@dataclass(frozen=True)
 class DataConfig:
     dataset_name: str
     paths: DataPaths = field(default_factory=DataPaths)
-    selection: DataSelection = field(default_factory=DataSelection)
     dataset_params: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -58,7 +48,7 @@ class CVParams:
     window: CVWindow
     leakage: CVLeakage
     cpcv: CPCVParams
-    include_warmup_in_inner_train: bool = True
+    exclude_warmup: bool = False
 
 
 @dataclass(frozen=True)

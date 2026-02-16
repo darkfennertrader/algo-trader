@@ -4,8 +4,6 @@ from typing import Any, Mapping, Protocol, Sequence
 
 import torch
 
-from .types import DataConfig
-
 class PanelDataset(Protocol):
     @property
     def data(self) -> torch.Tensor: ...
@@ -27,8 +25,6 @@ class PanelDataset(Protocol):
 
     @property
     def device(self) -> str: ...
-
-    def select_period_and_subsets(self, config: DataConfig) -> "PanelDataset": ...
 
 
 class ModelFitter(Protocol):

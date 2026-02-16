@@ -4,15 +4,12 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
-import numpy as np
-import pandas as pd
 import torch
 
 from algo_trader.domain import ConfigError, DataSourceError
-from algo_trader.domain.simulation import DataConfig, DataPaths
-from algo_trader.infrastructure.data.tensors import timestamps_to_epoch_hours
+from algo_trader.domain.simulation import DataPaths
 from .tensor_bundle_io import load_tensor_bundle, require_tensor
 
 logger = logging.getLogger(__name__)
@@ -84,59 +81,6 @@ class PanelTensorDataset:
                     "columns": str(self.data.shape[2]),
                 },
             )
-
-    def select_period_and_subsets(self, config: DataConfig) -> "PanelTensorDataset":
-        selection = config.selection
-        time_idx = _select_time_indices(
-            self.dates, selection.start_date, selection.end_date
-        )
-        asset_idx, assets = _select_labels(
-            self.assets, selection.asset_subset, label="asset"
-        )
-        feature_idx, features = _select_labels(
-            self.features, selection.feature_subset, label="feature"
-        )
-        data = self.data
-        targets = self.targets
-        missing_mask = self.missing_mask
-        dates = list(self.dates)
-        if time_idx is not None:
-            data = data.index_select(
-                dim=0, index=_to_index_tensor(time_idx, data.device)
-            )
-            targets = targets.index_select(
-                dim=0, index=_to_index_tensor(time_idx, targets.device)
-            )
-            missing_mask = missing_mask.index_select(
-                dim=0, index=_to_index_tensor(time_idx, missing_mask.device)
-            )
-            dates = [dates[idx] for idx in time_idx]
-        if asset_idx is not None:
-            data = data.index_select(
-                dim=1, index=_to_index_tensor(asset_idx, data.device)
-            )
-            targets = targets.index_select(
-                dim=1, index=_to_index_tensor(asset_idx, targets.device)
-            )
-            missing_mask = missing_mask.index_select(
-                dim=1, index=_to_index_tensor(asset_idx, missing_mask.device)
-            )
-        if feature_idx is not None:
-            data = data.index_select(
-                dim=2, index=_to_index_tensor(feature_idx, data.device)
-            )
-            missing_mask = missing_mask.index_select(
-                dim=2, index=_to_index_tensor(feature_idx, missing_mask.device)
-            )
-        return PanelTensorDataset(
-            data=data,
-            targets=targets,
-            missing_mask=missing_mask,
-            dates=dates,
-            assets=assets,
-            features=features,
-            device=self.device,
-        )
 
     def slice_by_indices(self, indices: Sequence[int]) -> dict[str, torch.Tensor]:
         return {
@@ -379,89 +323,3 @@ def _optional_path(value: str | None) -> Path | None:
     if value is None:
         return None
     return Path(value).expanduser()
-
-
-def _select_labels(
-    labels: Sequence[str], subset: Sequence[str] | None, *, label: str
-) -> tuple[np.ndarray | None, list[str]]:
-    if not subset:
-        return None, list(labels)
-    idx: list[int] = []
-    selected: list[str] = []
-    for name in subset:
-        if name not in labels:
-            raise ConfigError(f"Unknown {label} in subset: {name}")
-        pos = labels.index(name)
-        if pos not in idx:
-            idx.append(pos)
-            selected.append(name)
-    return np.array(idx, dtype=int), selected
-
-
-def _select_time_indices(
-    dates: Sequence[Any], start_date: str | None, end_date: str | None
-) -> np.ndarray | None:
-    if start_date is None and end_date is None:
-        return None
-    if not dates:
-        return np.array([], dtype=int)
-    mode = _infer_date_mode(dates)
-    start_val = _coerce_date_value(start_date, mode) if start_date else None
-    end_val = _coerce_date_value(end_date, mode) if end_date else None
-    mask = _build_time_mask(dates, mode, start_val, end_val)
-    return np.flatnonzero(mask)
-
-
-def _infer_date_mode(dates: Sequence[Any]) -> str:
-    first = dates[0]
-    if isinstance(first, (int, np.integer)):
-        return "epoch_hours"
-    return "timestamp"
-
-
-def _coerce_date_value(value: str | None, mode: str) -> int | pd.Timestamp:
-    if value is None:
-        raise ConfigError("start_date/end_date must be strings when provided")
-    ts = pd.Timestamp(value)
-    if ts.tz is None:
-        ts = ts.tz_localize("UTC")
-    else:
-        ts = ts.tz_convert("UTC")
-    if mode == "epoch_hours":
-        epoch = timestamps_to_epoch_hours(pd.DatetimeIndex([ts]))
-        return int(epoch[0])
-    return ts
-
-
-def _build_time_mask(
-    dates: Sequence[Any],
-    mode: str,
-    start_val: int | pd.Timestamp | None,
-    end_val: int | pd.Timestamp | None,
-) -> np.ndarray:
-    if mode == "epoch_hours":
-        values = np.array([int(item) for item in dates], dtype="int64")
-        return _mask_between(values, start_val, end_val)
-    parsed = pd.to_datetime(list(dates))
-    if parsed.tz is None:
-        parsed = parsed.tz_localize("UTC")
-    else:
-        parsed = parsed.tz_convert("UTC")
-    return _mask_between(parsed.to_numpy(), start_val, end_val)
-
-
-def _mask_between(
-    values: np.ndarray,
-    start_val: int | pd.Timestamp | None,
-    end_val: int | pd.Timestamp | None,
-) -> np.ndarray:
-    mask = np.ones(len(values), dtype=bool)
-    if start_val is not None:
-        mask &= values >= start_val
-    if end_val is not None:
-        mask &= values <= end_val
-    return mask
-
-
-def _to_index_tensor(indices: Iterable[int], device: torch.device) -> torch.Tensor:
-    return torch.as_tensor(list(indices), dtype=torch.long, device=device)

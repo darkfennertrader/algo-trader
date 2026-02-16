@@ -37,6 +37,8 @@ def make_outer_folds(
     warmup_idx: np.ndarray,
     groups: List[np.ndarray],
     outer_test_group_ids: Sequence[int],
+    *,
+    exclude_warmup: bool,
 ) -> List[OuterFold]:
     folds: List[OuterFold] = []
     for k in outer_test_group_ids:
@@ -44,10 +46,15 @@ def make_outer_folds(
             raise ValueError("outer_test_group_id out of range")
         test_idx = groups[k]
         prior_groups = groups[:k]
+        warmup_block: list[np.ndarray] = []
+        if not exclude_warmup and warmup_idx.size > 0:
+            warmup_block = [warmup_idx]
         if prior_groups:
-            train_idx = np.concatenate([warmup_idx] + prior_groups)
-        else:
+            train_idx = np.concatenate(warmup_block + prior_groups)
+        elif warmup_block:
             train_idx = warmup_idx.copy()
+        else:
+            train_idx = np.array([], dtype=int)
         folds.append(
             OuterFold(
                 k_test=k,
@@ -222,7 +229,7 @@ def make_cpcv_splits(
             embargo_len=params.leakage.embargo_len,
         )
 
-        if params.include_warmup_in_inner_train and warmup_idx.size > 0:
+        if (not params.exclude_warmup) and warmup_idx.size > 0:
             train_idx = np.concatenate([warmup_idx, train_idx])
 
         train_idx = np.unique(train_idx)

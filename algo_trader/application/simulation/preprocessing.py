@@ -110,6 +110,10 @@ def _validate_inputs(X: torch.Tensor, M: torch.Tensor) -> None:
         raise ValueError("M must be boolean")
 
 
+def _observed_mask(missing_mask: torch.Tensor) -> torch.Tensor:
+    return ~missing_mask
+
+
 def _apply_usability_filter(
     usable_ratio: torch.Tensor, min_usable_ratio: float
 ) -> Tuple[torch.Tensor, np.ndarray]:
@@ -216,7 +220,8 @@ def fit_feature_cleaning(
 ) -> FeatureCleaningState:
     _validate_inputs(X, M)
 
-    X2, M2 = _flatten_training_slice(X, M, train_idx)
+    observed = _observed_mask(M)
+    X2, M2 = _flatten_training_slice(X, observed, train_idx)
     usable_ratio, variance = _compute_basic_stats(X2, M2)
 
     if frozen_feature_idx is not None:
@@ -328,11 +333,15 @@ def fit_robust_scaler(
             mad_eps=spec.scaling.mad_eps,
         )
 
+    observed = _observed_mask(M)
     fidx = torch.as_tensor(fidx_np, dtype=torch.long, device=device)
     tidx = torch.as_tensor(train_idx, dtype=torch.long, device=device)
 
     Xtr = X.index_select(dim=0, index=tidx).reshape(-1, X.shape[-1])[:, fidx]
-    Mtr = M.index_select(dim=0, index=tidx).reshape(-1, X.shape[-1])[:, fidx]
+    Mtr = (
+        observed.index_select(dim=0, index=tidx)
+        .reshape(-1, X.shape[-1])[:, fidx]
+    )
 
     shift, scale = _compute_scale_params(
         Xtr=Xtr,
@@ -363,11 +372,15 @@ def transform_X(
         A = X.shape[1]
         return torch.zeros((n, A, 0), device=device, dtype=X.dtype)
 
+    observed = _observed_mask(M)
     fidx = torch.as_tensor(fidx_np, dtype=torch.long, device=device)
     iidx = torch.as_tensor(idx, dtype=torch.long, device=device)
 
     X_sel = X.index_select(dim=0, index=iidx).index_select(dim=2, index=fidx)
-    M_sel = M.index_select(dim=0, index=iidx).index_select(dim=2, index=fidx)
+    M_sel = (
+        observed.index_select(dim=0, index=iidx)
+        .index_select(dim=2, index=fidx)
+    )
 
     X_scaled = (X_sel - state.scaler.shift) / state.scaler.scale
     if state.spec.scaling.impute_missing_to_zero:

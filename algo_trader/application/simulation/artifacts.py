@@ -11,7 +11,11 @@ import numpy as np
 import torch
 
 from algo_trader.domain import SimulationError
-from algo_trader.domain.simulation import CPCVSplit, FeatureCleaningState
+from algo_trader.domain.simulation import (
+    CPCVSplit,
+    FeatureCleaningState,
+    PreprocessSpec,
+)
 from algo_trader.infrastructure import ensure_directory, require_env
 from algo_trader.infrastructure.data.versioning import (
     resolve_feature_store_version_label,
@@ -123,13 +127,34 @@ class SimulationArtifacts:
             message="Failed to write CV timestamp mapping CSV",
         )
     def write_cleaning_state(
-        self, *, outer_k: int, cleaning: FeatureCleaningState
+        self,
+        *,
+        outer_k: int,
+        cleaning: FeatureCleaningState,
+        feature_names: Sequence[str],
+        spec: PreprocessSpec,
     ) -> None:
         target_dir = self._preprocess_dir / f"outer_{outer_k}"
         _ensure_dir(target_dir, message="Failed to create preprocessing output")
         payload = asdict(cleaning)
         path = target_dir / "cleaning_state.pt"
         _save_torch(payload, path, message="Failed to write cleaning state")
+        summary = _build_cleaning_summary(
+            outer_k=outer_k,
+            cleaning=cleaning,
+            feature_names=feature_names,
+            spec=spec,
+        )
+        _write_json(
+            target_dir / "cleaning_summary.json",
+            _to_serializable(summary),
+            message="Failed to write cleaning summary",
+        )
+        _write_csv(
+            target_dir / "feature_cleaning_summary.csv",
+            _build_cleaning_summary_frame(cleaning, feature_names),
+            message="Failed to write cleaning summary CSV",
+        )
 
     def write_inner(
         self,
@@ -256,6 +281,128 @@ def _normalize_epoch_hours(values: Sequence[Any]) -> list[int]:
     stamps = pd.to_datetime(list(values), utc=True)
     epoch_hours = (stamps.view("int64") // 3_600_000_000_000).astype("int64")
     return epoch_hours.tolist()
+
+
+def _build_cleaning_summary(
+    *,
+    outer_k: int,
+    cleaning: FeatureCleaningState,
+    feature_names: Sequence[str],
+    spec: PreprocessSpec,
+) -> Mapping[str, Any]:
+    _validate_feature_names(cleaning, feature_names)
+    kept_features = _names_from_indices(cleaning.feature_idx, feature_names)
+    dropped_low_usable = _names_from_indices(
+        cleaning.dropped_low_usable, feature_names
+    )
+    dropped_low_var = _names_from_indices(
+        cleaning.dropped_low_var, feature_names
+    )
+    dropped_duplicates = _names_from_indices(
+        cleaning.dropped_duplicates, feature_names
+    )
+    duplicates = [
+        {
+            "kept_feature": feature_names[first],
+            "dropped_feature": feature_names[second],
+            "abs_corr": value,
+        }
+        for first, second, value in cleaning.duplicate_pairs
+        if first < len(feature_names) and second < len(feature_names)
+    ]
+    usable_stats = _summarize_array(cleaning.usable_ratio)
+    variance_stats = _summarize_array(cleaning.variance)
+    return {
+        "outer_k": outer_k,
+        "n_features_total": len(feature_names),
+        "n_features_kept": len(kept_features),
+        "n_dropped_low_usable": len(dropped_low_usable),
+        "n_dropped_low_variance": len(dropped_low_var),
+        "n_dropped_duplicate": len(dropped_duplicates),
+        "usable_ratio_stats": usable_stats,
+        "variance_stats": variance_stats,
+        "kept_features": kept_features,
+        "dropped_low_usable_features": dropped_low_usable,
+        "dropped_low_variance_features": dropped_low_var,
+        "dropped_duplicate_features": dropped_duplicates,
+        "duplicate_pairs": duplicates,
+        "thresholds": {
+            "min_usable_ratio": spec.cleaning.min_usable_ratio,
+            "min_variance": spec.cleaning.min_variance,
+            "max_abs_corr": spec.cleaning.max_abs_corr,
+            "corr_subsample": spec.cleaning.corr_subsample,
+        },
+    }
+
+
+def _summarize_array(values: np.ndarray) -> Mapping[str, float | None]:
+    if values.size == 0:
+        return {"min": None, "median": None, "max": None}
+    return {
+        "min": float(np.min(values)),
+        "median": float(np.median(values)),
+        "max": float(np.max(values)),
+    }
+
+
+def _names_from_indices(
+    indices: Sequence[int] | np.ndarray, feature_names: Sequence[str]
+) -> list[str]:
+    idx = np.asarray(indices, dtype=int)
+    return [feature_names[int(value)] for value in idx.tolist()]
+
+
+def _validate_feature_names(
+    cleaning: FeatureCleaningState, feature_names: Sequence[str]
+) -> None:
+    total = len(feature_names)
+    if cleaning.usable_ratio.shape[0] != total:
+        raise SimulationError(
+            "Feature name count does not match cleaning state",
+            context={
+                "feature_names": str(total),
+                "usable_ratio": str(cleaning.usable_ratio.shape[0]),
+            },
+        )
+    if cleaning.variance.shape[0] != total:
+        raise SimulationError(
+            "Feature name count does not match cleaning state",
+            context={
+                "feature_names": str(total),
+                "variance": str(cleaning.variance.shape[0]),
+            },
+        )
+
+
+def _build_cleaning_summary_frame(
+    cleaning: FeatureCleaningState, feature_names: Sequence[str]
+) -> pd.DataFrame:
+    _validate_feature_names(cleaning, feature_names)
+    usable_ratio = cleaning.usable_ratio.astype("float64", copy=False)
+    variance = cleaning.variance.astype("float64", copy=False)
+    return pd.DataFrame(
+        {
+            "feature": list(feature_names),
+            "usable_ratio": usable_ratio,
+            "variance": variance,
+            "dropped_reason": _build_drop_reasons(cleaning, len(feature_names)),
+        }
+    )
+
+
+def _build_drop_reasons(
+    cleaning: FeatureCleaningState, total_features: int
+) -> list[str]:
+    reasons = ["kept"] * total_features
+    for idx in cleaning.dropped_low_usable.tolist():
+        reasons[int(idx)] = "low_usable"
+    for idx in cleaning.dropped_low_var.tolist():
+        reasons[int(idx)] = "low_variance"
+    for idx in cleaning.dropped_duplicates.tolist():
+        reasons[int(idx)] = "duplicate"
+    for idx in cleaning.feature_idx.tolist():
+        reasons[int(idx)] = "kept"
+    return reasons
 
 
 def _format_timestamp_strings(values: Sequence[Any]) -> list[str]:

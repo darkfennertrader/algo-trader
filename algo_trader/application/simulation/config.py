@@ -17,7 +17,6 @@ from algo_trader.domain.simulation import (
     CVWindow,
     DataConfig,
     DataPaths,
-    DataSelection,
     EvaluationSpec,
     ModelConfig,
     ModelingSpec,
@@ -213,9 +212,7 @@ def _build_cv_params(
             ),
             seed=int(section.get("seed", 0)),
         )
-        include_warmup = bool(
-            section.get("include_warmup_in_inner_train", True)
-        )
+        exclude_warmup = bool(section.get("exclude_warmup", False))
     except (TypeError, ValueError) as exc:
         raise ConfigError(
             f"Invalid cv configuration in {config_path}",
@@ -225,7 +222,7 @@ def _build_cv_params(
         window=window,
         leakage=leakage,
         cpcv=cpcv,
-        include_warmup_in_inner_train=include_warmup,
+        exclude_warmup=exclude_warmup,
     )
 
 
@@ -273,11 +270,10 @@ def _build_data_config(
         paths = {}
     if not isinstance(paths, Mapping):
         raise ConfigError(f"data.paths must be a mapping in {config_path}")
-    selection = section.get("selection", {})
-    if selection is None:
-        selection = {}
-    if not isinstance(selection, Mapping):
-        raise ConfigError(f"data.selection must be a mapping in {config_path}")
+    if "selection" in section:
+        raise ConfigError(
+            f"data.selection is no longer supported in {config_path}"
+        )
     dataset_params = section.get("dataset_params", {})
     if dataset_params is None:
         dataset_params = {}
@@ -292,7 +288,6 @@ def _build_data_config(
         return DataConfig(
             dataset_name=str(dataset_name),
             paths=DataPaths(**paths),
-            selection=DataSelection(**selection),
             dataset_params=dataset_params,
         )
     except TypeError as exc:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -58,6 +58,7 @@ class SimulationContext:
     y: torch.Tensor
     preprocess_spec: PreprocessSpec
     cv: CVStructure
+    feature_names: Sequence[str]
 
 
 def _run_context(config_path: Path | None) -> Mapping[str, str]:
@@ -67,6 +68,7 @@ def _run_context(config_path: Path | None) -> Mapping[str, str]:
 @log_boundary("simulation.run", context=_run_context)
 def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
     config = load_config(config_path)
+    config = _resolve_dataset_config(config)
     device = _resolve_device(config.flags.use_gpu)
     hooks = (
         stub_hooks()
@@ -152,10 +154,22 @@ def _resolve_preprocess_spec(
 
 def _load_dataset(config: SimulationConfig, device: str) -> PanelDataset:
     registries = default_registries()
-    dataset = registries.datasets.build(
+    return registries.datasets.build(
         config.data.dataset_name, config=config.data, device=device
     )
-    return dataset.select_period_and_subsets(config.data)
+
+
+def _resolve_dataset_config(config: SimulationConfig) -> SimulationConfig:
+    tensor_path = config.data.paths.tensor_path
+    if tensor_path is not None:
+        if config.data.dataset_name == "tensor_bundle":
+            return config
+        data = replace(config.data, dataset_name="tensor_bundle")
+        return replace(config, data=data)
+    if config.data.dataset_name == "feature_store_panel":
+        return config
+    data = replace(config.data, dataset_name="feature_store_panel")
+    return replace(config, data=data)
 
 
 def _build_context(
@@ -176,7 +190,10 @@ def _build_context(
         config.outer.test_group_ids, config.outer.last_n, len(groups)
     )
     outer_folds = make_outer_folds(
-        warmup_idx=warmup_idx, groups=groups, outer_test_group_ids=outer_ids
+        warmup_idx=warmup_idx,
+        groups=groups,
+        outer_test_group_ids=outer_ids,
+        exclude_warmup=config.cv.exclude_warmup,
     )
     return SimulationContext(
         X=X,
@@ -189,6 +206,7 @@ def _build_context(
             outer_ids=outer_ids,
             outer_folds=outer_folds,
         ),
+        feature_names=list(dataset.features),
     )
 
 
@@ -284,7 +302,10 @@ def _evaluate_outer_folds(
         )
         if cleaning_outer is not None:
             artifacts.write_cleaning_state(
-                outer_k=outer_fold.k_test, cleaning=cleaning_outer
+                outer_k=outer_fold.k_test,
+                cleaning=cleaning_outer,
+                feature_names=outer_context.context.feature_names,
+                spec=context.preprocess_spec,
             )
         artifacts.write_outer_result(
             outer_k=outer_fold.k_test,

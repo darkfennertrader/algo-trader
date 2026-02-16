@@ -8,11 +8,11 @@ import torch
 
 from .batch_utils import resolve_batch_shape
 from .protocols import ModelBatch, PyroModel
-from .registry import register_model
+from .registry_core import register_model
 
 
 @dataclass(frozen=True)
-class NormalModel(PyroModel):
+class TestModel(PyroModel):
     def __call__(self, batch: ModelBatch) -> None:
         shape = resolve_batch_shape(batch)
         T, A, device, dtype, y_obs = (
@@ -40,6 +40,6 @@ class NormalModel(PyroModel):
             )
 
 
-@register_model("normal")
-def build_normal_model() -> PyroModel:
-    return NormalModel()
+@register_model("test_model")
+def build_test_model() -> PyroModel:
+    return TestModel()

@@ -9,11 +9,11 @@ from torch.distributions import constraints
 
 from .batch_utils import resolve_batch_shape
 from .protocols import ModelBatch, PyroGuide
-from .registry import register_guide
+from .registry_core import register_guide
 
 
 @dataclass(frozen=True)
-class NormalMeanFieldGuide(PyroGuide):
+class TestGuide(PyroGuide):
     def __call__(self, batch: ModelBatch) -> None:
         shape = resolve_batch_shape(batch)
         A, device, dtype = shape.A, shape.device, shape.dtype
@@ -47,6 +47,6 @@ class NormalMeanFieldGuide(PyroGuide):
         )
 
 
-@register_guide("normal_mean_field")
-def build_normal_mean_field_guide() -> PyroGuide:
-    return NormalMeanFieldGuide()
+@register_guide("test_guide")
+def build_test_guide() -> PyroGuide:
+    return TestGuide()

@@ -42,8 +42,8 @@ def test_run_writes_params_csv(
     monkeypatch.setenv("TORCH_DEVICE", "cpu")
 
     output_path = modeling.run(
-        model_name="normal",
-        guide_name="normal_mean_field",
+        model_name="test_model",
+        guide_name="test_guide",
         options=modeling.InferenceOptions(
             steps=1,
             learning_rate=Decimal("0.01"),
@@ -58,8 +58,8 @@ def test_run_writes_params_csv(
     assert (
         output_path
         == model_store
-        / "normal"
-        / "normal_mean_field"
+        / "test_model"
+        / "test_guide"
         / "debug"
         / "2024-05"
         / "params.csv"
@@ -71,5 +71,5 @@ def test_run_writes_params_csv(
     metadata_path = output_path.parent / "metadata.json"
     assert metadata_path.exists()
     metadata = json.loads(metadata_path.read_text())
-    assert metadata["model"] == "normal"
-    assert metadata["guide"] == "normal_mean_field"
+    assert metadata["model"] == "test_model"
+    assert metadata["guide"] == "test_guide"

@@ -21,6 +21,7 @@ from algo_trader.infrastructure.data.versioning import (
     resolve_feature_store_version_label,
     resolve_root_dir,
 )
+from .summary_utils import build_cleaning_thresholds
 
 
 
@@ -156,6 +157,17 @@ class SimulationArtifacts:
             message="Failed to write cleaning summary CSV",
         )
 
+    def write_inner_cleaning_summary(
+        self, *, outer_k: int, summary: Mapping[str, Any]
+    ) -> None:
+        target_dir = self._preprocess_dir / f"outer_{outer_k}"
+        _ensure_dir(target_dir, message="Failed to create preprocessing output")
+        _write_json(
+            target_dir / "inner_cleaning_summary.json",
+            _to_serializable(summary),
+            message="Failed to write inner cleaning summary",
+        )
+
     def write_inner(
         self,
         *,
@@ -215,6 +227,17 @@ class SimulationArtifacts:
             self._cv_dir / "summary.json",
             payload,
             message="Failed to write simulation summary",
+        )
+
+    def write_candidates(
+        self, *, candidates: Sequence[Mapping[str, Any]]
+    ) -> None:
+        _ensure_dir(self._cv_dir, message="Failed to create CV output")
+        payload = _to_serializable(list(candidates))
+        _write_json(
+            self._cv_dir / "candidates.json",
+            payload,
+            message="Failed to write candidate configs",
         )
 
 
@@ -326,12 +349,7 @@ def _build_cleaning_summary(
         "dropped_low_variance_features": dropped_low_var,
         "dropped_duplicate_features": dropped_duplicates,
         "duplicate_pairs": duplicates,
-        "thresholds": {
-            "min_usable_ratio": spec.cleaning.min_usable_ratio,
-            "min_variance": spec.cleaning.min_variance,
-            "max_abs_corr": spec.cleaning.max_abs_corr,
-            "corr_subsample": spec.cleaning.corr_subsample,
-        },
+        "thresholds": build_cleaning_thresholds(spec),
     }
 
 

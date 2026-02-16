@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 
 from algo_trader.domain.simulation import (
+    CPCVSplit,
     FeatureCleaningState,
     PreprocessSpec,
     RobustScalerState,
 )
+from .summary_utils import build_cleaning_thresholds
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,159 @@ def _validate_inputs(X: torch.Tensor, M: torch.Tensor) -> None:
 
 def _observed_mask(missing_mask: torch.Tensor) -> torch.Tensor:
     return ~missing_mask
+
+
+@dataclass(frozen=True)
+class InnerCleaningSummaryContext:
+    X: torch.Tensor
+    M: torch.Tensor
+    inner_splits: Sequence[CPCVSplit]
+    spec: PreprocessSpec
+    feature_names: Sequence[str]
+    outer_k: int
+
+
+def summarize_inner_cleaning(
+    context: InnerCleaningSummaryContext,
+) -> dict[str, Any]:
+    cleanings = [
+        fit_feature_cleaning(
+            X=context.X,
+            M=context.M,
+            train_idx=split.train_idx,
+            spec=context.spec,
+            frozen_feature_idx=None,
+        )
+        for split in context.inner_splits
+    ]
+    return _build_inner_cleaning_summary(
+        cleanings=cleanings,
+        feature_names=context.feature_names,
+        spec=context.spec,
+        outer_k=context.outer_k,
+    )
+
+
+def _build_inner_cleaning_summary(
+    *,
+    cleanings: Sequence[FeatureCleaningState],
+    feature_names: Sequence[str],
+    spec: PreprocessSpec,
+    outer_k: int,
+) -> dict[str, Any]:
+    total_features = len(feature_names)
+    usable_matrix = _stack_feature_stats(cleanings, "usable_ratio", total_features)
+    variance_matrix = _stack_feature_stats(cleanings, "variance", total_features)
+    drop_counts = _aggregate_drop_counts(cleanings, total_features)
+    kept_counts = _aggregate_kept_counts(cleanings, total_features)
+    features = _build_feature_summaries(
+        feature_names=feature_names,
+        usable_matrix=usable_matrix,
+        variance_matrix=variance_matrix,
+        drop_counts=drop_counts,
+        kept_counts=kept_counts,
+    )
+    split_stats = _summarize_split_counts(cleanings)
+    return {
+        "outer_k": outer_k,
+        "split_count": len(cleanings),
+        "n_features_total": total_features,
+        "split_stats": split_stats,
+        "thresholds": build_cleaning_thresholds(spec),
+        "features": features,
+    }
+
+
+def _stack_feature_stats(
+    cleanings: Sequence[FeatureCleaningState],
+    field: str,
+    total_features: int,
+) -> np.ndarray:
+    if not cleanings:
+        return np.empty((0, total_features), dtype=float)
+    rows = [np.asarray(getattr(cleaning, field), dtype=float) for cleaning in cleanings]
+    return np.vstack(rows)
+
+
+def _aggregate_drop_counts(
+    cleanings: Sequence[FeatureCleaningState], total_features: int
+) -> dict[str, np.ndarray]:
+    low_usable = np.zeros(total_features, dtype=int)
+    low_var = np.zeros(total_features, dtype=int)
+    duplicates = np.zeros(total_features, dtype=int)
+    for cleaning in cleanings:
+        _increment_counts(low_usable, cleaning.dropped_low_usable)
+        _increment_counts(low_var, cleaning.dropped_low_var)
+        _increment_counts(duplicates, cleaning.dropped_duplicates)
+    return {
+        "low_usable": low_usable,
+        "low_variance": low_var,
+        "duplicate": duplicates,
+    }
+
+
+def _aggregate_kept_counts(
+    cleanings: Sequence[FeatureCleaningState], total_features: int
+) -> np.ndarray:
+    kept = np.zeros(total_features, dtype=int)
+    for cleaning in cleanings:
+        _increment_counts(kept, cleaning.feature_idx)
+    return kept
+
+
+def _increment_counts(counts: np.ndarray, indices: np.ndarray) -> None:
+    if indices.size == 0:
+        return
+    counts[np.asarray(indices, dtype=int)] += 1
+
+
+def _build_feature_summaries(
+    *,
+    feature_names: Sequence[str],
+    usable_matrix: np.ndarray,
+    variance_matrix: np.ndarray,
+    drop_counts: dict[str, np.ndarray],
+    kept_counts: np.ndarray,
+) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for idx, name in enumerate(feature_names):
+        summaries.append(
+            {
+                "name": name,
+                "usable_ratio": _summarize_vector(usable_matrix[:, idx]),
+                "variance": _summarize_vector(variance_matrix[:, idx]),
+                "kept_count": int(kept_counts[idx]),
+                "dropped_low_usable_count": int(drop_counts["low_usable"][idx]),
+                "dropped_low_variance_count": int(drop_counts["low_variance"][idx]),
+                "dropped_duplicate_count": int(drop_counts["duplicate"][idx]),
+            }
+        )
+    return summaries
+
+
+def _summarize_vector(values: np.ndarray) -> dict[str, float | None]:
+    if values.size == 0 or np.all(np.isnan(values)):
+        return {"min": None, "median": None, "max": None, "mean": None}
+    return {
+        "min": float(np.nanmin(values)),
+        "median": float(np.nanmedian(values)),
+        "max": float(np.nanmax(values)),
+        "mean": float(np.nanmean(values)),
+    }
+
+
+def _summarize_split_counts(
+    cleanings: Sequence[FeatureCleaningState],
+) -> dict[str, float | None]:
+    if not cleanings:
+        return {"min_kept": None, "median_kept": None, "max_kept": None, "mean_kept": None}
+    kept_counts = np.asarray([cleaning.feature_idx.size for cleaning in cleanings])
+    return {
+        "min_kept": float(np.min(kept_counts)),
+        "median_kept": float(np.median(kept_counts)),
+        "max_kept": float(np.max(kept_counts)),
+        "mean_kept": float(np.mean(kept_counts)),
+    }
 
 
 def _apply_usability_filter(

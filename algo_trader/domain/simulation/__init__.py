@@ -32,7 +32,11 @@ from .types import (
     SimulationConfig,
     SimulationFlags,
     TrainingConfig,
+    TuningAggregateConfig,
     TuningConfig,
+    TuningRayConfig,
+    TuningResourcesConfig,
+    TuningSamplingConfig,
 )
 
 __all__ = [
@@ -66,6 +70,10 @@ __all__ = [
     "SimulationConfig",
     "SimulationFlags",
     "TrainingConfig",
+    "TuningAggregateConfig",
     "TuningConfig",
+    "TuningRayConfig",
+    "TuningResourcesConfig",
+    "TuningSamplingConfig",
     "PnLCalculator",
 ]

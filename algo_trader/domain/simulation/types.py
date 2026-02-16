@@ -127,6 +127,34 @@ class TrainingConfig:
     learning_rate: float = 1e-3
     batch_size: int | None = None
     num_elbo_particles: int = 1
+    log_every: int | None = 100
+
+
+@dataclass(frozen=True)
+class TuningSamplingConfig:
+    method: Literal["grid", "random", "sobol", "lhs"] = "grid"
+    seed: int = 0
+    pre_sampled_path: str | None = None
+
+
+@dataclass(frozen=True)
+class TuningAggregateConfig:
+    method: Literal["mean", "median", "mean_minus_std"] = "mean"
+    penalty: float = 0.5
+
+
+@dataclass(frozen=True)
+class TuningResourcesConfig:
+    cpu: float | None = None
+    gpu: float | None = None
+
+
+@dataclass(frozen=True)
+class TuningRayConfig:
+    address: str | None = None
+    resources: TuningResourcesConfig = field(
+        default_factory=TuningResourcesConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -134,6 +162,14 @@ class TuningConfig:
     param_space: Mapping[str, Any] = field(default_factory=dict)
     num_samples: int = 1
     kwargs: Mapping[str, Any] = field(default_factory=dict)
+    engine: Literal["local", "ray"] = "local"
+    sampling: TuningSamplingConfig = field(
+        default_factory=TuningSamplingConfig
+    )
+    aggregate: TuningAggregateConfig = field(
+        default_factory=TuningAggregateConfig
+    )
+    ray: TuningRayConfig = field(default_factory=TuningRayConfig)
 
 
 @dataclass(frozen=True)

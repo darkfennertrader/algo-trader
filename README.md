@@ -10,6 +10,7 @@ Quickstart:
 ## Documentation
 - Start here: `docs/README.md`.
 - Coding rules and workflow: `AGENTS.md`.
+- Third-party type stubs live under `typings/` (used by Pyright).
 
 Note: Simulation models and guides implement `PyroModel`/`PyroGuide` using the
 `ModelBatch` dataclass (features/targets/mask). See `docs/workflows.md` for
@@ -21,5 +22,5 @@ LLM reading order:
 - `docs/configuration.md` - config and env setup
 - `docs/workflows.md` - common tasks and CLI
 - `docs/feature_engineering.md` - feature groups and definitions
-- `docs/nestedcv.md` - nested CV details
-- `docs/nestedcv_sequence.md` - nested CV sequence flow
+- `docs/simulation/nestedcv.md` - nested CV details
+- `docs/simulation/nestedcv_sequence.md` - nested CV sequence flow

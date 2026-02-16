@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
@@ -28,7 +28,11 @@ from algo_trader.domain.simulation import (
     SimulationConfig,
     SimulationFlags,
     TrainingConfig,
+    TuningAggregateConfig,
     TuningConfig,
+    TuningRayConfig,
+    TuningResourcesConfig,
+    TuningSamplingConfig,
 )
 
 DEFAULT_CONFIG_PATH = (
@@ -83,6 +87,9 @@ def _build_flags(raw: Mapping[str, Any]) -> SimulationFlags:
 
 SimulationMode = Literal["dry_run", "stub", "full"]
 StopAfter = Literal["inputs", "cv", "inner", "outer", "results"] | None
+TuningEngine = Literal["local", "ray"]
+SamplingMethod = Literal["grid", "random", "sobol", "lhs"]
+AggregateMethod = Literal["mean", "median", "mean_minus_std"]
 
 
 def _normalize_simulation_mode(value: object) -> SimulationMode:
@@ -151,8 +158,206 @@ def _build_modeling_spec(
 ) -> ModelingSpec:
     model = _build_section(raw, "model", ModelConfig, config_path)
     training = _build_section(raw, "training", TrainingConfig, config_path)
-    tuning = _build_section(raw, "tuning", TuningConfig, config_path)
+    tuning = _build_tuning_config(raw, config_path)
     return ModelingSpec(model=model, training=training, tuning=tuning)
+
+
+def _build_tuning_config(
+    raw: Mapping[str, Any], config_path: Path
+) -> TuningConfig:
+    section = raw.get("tuning")
+    if not isinstance(section, Mapping):
+        raise ConfigError(f"tuning must be a mapping in {config_path}")
+    try:
+        sampling = _build_tuning_sampling_config(
+            section.get("sampling", {}), config_path
+        )
+        aggregate = _build_tuning_aggregate_config(
+            section.get("aggregate", {}), config_path
+        )
+        resources = _build_tuning_resources_config(
+            section.get("resources", {}), config_path
+        )
+        ray = _build_tuning_ray_config(
+            section.get("ray", {}), resources, config_path
+        )
+        tuning = TuningConfig(
+            param_space=section.get("param_space", {}),
+            num_samples=int(section.get("num_samples", 1)),
+            kwargs=section.get("kwargs", {}),
+            engine=section.get("engine", "local"),
+            sampling=sampling,
+            aggregate=aggregate,
+            ray=ray,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"Invalid tuning configuration in {config_path}",
+            context={"section": "tuning"},
+        ) from exc
+    return _normalize_tuning_config(tuning, config_path)
+
+
+def _normalize_tuning_config(
+    tuning: TuningConfig, config_path: Path
+) -> TuningConfig:
+    if tuning.num_samples <= 0:
+        raise ConfigError(
+            f"tuning.num_samples must be positive in {config_path}"
+        )
+    return replace(
+        tuning,
+        engine=_normalize_tuning_engine(tuning.engine),
+        sampling=replace(
+            tuning.sampling,
+            method=_normalize_sampling_method(tuning.sampling.method),
+        ),
+        aggregate=_normalize_aggregate_config(
+            tuning.aggregate, config_path
+        ),
+        ray=_normalize_tuning_ray_config(tuning.ray, config_path),
+    )
+
+
+def _build_tuning_sampling_config(
+    raw: Mapping[str, Any], config_path: Path
+) -> TuningSamplingConfig:
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"tuning.sampling must be a mapping in {config_path}")
+    return TuningSamplingConfig(
+        method=raw.get("method", "grid"),
+        seed=int(raw.get("seed", 0)),
+        pre_sampled_path=raw.get("pre_sampled_path"),
+    )
+
+
+def _build_tuning_aggregate_config(
+    raw: Mapping[str, Any], config_path: Path
+) -> TuningAggregateConfig:
+    if not isinstance(raw, Mapping):
+        raise ConfigError(
+            f"tuning.aggregate must be a mapping in {config_path}"
+        )
+    return TuningAggregateConfig(
+        method=raw.get("method", "mean"),
+        penalty=float(raw.get("penalty", 0.5)),
+    )
+
+
+def _normalize_aggregate_config(
+    aggregate: TuningAggregateConfig, config_path: Path
+) -> TuningAggregateConfig:
+    if aggregate.penalty < 0:
+        raise ConfigError(
+            f"tuning.aggregate.penalty must be >= 0 in {config_path}"
+        )
+    return replace(
+        aggregate,
+        method=_normalize_aggregate_method(aggregate.method),
+    )
+
+
+def _build_tuning_resources_config(
+    raw: Mapping[str, Any], config_path: Path
+) -> TuningResourcesConfig:
+    if not isinstance(raw, Mapping):
+        raise ConfigError(
+            f"tuning.resources must be a mapping in {config_path}"
+        )
+    cpu = raw.get("cpu")
+    gpu = raw.get("gpu")
+    return TuningResourcesConfig(
+        cpu=float(cpu) if cpu is not None else None,
+        gpu=float(gpu) if gpu is not None else None,
+    )
+
+
+def _normalize_tuning_resources_config(
+    resources: TuningResourcesConfig, config_path: Path
+) -> TuningResourcesConfig:
+    if resources.cpu is not None and resources.cpu <= 0:
+        raise ConfigError(
+            f"tuning.resources.cpu must be > 0 in {config_path}"
+        )
+    if resources.gpu is not None and resources.gpu < 0:
+        raise ConfigError(
+            f"tuning.resources.gpu must be >= 0 in {config_path}"
+        )
+    return resources
+
+
+def _build_tuning_ray_config(
+    raw: Mapping[str, Any],
+    resources: TuningResourcesConfig,
+    config_path: Path,
+) -> TuningRayConfig:
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"tuning.ray must be a mapping in {config_path}")
+    raw_resources = raw.get("resources")
+    if raw_resources is not None:
+        if not isinstance(raw_resources, Mapping):
+            raise ConfigError(
+                f"tuning.ray.resources must be a mapping in {config_path}"
+            )
+        resources = _build_tuning_resources_config(
+            raw_resources, config_path
+        )
+    address = raw.get("address")
+    if address is not None:
+        address = str(address).strip()
+    return TuningRayConfig(address=address or None, resources=resources)
+
+
+def _normalize_tuning_ray_config(
+    ray: TuningRayConfig,
+    config_path: Path,
+) -> TuningRayConfig:
+    resources = _normalize_tuning_resources_config(
+        ray.resources, config_path
+    )
+    if ray.address is None:
+        return replace(ray, resources=resources)
+    normalized = ray.address.strip()
+    if not normalized:
+        return TuningRayConfig(address=None, resources=resources)
+    return TuningRayConfig(address=normalized, resources=resources)
+
+
+def _normalize_tuning_engine(value: object) -> TuningEngine:
+    raw = str(value).strip().lower()
+    if raw == "local":
+        return "local"
+    if raw == "ray":
+        return "ray"
+    raise ConfigError("tuning.engine must be local or ray")
+
+
+def _normalize_sampling_method(value: object) -> SamplingMethod:
+    raw = str(value).strip().lower()
+    if raw == "grid":
+        return "grid"
+    if raw == "random":
+        return "random"
+    if raw == "sobol":
+        return "sobol"
+    if raw == "lhs":
+        return "lhs"
+    raise ConfigError(
+        "tuning.sampling_method must be grid, random, sobol, or lhs"
+    )
+
+
+def _normalize_aggregate_method(value: object) -> AggregateMethod:
+    raw = str(value).strip().lower()
+    if raw == "mean":
+        return "mean"
+    if raw == "median":
+        return "median"
+    if raw in {"mean_minus_std", "mean-std", "mean_std"}:
+        return "mean_minus_std"
+    raise ConfigError(
+        "tuning.aggregate must be mean, median, or mean_minus_std"
+    )
 
 
 def _build_evaluation_spec(

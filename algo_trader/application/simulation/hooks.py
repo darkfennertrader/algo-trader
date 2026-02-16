@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import time
 from typing import Any, Mapping
 
 import pyro
@@ -18,6 +20,7 @@ from algo_trader.domain.simulation import (
 from algo_trader.pipeline.stages import modeling
 from .metrics import build_metric_scorer
 
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class SimulationHooks:
@@ -53,6 +56,7 @@ class _TrainingParams:
     steps: int
     learning_rate: float
     num_elbo_particles: int
+    log_every: int | None
 
 
 _MODEL_REGISTRY = modeling.default_model_registry()
@@ -74,17 +78,13 @@ def _fit_pyro_svi(
     if batch.y is None or batch.y.numel() == 0:
         raise SimulationError("No valid targets for training")
     pyro.clear_param_store()
-    optimizer = pyro.optim.Adam(  # type: ignore  # pylint: disable=no-member
-        {"lr": params.learning_rate}
+    svi = _build_svi(model=model, guide=guide, params=params)
+    _run_svi_steps(
+        svi=svi,
+        batch=batch,
+        params=params,
+        context=_run_context(config),
     )
-    loss = pyro.infer.Trace_ELBO(  # type: ignore  # pylint: disable=no-member
-        num_particles=params.num_elbo_particles
-    )
-    svi = pyro.infer.SVI(  # type: ignore  # pylint: disable=no-member
-        model, guide, optimizer, loss=loss
-    )
-    for _step in range(params.steps):
-        svi.step(batch)
     return {"model_name": model_name, "guide_name": guide_name}
 
 
@@ -135,11 +135,78 @@ def _training_params(config: Mapping[str, Any]) -> _TrainingParams:
     training = config.get("training")
     if not isinstance(training, Mapping):
         raise ConfigError("training config missing for simulation hooks")
+    raw_log_every = training.get("log_every", None)
+    log_every: int | None
+    if raw_log_every is None:
+        log_every = None
+    else:
+        log_every = int(raw_log_every)
+        if log_every <= 0:
+            raise ConfigError("training.log_every must be >= 1 or null")
     return _TrainingParams(
         steps=int(training.get("num_steps", 0)),
         learning_rate=float(training.get("learning_rate", 1e-3)),
         num_elbo_particles=int(training.get("num_elbo_particles", 1)),
+        log_every=log_every,
     )
+
+
+def _run_context(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    context = config.get("run_context")
+    if not isinstance(context, Mapping):
+        return {}
+    return dict(context)
+
+
+def _log_svi_progress(
+    *, step: int, loss: float, context: Mapping[str, Any], start: float
+) -> None:
+    elapsed = time.perf_counter() - start
+    payload = dict(context)
+    payload.update(
+        {
+            "step": step,
+            "loss": loss,
+            "elapsed_s": round(elapsed, 4),
+        }
+    )
+    logger.info("event=progress boundary=simulation.svi context=%s", payload)
+
+
+def _build_svi(
+    *,
+    model: modeling.PyroModel,
+    guide: modeling.PyroGuide,
+    params: _TrainingParams,
+) -> pyro.infer.SVI:  # type: ignore[name-defined]
+    optimizer = pyro.optim.Adam(  # type: ignore  # pylint: disable=no-member
+        {"lr": params.learning_rate}
+    )
+    loss = pyro.infer.Trace_ELBO(  # type: ignore  # pylint: disable=no-member
+        num_particles=params.num_elbo_particles
+    )
+    return pyro.infer.SVI(  # type: ignore  # pylint: disable=no-member
+        model, guide, optimizer, loss=loss
+    )
+
+
+def _run_svi_steps(
+    *,
+    svi: pyro.infer.SVI,  # type: ignore[name-defined]
+    batch: modeling.ModelBatch,
+    params: _TrainingParams,
+    context: Mapping[str, Any],
+) -> None:
+    start = time.perf_counter()
+    for step in range(params.steps):
+        loss = float(svi.step(batch))
+        if params.log_every and (step + 1) % params.log_every == 0:
+            _log_svi_progress(
+                step=step + 1,
+                loss=loss,
+                context=context,
+                start=start,
+            )
 
 
 def _build_training_batch(

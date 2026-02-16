@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -10,7 +11,9 @@ import torch
 
 from algo_trader.domain import ConfigError, SimulationError
 from algo_trader.domain.simulation import (
+    CPCVSplit,
     CVParams,
+    FeatureCleaningState,
     ModelConfig,
     OuterFold,
     PanelDataset,
@@ -25,7 +28,12 @@ from algo_trader.infrastructure import log_boundary
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .cv_groups import build_equal_groups, make_cpcv_splits, make_outer_folds
 from .hooks import SimulationHooks, default_hooks, stub_hooks
-from .inner_objective import InnerObjectiveContext, make_inner_objective
+from .inner_objective import (
+    InnerObjectiveContext,
+    InnerObjectiveData,
+    InnerObjectiveParams,
+    make_inner_objective,
+)
 from .outer_walk_forward import (
     OuterEvaluationContext,
     PortfolioSpec,
@@ -37,8 +45,10 @@ from .artifacts import (
     SimulationInputs,
     resolve_simulation_output_dir,
 )
+from .preprocessing import InnerCleaningSummaryContext, summarize_inner_cleaning
 from .registry import default_registries
-from .tuning import expand_param_space, select_candidates
+from .tuning import apply_param_updates, resolve_candidates
+from .tune_runner import RayTuneContext, select_best_with_ray
 
 logger = logging.getLogger(__name__)
 
@@ -111,11 +121,15 @@ def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
         artifacts.write_cv_summary(results)
         return results
 
+    candidates = resolve_candidates(tuning=config.modeling.tuning)
+    artifacts.write_candidates(candidates=candidates)
+
     chosen_configs, outer_results = _evaluate_outer_folds(
         outer_context=OuterFoldContext(
             config=config,
             context=context,
             base_config=base_config,
+            candidates=candidates,
             hooks=hooks,
             artifacts=artifacts,
             flags=config.flags,
@@ -226,6 +240,7 @@ class OuterFoldContext:
     config: SimulationConfig
     context: SimulationContext
     base_config: Mapping[str, Any]
+    candidates: Sequence[Mapping[str, Any]]
     hooks: SimulationHooks
     artifacts: SimulationArtifacts
     flags: SimulationFlags
@@ -237,83 +252,220 @@ def _evaluate_outer_folds(
     chosen_configs: dict[int, Mapping[str, Any]] = {}
     outer_results: list[Mapping[str, Any]] = []
 
-    config = outer_context.config
-    context = outer_context.context
-    hooks = outer_context.hooks
-    artifacts = outer_context.artifacts
-    flags = outer_context.flags
-
-    for outer_fold in context.cv.outer_folds:
-        inner_splits = make_cpcv_splits(
-            warmup_idx=context.cv.warmup_idx,
-            groups=context.cv.groups,
-            inner_group_ids=outer_fold.inner_group_ids,
-            params=_with_fold_seed(config.cv, outer_fold.k_test),
+    for outer_fold in outer_context.context.cv.outer_folds:
+        fold_result = _run_outer_fold(
+            outer_context=outer_context,
+            outer_fold=outer_fold,
         )
-        if not inner_splits:
-            raise SimulationError(
-                "No inner CPCV splits available; check cv settings",
-                context={"outer_group": str(outer_fold.k_test)},
-            )
-
-        objective = make_inner_objective(
-            context=InnerObjectiveContext(
-                X=context.X,
-                M=context.M,
-                y=context.y,
-                inner_splits=inner_splits,
-                preprocess_spec=context.preprocess_spec,
-                score_spec=config.evaluation.scoring.spec,
-                num_pp_samples=config.evaluation.predictive.num_samples_inner,
-            ),
-            hooks=hooks,
-        )
-
-        best_config = _select_best_config(
-            objective=objective,
-            base_config=outer_context.base_config,
-            tuning=config.modeling.tuning,
-            seed=_fold_seed(config.cv.cpcv.seed, outer_fold.k_test),
-        )
-        chosen_configs[outer_fold.k_test] = best_config
-        artifacts.write_inner(
-            outer_k=outer_fold.k_test,
-            inner_splits=inner_splits,
-            best_config=best_config,
-        )
-        if _should_stop_after("inner", flags):
-            continue
-
-        result, cleaning_outer = evaluate_outer_walk_forward(
-            context=OuterEvaluationContext(
-                X=context.X,
-                M=context.M,
-                y=context.y,
-                outer_fold=outer_fold,
-                preprocess_spec=context.preprocess_spec,
-                num_pp_samples=config.evaluation.predictive.num_samples_outer,
-                portfolio=PortfolioSpec(
-                    allocation=config.evaluation.allocation.spec,
-                    cost=config.evaluation.cost.spec,
-                ),
-            ),
-            best_config=best_config,
-            hooks=hooks,
-        )
-        if cleaning_outer is not None:
-            artifacts.write_cleaning_state(
-                outer_k=outer_fold.k_test,
-                cleaning=cleaning_outer,
-                feature_names=outer_context.context.feature_names,
-                spec=context.preprocess_spec,
-            )
-        artifacts.write_outer_result(
-            outer_k=outer_fold.k_test,
-            result=result,
-        )
-        outer_results.append(result)
+        chosen_configs[outer_fold.k_test] = fold_result.best_config
+        if fold_result.outer_result is not None:
+            outer_results.append(fold_result.outer_result)
 
     return chosen_configs, outer_results
+
+
+@dataclass(frozen=True)
+class OuterFoldRunResult:
+    best_config: Mapping[str, Any]
+    outer_result: Mapping[str, Any] | None
+
+
+def _run_outer_fold(
+    *,
+    outer_context: OuterFoldContext,
+    outer_fold: OuterFold,
+) -> OuterFoldRunResult:
+    started = time.perf_counter()
+    inner_splits = _build_inner_splits(
+        outer_context=outer_context,
+        outer_fold=outer_fold,
+    )
+    objective = _build_inner_objective(
+        outer_context=outer_context,
+        outer_fold=outer_fold,
+        inner_splits=inner_splits,
+    )
+    best_config = _select_best_config(
+        objective=objective,
+        base_config=outer_context.base_config,
+        candidates=outer_context.candidates,
+        tuning=outer_context.config.modeling.tuning,
+        use_gpu=outer_context.flags.use_gpu,
+    )
+    _write_inner_outputs(
+        outer_context=outer_context,
+        outer_fold=outer_fold,
+        inner_splits=inner_splits,
+        best_config=best_config,
+    )
+    if _should_stop_after("inner", outer_context.flags):
+        _log_outer_complete(
+            outer_k=outer_fold.k_test,
+            started=started,
+            phase="inner",
+            result=None,
+            cleaning=None,
+        )
+        return OuterFoldRunResult(best_config=best_config, outer_result=None)
+    result, cleaning_outer = _run_outer_evaluation(
+        outer_context=outer_context,
+        outer_fold=outer_fold,
+        best_config=best_config,
+    )
+    _log_outer_complete(
+        outer_k=outer_fold.k_test,
+        started=started,
+        phase="outer",
+        result=result,
+        cleaning=cleaning_outer,
+    )
+    return OuterFoldRunResult(best_config=best_config, outer_result=result)
+
+
+def _build_inner_splits(
+    *,
+    outer_context: OuterFoldContext,
+    outer_fold: OuterFold,
+) -> list[CPCVSplit]:
+    inner_splits = make_cpcv_splits(
+        warmup_idx=outer_context.context.cv.warmup_idx,
+        groups=outer_context.context.cv.groups,
+        inner_group_ids=outer_fold.inner_group_ids,
+        params=_with_fold_seed(
+            outer_context.config.cv, outer_fold.k_test
+        ),
+    )
+    if not inner_splits:
+        raise SimulationError(
+            "No inner CPCV splits available; check cv settings",
+            context={"outer_group": str(outer_fold.k_test)},
+        )
+    return inner_splits
+
+
+def _build_inner_objective(
+    *,
+    outer_context: OuterFoldContext,
+    outer_fold: OuterFold,
+    inner_splits: list[CPCVSplit],
+):
+    return make_inner_objective(
+        context=InnerObjectiveContext(
+            data=InnerObjectiveData(
+                X=outer_context.context.X,
+                M=outer_context.context.M,
+                y=outer_context.context.y,
+            ),
+            inner_splits=inner_splits,
+            params=InnerObjectiveParams(
+                preprocess_spec=outer_context.context.preprocess_spec,
+                score_spec=outer_context.config.evaluation.scoring.spec,
+                num_pp_samples=(
+                    outer_context.config.evaluation.predictive.num_samples_inner
+                ),
+                outer_k=outer_fold.k_test,
+                aggregate=outer_context.config.modeling.tuning.aggregate.method,
+                aggregate_lambda=(
+                    outer_context.config.modeling.tuning.aggregate.penalty
+                ),
+            ),
+        ),
+        hooks=outer_context.hooks,
+    )
+
+
+def _write_inner_outputs(
+    *,
+    outer_context: OuterFoldContext,
+    outer_fold: OuterFold,
+    inner_splits: list[CPCVSplit],
+    best_config: Mapping[str, Any],
+) -> None:
+    outer_context.artifacts.write_inner(
+        outer_k=outer_fold.k_test,
+        inner_splits=inner_splits,
+        best_config=best_config,
+    )
+    inner_summary = summarize_inner_cleaning(
+        InnerCleaningSummaryContext(
+            X=outer_context.context.X,
+            M=outer_context.context.M,
+            inner_splits=inner_splits,
+            spec=outer_context.context.preprocess_spec,
+            feature_names=outer_context.context.feature_names,
+            outer_k=outer_fold.k_test,
+        )
+    )
+    outer_context.artifacts.write_inner_cleaning_summary(
+        outer_k=outer_fold.k_test,
+        summary=inner_summary,
+    )
+
+
+def _run_outer_evaluation(
+    *,
+    outer_context: OuterFoldContext,
+    outer_fold: OuterFold,
+    best_config: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], FeatureCleaningState | None]:
+    result, cleaning_outer = evaluate_outer_walk_forward(
+        context=OuterEvaluationContext(
+            X=outer_context.context.X,
+            M=outer_context.context.M,
+            y=outer_context.context.y,
+            outer_fold=outer_fold,
+            preprocess_spec=outer_context.context.preprocess_spec,
+            num_pp_samples=(
+                outer_context.config.evaluation.predictive.num_samples_outer
+            ),
+            portfolio=PortfolioSpec(
+                allocation=outer_context.config.evaluation.allocation.spec,
+                cost=outer_context.config.evaluation.cost.spec,
+            ),
+        ),
+        best_config=best_config,
+        hooks=outer_context.hooks,
+    )
+    if cleaning_outer is not None:
+        outer_context.artifacts.write_cleaning_state(
+            outer_k=outer_fold.k_test,
+            cleaning=cleaning_outer,
+            feature_names=outer_context.context.feature_names,
+            spec=outer_context.context.preprocess_spec,
+        )
+    outer_context.artifacts.write_outer_result(
+        outer_k=outer_fold.k_test,
+        result=result,
+    )
+    return result, cleaning_outer
+
+
+def _log_outer_complete(
+    *,
+    outer_k: int,
+    started: float,
+    phase: str,
+    result: Mapping[str, Any] | None,
+    cleaning: FeatureCleaningState | None,
+) -> None:
+    elapsed = time.perf_counter() - started
+    payload: dict[str, Any] = {
+        "outer_k": outer_k,
+        "phase": phase,
+        "elapsed_s": round(elapsed, 4),
+    }
+    if cleaning is not None:
+        payload["n_features_kept"] = int(cleaning.feature_idx.size)
+    if result is not None:
+        pnl = result.get("pnl")
+        if isinstance(pnl, list) and pnl:
+            pnl_arr = np.asarray(pnl, dtype=float)
+            payload["pnl_mean"] = float(np.mean(pnl_arr))
+            payload["pnl_std"] = float(np.std(pnl_arr))
+    logger.info(
+        "event=complete boundary=simulation.outer context=%s",
+        payload,
+    )
 
 
 def _build_artifacts(
@@ -411,6 +563,7 @@ def _build_base_config(
             "learning_rate": training.learning_rate,
             "batch_size": training.batch_size,
             "num_elbo_particles": training.num_elbo_particles,
+            "log_every": training.log_every,
         },
     }
 
@@ -419,18 +572,39 @@ def _select_best_config(
     *,
     objective,
     base_config: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, Any]],
     tuning: TuningConfig,
-    seed: int,
+    use_gpu: bool,
 ) -> Mapping[str, Any]:
-    configs = expand_param_space(tuning.param_space)
-    candidates = select_candidates(configs, tuning.num_samples, seed)
+    if tuning.engine == "ray":
+        return select_best_with_ray(
+            RayTuneContext(
+                objective=objective,
+                base_config=base_config,
+                candidates=candidates,
+                resources=tuning.ray.resources,
+                use_gpu=use_gpu,
+                address=tuning.ray.address,
+            )
+        )
+    return _select_best_config_local(
+        objective=objective,
+        base_config=base_config,
+        candidates=candidates,
+    )
 
+
+def _select_best_config_local(
+    *,
+    objective,
+    base_config: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
     best_score = float("-inf")
     best_config: Mapping[str, Any] = dict(base_config)
 
     for candidate in candidates:
-        merged = dict(base_config)
-        merged.update(candidate)
+        merged = apply_param_updates(base_config, candidate)
         score = float(objective(merged))
         if score > best_score:
             best_score = score

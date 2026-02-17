@@ -34,9 +34,11 @@ from .types import (
     TrainingConfig,
     TuningAggregateConfig,
     TuningConfig,
+    TuningParamSpec,
+    TuningParamType,
+    TuningTransform,
     TuningRayConfig,
     TuningResourcesConfig,
-    TuningSamplingConfig,
 )
 
 __all__ = [
@@ -72,8 +74,10 @@ __all__ = [
     "TrainingConfig",
     "TuningAggregateConfig",
     "TuningConfig",
+    "TuningParamSpec",
+    "TuningParamType",
+    "TuningTransform",
     "TuningRayConfig",
     "TuningResourcesConfig",
-    "TuningSamplingConfig",
     "PnLCalculator",
 ]

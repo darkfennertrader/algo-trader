@@ -47,7 +47,7 @@ from .artifacts import (
 )
 from .preprocessing import InnerCleaningSummaryContext, summarize_inner_cleaning
 from .registry import default_registries
-from .tuning import apply_param_updates, resolve_candidates
+from .tuning import apply_param_updates, build_candidates
 from .tune_runner import RayTuneContext, select_best_with_ray
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,9 @@ def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
             timestamps=dataset.dates,
         )
     )
+    candidates = _write_candidate_artifacts(
+        config=config, artifacts=artifacts
+    )
     base_config = _build_base_config(
         config.modeling.model, config.modeling.training
     )
@@ -121,19 +124,16 @@ def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
         artifacts.write_cv_summary(results)
         return results
 
-    candidates = resolve_candidates(tuning=config.modeling.tuning)
-    artifacts.write_candidates(candidates=candidates)
-
     chosen_configs, outer_results = _evaluate_outer_folds(
         outer_context=OuterFoldContext(
             config=config,
             context=context,
             base_config=base_config,
-            candidates=candidates,
             hooks=hooks,
             artifacts=artifacts,
             flags=config.flags,
-        )
+        ),
+        candidates=candidates,
     )
 
     results = _build_results(config, context, chosen_configs, outer_results)
@@ -240,14 +240,15 @@ class OuterFoldContext:
     config: SimulationConfig
     context: SimulationContext
     base_config: Mapping[str, Any]
-    candidates: Sequence[Mapping[str, Any]]
     hooks: SimulationHooks
     artifacts: SimulationArtifacts
     flags: SimulationFlags
 
 
 def _evaluate_outer_folds(
-    *, outer_context: OuterFoldContext
+    *,
+    outer_context: OuterFoldContext,
+    candidates: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
     chosen_configs: dict[int, Mapping[str, Any]] = {}
     outer_results: list[Mapping[str, Any]] = []
@@ -256,6 +257,7 @@ def _evaluate_outer_folds(
         fold_result = _run_outer_fold(
             outer_context=outer_context,
             outer_fold=outer_fold,
+            candidates=candidates,
         )
         chosen_configs[outer_fold.k_test] = fold_result.best_config
         if fold_result.outer_result is not None:
@@ -274,6 +276,7 @@ def _run_outer_fold(
     *,
     outer_context: OuterFoldContext,
     outer_fold: OuterFold,
+    candidates: Sequence[Mapping[str, Any]],
 ) -> OuterFoldRunResult:
     started = time.perf_counter()
     inner_splits = _build_inner_splits(
@@ -288,7 +291,7 @@ def _run_outer_fold(
     best_config = _select_best_config(
         objective=objective,
         base_config=outer_context.base_config,
-        candidates=outer_context.candidates,
+        candidates=candidates,
         tuning=outer_context.config.modeling.tuning,
         use_gpu=outer_context.flags.use_gpu,
     )
@@ -514,6 +517,21 @@ def _build_results(
         "chosen_configs_by_outer_group": chosen_configs,
         "outer_results": outer_results,
     }
+
+
+def _write_candidate_artifacts(
+    *,
+    config: SimulationConfig,
+    artifacts: SimulationArtifacts,
+) -> list[dict[str, Any]]:
+    tuning = config.modeling.tuning
+    candidates = build_candidates(
+        space=tuning.space,
+        num_samples=tuning.num_samples,
+        seed=tuning.seed,
+    )
+    artifacts.write_candidates(candidates=candidates)
+    return candidates
 
 
 def _should_stop_after(phase: str, flags: SimulationFlags) -> bool:

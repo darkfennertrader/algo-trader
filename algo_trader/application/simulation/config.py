@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, cast
 
 import yaml
 
@@ -32,7 +32,9 @@ from algo_trader.domain.simulation import (
     TuningConfig,
     TuningRayConfig,
     TuningResourcesConfig,
-    TuningSamplingConfig,
+    TuningParamSpec,
+    TuningParamType,
+    TuningTransform,
 )
 
 DEFAULT_CONFIG_PATH = (
@@ -88,7 +90,6 @@ def _build_flags(raw: Mapping[str, Any]) -> SimulationFlags:
 SimulationMode = Literal["dry_run", "stub", "full"]
 StopAfter = Literal["inputs", "cv", "inner", "outer", "results"] | None
 TuningEngine = Literal["local", "ray"]
-SamplingMethod = Literal["grid", "random", "sobol", "lhs"]
 AggregateMethod = Literal["mean", "median", "mean_minus_std"]
 
 
@@ -169,8 +170,8 @@ def _build_tuning_config(
     if not isinstance(section, Mapping):
         raise ConfigError(f"tuning must be a mapping in {config_path}")
     try:
-        sampling = _build_tuning_sampling_config(
-            section.get("sampling", {}), config_path
+        space = _build_tuning_space(
+            section.get("space", None), config_path
         )
         aggregate = _build_tuning_aggregate_config(
             section.get("aggregate", {}), config_path
@@ -182,11 +183,11 @@ def _build_tuning_config(
             section.get("ray", {}), resources, config_path
         )
         tuning = TuningConfig(
-            param_space=section.get("param_space", {}),
+            space=space,
             num_samples=int(section.get("num_samples", 1)),
+            seed=int(section.get("seed", 0)),
             kwargs=section.get("kwargs", {}),
             engine=section.get("engine", "local"),
-            sampling=sampling,
             aggregate=aggregate,
             ray=ray,
         )
@@ -205,13 +206,13 @@ def _normalize_tuning_config(
         raise ConfigError(
             f"tuning.num_samples must be positive in {config_path}"
         )
+    if tuning.seed < 0:
+        raise ConfigError(
+            f"tuning.seed must be non-negative in {config_path}"
+        )
     return replace(
         tuning,
         engine=_normalize_tuning_engine(tuning.engine),
-        sampling=replace(
-            tuning.sampling,
-            method=_normalize_sampling_method(tuning.sampling.method),
-        ),
         aggregate=_normalize_aggregate_config(
             tuning.aggregate, config_path
         ),
@@ -219,16 +220,211 @@ def _normalize_tuning_config(
     )
 
 
-def _build_tuning_sampling_config(
-    raw: Mapping[str, Any], config_path: Path
-) -> TuningSamplingConfig:
-    if not isinstance(raw, Mapping):
-        raise ConfigError(f"tuning.sampling must be a mapping in {config_path}")
-    return TuningSamplingConfig(
-        method=raw.get("method", "grid"),
-        seed=int(raw.get("seed", 0)),
-        pre_sampled_path=raw.get("pre_sampled_path"),
+def _build_tuning_space(
+    raw: object, config_path: Path
+) -> tuple[TuningParamSpec, ...]:
+    if raw is None:
+        return tuple()
+    if not isinstance(raw, list):
+        raise ConfigError(f"tuning.space must be a list in {config_path}")
+    specs: list[TuningParamSpec] = []
+    seen: set[str] = set()
+    for idx, item in enumerate(raw):
+        if not isinstance(item, Mapping):
+            raise ConfigError(
+                f"tuning.space[{idx}] must be a mapping in {config_path}"
+            )
+        spec = _build_tuning_param_spec(
+            item, config_path=config_path, index=idx
+        )
+        if spec.path in seen:
+            raise ConfigError(
+                f"Duplicate tuning.space path '{spec.path}' in {config_path}"
+            )
+        seen.add(spec.path)
+        specs.append(spec)
+    return tuple(specs)
+
+
+def _build_tuning_param_spec(
+    raw: Mapping[str, Any],
+    *,
+    config_path: Path,
+    index: int,
+) -> TuningParamSpec:
+    path = _require_string(
+        raw.get("path"),
+        field=f"tuning.space[{index}].path",
+        config_path=config_path,
     )
+    param_type = _normalize_param_type(
+        raw.get("type"),
+        field=f"tuning.space[{index}].type",
+    )
+    transform = _normalize_transform(
+        raw.get("transform"),
+        field=f"tuning.space[{index}].transform",
+        config_path=config_path,
+    )
+    when = _parse_when(
+        raw.get("when"),
+        field=f"tuning.space[{index}].when",
+        config_path=config_path,
+    )
+    bounds = raw.get("bounds")
+    values = raw.get("values")
+    if param_type in {"float", "int"}:
+        if values is not None:
+            raise ConfigError(
+                f"tuning.space[{index}].values is not allowed for {param_type} params in {config_path}"
+            )
+        bounds_tuple = _parse_bounds(
+            bounds,
+            field=f"tuning.space[{index}].bounds",
+            config_path=config_path,
+        )
+        _validate_continuous_transform(
+            transform=transform,
+            bounds=bounds_tuple,
+            field=f"tuning.space[{index}].transform",
+            config_path=config_path,
+        )
+        return TuningParamSpec(
+            path=path,
+            param_type=param_type,
+            bounds=bounds_tuple,
+            values=None,
+            transform=transform,
+            when=when,
+        )
+    values_tuple = _parse_values(
+        values,
+        field=f"tuning.space[{index}].values",
+        config_path=config_path,
+    )
+    if bounds is not None:
+        raise ConfigError(
+            f"tuning.space[{index}].bounds is not allowed for {param_type} params in {config_path}"
+        )
+    if transform != "none":
+        raise ConfigError(
+            f"tuning.space[{index}].transform must be 'none' for {param_type} params in {config_path}"
+        )
+    if param_type == "bool" and not all(
+        isinstance(item, bool) for item in values_tuple
+    ):
+        raise ConfigError(
+            f"tuning.space[{index}].values must be booleans in {config_path}"
+        )
+    return TuningParamSpec(
+        path=path,
+        param_type=param_type,
+        bounds=None,
+        values=values_tuple,
+        transform=transform,
+        when=when,
+    )
+
+
+def _parse_bounds(
+    raw: object, *, field: str, config_path: Path
+) -> tuple[float, float]:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        raise ConfigError(
+            f"{field} must be a 2-item list in {config_path}"
+        )
+    try:
+        min_value = float(raw[0])
+        max_value = float(raw[1])
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{field} must be numeric in {config_path}") from exc
+    if min_value >= max_value:
+        raise ConfigError(
+            f"{field} min must be less than max in {config_path}"
+        )
+    return min_value, max_value
+
+
+def _parse_values(
+    raw: object, *, field: str, config_path: Path
+) -> tuple[Any, ...]:
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError(
+            f"{field} must be a non-empty list in {config_path}"
+        )
+    return tuple(raw)
+
+
+def _parse_when(
+    raw: object, *, field: str, config_path: Path
+) -> Mapping[str, tuple[Any, ...]]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"{field} must be a mapping in {config_path}")
+    when: dict[str, tuple[Any, ...]] = {}
+    for key, value in raw.items():
+        name = _require_string(
+            key, field=f"{field} key", config_path=config_path
+        )
+        allowed = _normalize_when_values(
+            value, field=f"{field}.{name}", config_path=config_path
+        )
+        when[name] = allowed
+    return when
+
+
+def _normalize_when_values(
+    raw: object, *, field: str, config_path: Path
+) -> tuple[Any, ...]:
+    if isinstance(raw, (list, tuple)):
+        if not raw:
+            raise ConfigError(
+                f"{field} must not be empty in {config_path}"
+            )
+        return tuple(raw)
+    if raw is None:
+        raise ConfigError(f"{field} must not be null in {config_path}")
+    return (raw,)
+
+
+def _normalize_param_type(
+    value: object, *, field: str
+) -> TuningParamType:
+    raw = str(value).strip().lower()
+    if raw in {"float", "int", "categorical", "bool"}:
+        return cast(TuningParamType, raw)
+    raise ConfigError(f"{field} must be float, int, categorical, or bool")
+
+
+def _normalize_transform(
+    value: object, *, field: str, config_path: Path
+) -> TuningTransform:
+    if value is None:
+        raise ConfigError(f"{field} is required in {config_path}")
+    raw = str(value).strip().lower()
+    if raw in {"linear", "log", "log10", "none"}:
+        return cast(TuningTransform, raw)
+    raise ConfigError(
+        f"{field} must be linear, log, log10, or none in {config_path}"
+    )
+
+
+def _validate_continuous_transform(
+    *,
+    transform: str,
+    bounds: tuple[float, float],
+    field: str,
+    config_path: Path,
+) -> None:
+    if transform == "none":
+        raise ConfigError(
+            f"{field} must not be 'none' for continuous params in {config_path}"
+        )
+    if transform in {"log", "log10"} and bounds[0] <= 0:
+        raise ConfigError(
+            f"{field} requires positive bounds in {config_path}"
+        )
 
 
 def _build_tuning_aggregate_config(
@@ -332,21 +528,6 @@ def _normalize_tuning_engine(value: object) -> TuningEngine:
     raise ConfigError("tuning.engine must be local or ray")
 
 
-def _normalize_sampling_method(value: object) -> SamplingMethod:
-    raw = str(value).strip().lower()
-    if raw == "grid":
-        return "grid"
-    if raw == "random":
-        return "random"
-    if raw == "sobol":
-        return "sobol"
-    if raw == "lhs":
-        return "lhs"
-    raise ConfigError(
-        "tuning.sampling_method must be grid, random, sobol, or lhs"
-    )
-
-
 def _normalize_aggregate_method(value: object) -> AggregateMethod:
     raw = str(value).strip().lower()
     if raw == "mean":
@@ -358,6 +539,17 @@ def _normalize_aggregate_method(value: object) -> AggregateMethod:
     raise ConfigError(
         "tuning.aggregate must be mean, median, or mean_minus_std"
     )
+
+
+def _require_string(
+    value: object, *, field: str, config_path: Path
+) -> str:
+    if value is None:
+        raise ConfigError(f"{field} is required in {config_path}")
+    raw = str(value).strip()
+    if not raw:
+        raise ConfigError(f"{field} must be non-empty in {config_path}")
+    return raw
 
 
 def _build_evaluation_spec(

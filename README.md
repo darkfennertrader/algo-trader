@@ -16,6 +16,11 @@ Note: Simulation models and guides implement `PyroModel`/`PyroGuide` using the
 `ModelBatch` dataclass (features/targets/mask). See `docs/workflows.md` for
 the current model/guide contract.
 
+Note: Hyperparameter tuning uses `tuning.space` in
+`config/model_selection.yml`. Candidate configs are persisted to
+`hyperparams_space.json` under the dataset version `inner/` directory derived
+from `data.paths.tensor_path` and reused if present.
+
 LLM reading order:
 - `AGENTS.md` - coding rules and workflow
 - `docs/repo_structure.md` - architecture and module map

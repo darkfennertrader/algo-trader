@@ -7,25 +7,58 @@ from algo_trader.application.simulation.tuning import (
     build_candidates,
 )
 from algo_trader.domain import ConfigError
+from algo_trader.domain.simulation import TuningParamSpec
 
 
-def test_build_candidates_random_mixed() -> None:
-    param_space = {
-        "training.learning_rate": {"min": 1e-4, "max": 1e-2, "dtype": "float"},
-        "training.num_steps": [500, 1000],
-        "model_params.activation": ["relu", "tanh"],
-    }
-    candidates = build_candidates(
-        param_space=param_space,
-        num_samples=5,
-        seed=7,
-        sampling_method="random",
+def test_build_candidates_sobol_stratified() -> None:
+    space = (
+        TuningParamSpec(
+            path="model_params.activation",
+            param_type="categorical",
+            values=("relu", "tanh"),
+            transform="none",
+        ),
+        TuningParamSpec(
+            path="training.learning_rate",
+            param_type="float",
+            bounds=(1e-4, 1e-2),
+            transform="log10",
+            when={"model_params.activation": ("relu",)},
+        ),
+        TuningParamSpec(
+            path="training.num_steps",
+            param_type="int",
+            bounds=(500, 1500),
+            transform="linear",
+            when={},
+        ),
     )
-    assert len(candidates) == 5
+    candidates = build_candidates(space=space, num_samples=8, seed=7)
+    assert len(candidates) == 8
     for candidate in candidates:
-        assert 1e-4 <= candidate["training.learning_rate"] <= 1e-2
-        assert candidate["training.num_steps"] in {500, 1000}
         assert candidate["model_params.activation"] in {"relu", "tanh"}
+        steps = candidate["training.num_steps"]
+        assert 500 <= steps <= 1500
+        assert float(steps).is_integer()
+        if candidate["model_params.activation"] == "relu":
+            lr = candidate["training.learning_rate"]
+            assert 1e-4 <= lr <= 1e-2
+        else:
+            assert "training.learning_rate" not in candidate
+
+
+def test_build_candidates_rejects_invalid_when() -> None:
+    space = (
+        TuningParamSpec(
+            path="training.num_steps",
+            param_type="categorical",
+            values=(500, 1000),
+            transform="none",
+            when={"training.learning_rate": (1e-3,)},
+        ),
+    )
+    with pytest.raises(ConfigError):
+        build_candidates(space=space, num_samples=2, seed=1)
 
 
 def test_apply_param_updates_dot_paths() -> None:
@@ -43,14 +76,3 @@ def test_apply_param_updates_dot_paths() -> None:
     assert merged["training"]["learning_rate"] == 5e-4
     assert merged["training"]["num_steps"] == 1000
     assert merged["model_params"]["activation"] == "relu"
-
-
-def test_grid_rejects_continuous_ranges() -> None:
-    param_space = {"training.learning_rate": {"min": 1e-4, "max": 1e-2}}
-    with pytest.raises(ConfigError):
-        build_candidates(
-            param_space=param_space,
-            num_samples=2,
-            seed=1,
-            sampling_method="grid",
-        )

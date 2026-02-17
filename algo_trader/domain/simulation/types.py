@@ -130,11 +130,18 @@ class TrainingConfig:
     log_every: int | None = 100
 
 
+TuningParamType = Literal["float", "int", "categorical", "bool"]
+TuningTransform = Literal["linear", "log", "log10", "none"]
+
+
 @dataclass(frozen=True)
-class TuningSamplingConfig:
-    method: Literal["grid", "random", "sobol", "lhs"] = "grid"
-    seed: int = 0
-    pre_sampled_path: str | None = None
+class TuningParamSpec:
+    path: str
+    param_type: TuningParamType
+    bounds: tuple[float, float] | None = None
+    values: tuple[Any, ...] | None = None
+    transform: TuningTransform = "none"
+    when: Mapping[str, tuple[Any, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -159,13 +166,11 @@ class TuningRayConfig:
 
 @dataclass(frozen=True)
 class TuningConfig:
-    param_space: Mapping[str, Any] = field(default_factory=dict)
+    space: tuple[TuningParamSpec, ...] = field(default_factory=tuple)
     num_samples: int = 1
+    seed: int = 0
     kwargs: Mapping[str, Any] = field(default_factory=dict)
     engine: Literal["local", "ray"] = "local"
-    sampling: TuningSamplingConfig = field(
-        default_factory=TuningSamplingConfig
-    )
     aggregate: TuningAggregateConfig = field(
         default_factory=TuningAggregateConfig
     )

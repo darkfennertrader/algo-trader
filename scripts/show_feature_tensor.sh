@@ -6,8 +6,8 @@ usage() {
 Usage: scripts/show_feature_tensor.sh --group GROUP [--head N]
 
 If FEATURE_STORE_SOURCE is set, the script uses the latest YYYY-WW directory
-under FEATURE_STORE_SOURCE/features. Otherwise it falls back to
-/home/ray/projects/data_sources/feature_store/features.
+under FEATURE_STORE_SOURCE. Otherwise it falls back to
+/home/ray/projects/data_sources/feature_store.
 
 Defaults:
   --head 5
@@ -68,10 +68,10 @@ resolve_latest_dir() {
 }
 
 if [[ -z "${FEATURE_STORE_SOURCE:-}" ]]; then
-  fallback_root="/home/ray/projects/data_sources/feature_store/features"
+  fallback_root="/home/ray/projects/data_sources/feature_store"
   base_dir="$(resolve_latest_dir "$fallback_root")"
 else
-  base_dir="$(resolve_latest_dir "$FEATURE_STORE_SOURCE/features")"
+  base_dir="$(resolve_latest_dir "$FEATURE_STORE_SOURCE")"
 fi
 
 tensor_path="$base_dir/$group/features_tensor.pt"

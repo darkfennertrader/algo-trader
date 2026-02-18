@@ -13,6 +13,7 @@ from algo_trader.domain import ConfigError, SimulationError
 from algo_trader.domain.simulation import (
     CPCVSplit,
     CVParams,
+    DataPaths,
     FeatureCleaningState,
     ModelConfig,
     OuterFold,
@@ -24,6 +25,7 @@ from algo_trader.domain.simulation import (
     TuningConfig,
 )
 from algo_trader.infrastructure import log_boundary
+from algo_trader.infrastructure.data import load_panel_tensor_dataset
 
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .cv_groups import build_equal_groups, make_cpcv_splits, make_outer_folds
@@ -78,17 +80,26 @@ def _run_context(config_path: Path | None) -> Mapping[str, str]:
 @log_boundary("simulation.run", context=_run_context)
 def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
     config = load_config(config_path)
-    config = _resolve_dataset_config(config)
     device = _resolve_device(config.flags.use_gpu)
     hooks = (
         stub_hooks()
         if config.flags.simulation_mode == "stub"
         else default_hooks()
     )
-
-    dataset = _load_dataset(config, device)
+    base_dir = resolve_simulation_output_dir(
+        simulation_output_path=config.data.simulation_output_path,
+        dataset_params=config.data.dataset_params,
+    )
+    dataset, reused_inputs = _load_dataset_for_run(
+        config=config, base_dir=base_dir, device=device
+    )
     context = _build_context(config, dataset)
-    artifacts = _build_artifacts(config, dataset, context)
+    artifacts = _build_artifacts(
+        base_dir=base_dir,
+        dataset=dataset,
+        context=context,
+        write_inputs=not reused_inputs,
+    )
     if _should_stop_after("inputs", config.flags):
         results = _build_results(
             config, context, chosen_configs={}, outer_results=[]
@@ -169,21 +180,42 @@ def _resolve_preprocess_spec(
 def _load_dataset(config: SimulationConfig, device: str) -> PanelDataset:
     registries = default_registries()
     return registries.datasets.build(
-        config.data.dataset_name, config=config.data, device=device
+        "feature_store_panel", config=config.data, device=device
     )
 
 
-def _resolve_dataset_config(config: SimulationConfig) -> SimulationConfig:
-    tensor_path = config.data.paths.tensor_path
-    if tensor_path is not None:
-        if config.data.dataset_name == "tensor_bundle":
-            return config
-        data = replace(config.data, dataset_name="tensor_bundle")
-        return replace(config, data=data)
-    if config.data.dataset_name == "feature_store_panel":
-        return config
-    data = replace(config.data, dataset_name="feature_store_panel")
-    return replace(config, data=data)
+def _panel_tensor_path(base_dir: Path) -> Path:
+    return base_dir / "inputs" / "panel_tensor.pt"
+
+
+def _load_dataset_for_run(
+    *,
+    config: SimulationConfig,
+    base_dir: Path,
+    device: str,
+) -> tuple[PanelDataset, bool]:
+    if base_dir.exists():
+        if not base_dir.is_dir():
+            raise SimulationError(
+                "Simulation output path is not a directory",
+                context={"path": str(base_dir)},
+            )
+        tensor_path = _panel_tensor_path(base_dir)
+        if not tensor_path.exists():
+            raise SimulationError(
+                "panel_tensor.pt missing in simulation output directory",
+                context={"path": str(tensor_path)},
+            )
+        dataset = load_panel_tensor_dataset(
+            paths=DataPaths(tensor_path=str(tensor_path)),
+            device=device,
+        )
+        logger.info(
+            "Using existing simulation inputs path=%s", tensor_path
+        )
+        return dataset, True
+    dataset = _load_dataset(config, device)
+    return dataset, False
 
 
 def _build_context(
@@ -472,25 +504,24 @@ def _log_outer_complete(
 
 
 def _build_artifacts(
-    config: SimulationConfig,
+    *,
+    base_dir: Path,
     dataset: PanelDataset,
     context: SimulationContext,
+    write_inputs: bool,
 ) -> SimulationArtifacts:
-    base_dir = resolve_simulation_output_dir(
-        dataset_name=config.data.dataset_name,
-        dataset_params=config.data.dataset_params,
-    )
     artifacts = SimulationArtifacts(base_dir)
-    artifacts.write_inputs(
-        inputs=SimulationInputs(
-            X=context.X,
-            M=context.M,
-            y=context.y,
-            timestamps=dataset.dates,
-            assets=dataset.assets,
-            features=dataset.features,
+    if write_inputs:
+        artifacts.write_inputs(
+            inputs=SimulationInputs(
+                X=context.X,
+                M=context.M,
+                y=context.y,
+                timestamps=dataset.dates,
+                assets=dataset.assets,
+                features=dataset.features,
+            )
         )
-    )
     return artifacts
 
 

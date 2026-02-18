@@ -16,7 +16,6 @@ from algo_trader.domain.simulation import (
     CVParams,
     CVWindow,
     DataConfig,
-    DataPaths,
     EvaluationSpec,
     ModelConfig,
     ModelingSpec,
@@ -656,17 +655,37 @@ def _build_preprocess_spec(
     return PreprocessSpec(cleaning=cleaning, scaling=scaling)
 
 
+def _normalize_simulation_output_path(
+    value: object, config_path: Path
+) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"data.simulation_output_path must be a string in {config_path}"
+        )
+    label = value.strip()
+    if not label:
+        raise ConfigError(
+            f"data.simulation_output_path must not be empty in {config_path}"
+        )
+    if Path(label).name != label or "/" in label or "\\" in label:
+        raise ConfigError(
+            f"data.simulation_output_path must be a single directory name in {config_path}"
+        )
+    return label
+
+
 def _build_data_config(
     raw: Mapping[str, Any], config_path: Path
 ) -> DataConfig:
     section = raw.get("data")
     if not isinstance(section, Mapping):
         raise ConfigError(f"data must be a mapping in {config_path}")
-    paths = section.get("paths", {})
-    if paths is None:
-        paths = {}
-    if not isinstance(paths, Mapping):
-        raise ConfigError(f"data.paths must be a mapping in {config_path}")
+    if "paths" in section:
+        raise ConfigError(
+            f"data.paths is no longer supported in {config_path}"
+        )
     if "selection" in section:
         raise ConfigError(
             f"data.selection is no longer supported in {config_path}"
@@ -678,14 +697,17 @@ def _build_data_config(
         raise ConfigError(
             f"data.dataset_params must be a mapping in {config_path}"
         )
-    dataset_name = section.get("dataset_name", "")
-    if not dataset_name:
-        raise ConfigError(f"data.dataset_name is required in {config_path}")
+    if "version_label" in dataset_params:
+        raise ConfigError(
+            f"data.dataset_params.version_label is no longer supported in {config_path}"
+        )
+    simulation_output_path = _normalize_simulation_output_path(
+        section.get("simulation_output_path"), config_path
+    )
     try:
         return DataConfig(
-            dataset_name=str(dataset_name),
-            paths=DataPaths(**paths),
             dataset_params=dataset_params,
+            simulation_output_path=simulation_output_path,
         )
     except TypeError as exc:
         raise ConfigError(

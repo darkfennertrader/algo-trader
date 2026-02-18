@@ -18,8 +18,8 @@ the current model/guide contract.
 
 Note: Hyperparameter tuning uses `tuning.space` in
 `config/model_selection.yml`. Candidate configs are persisted to
-`hyperparams_space.json` under the dataset version `inner/` directory derived
-from `data.paths.tensor_path` and reused if present.
+`cv/candidates.json` under the simulation output directory
+(`SIMULATION_SOURCE/<simulation_output_path or latest YYYY-WW>`).
 
 LLM reading order:
 - `AGENTS.md` - coding rules and workflow

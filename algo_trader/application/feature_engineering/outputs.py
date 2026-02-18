@@ -114,7 +114,7 @@ def _prepare_output_paths(
     version_label: str,
     group: str,
 ) -> FeatureOutputPaths:
-    output_dir = feature_store / "features" / version_label / group
+    output_dir = feature_store / version_label / group
     ensure_directory(
         output_dir,
         error_type=DataProcessingError,

@@ -25,14 +25,12 @@ def load_feature_store_panel_dataset(
     data_lake = _resolve_root_dir(
         params, key="data_lake", env_name="DATA_LAKE_SOURCE"
     )
-    version_label = _resolve_version_label(
-        params, feature_store / "features", data_lake
-    )
+    version_label = _resolve_version_label(feature_store, data_lake)
     group_names = _resolve_group_names(
-        params, feature_store / "features" / version_label
+        params, feature_store / version_label
     )
     feature_bundle = _load_feature_groups(
-        feature_store / "features" / version_label, group_names, params
+        feature_store / version_label, group_names, params
     )
     target_bundle = _load_targets(
         data_lake / version_label, params, n_assets=feature_bundle.n_assets
@@ -56,7 +54,6 @@ def load_feature_store_panel_dataset(
 class _FeatureParams:
     feature_store: str | None
     data_lake: str | None
-    version_label: str | None
     groups: Sequence[str] | None
     target_shift: int
     target_scale: int
@@ -77,7 +74,6 @@ def _normalize_params(raw: Mapping[str, Any]) -> _FeatureParams:
     return _FeatureParams(
         feature_store=_coerce_str(raw.get("feature_store")),
         data_lake=_coerce_str(raw.get("data_lake")),
-        version_label=_coerce_str(raw.get("version_label")),
         groups=groups,
         target_shift=target_shift,
         target_scale=target_scale,
@@ -139,11 +135,7 @@ def _resolve_root_dir(
     )
 
 
-def _resolve_version_label(
-    params: _FeatureParams, feature_root: Path, data_lake: Path
-) -> str:
-    if params.version_label:
-        return params.version_label
+def _resolve_version_label(feature_root: Path, data_lake: Path) -> str:
     return resolve_feature_store_version_label(
         feature_root,
         data_lake,

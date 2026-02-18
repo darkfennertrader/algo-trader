@@ -243,25 +243,22 @@ class SimulationArtifacts:
 
 def resolve_simulation_output_dir(
     *,
-    dataset_name: str,
+    simulation_output_path: str | None,
     dataset_params: Mapping[str, Any],
 ) -> Path:
     root = Path(require_env("SIMULATION_SOURCE")).expanduser()
     _ensure_dir(root, message="Failed to create SIMULATION_SOURCE")
-    version_label = _resolve_version_label(dataset_name, dataset_params)
-    base_dir = root / version_label
-    _ensure_dir(base_dir, message="Failed to create simulation version dir")
-    return base_dir
+    label = (
+        simulation_output_path
+        if simulation_output_path is not None
+        else _resolve_latest_version_label(dataset_params)
+    )
+    return root / label
 
 
-def _resolve_version_label(
-    dataset_name: str, dataset_params: Mapping[str, Any]
+def _resolve_latest_version_label(
+    dataset_params: Mapping[str, Any],
 ) -> str:
-    raw = dataset_params.get("version_label")
-    if raw:
-        return str(raw)
-    if dataset_name != "feature_store_panel":
-        return "unversioned"
     feature_store = resolve_root_dir(
         dataset_params,
         key="feature_store",
@@ -275,7 +272,7 @@ def _resolve_version_label(
         error_type=SimulationError,
     )
     return resolve_feature_store_version_label(
-        feature_store / "features",
+        feature_store,
         data_lake,
         error_type=SimulationError,
         feature_error="No feature store versions found",

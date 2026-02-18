@@ -19,7 +19,7 @@ class DataPaths:
 
 @dataclass(frozen=True)
 class DataConfig:
-    dataset_name: str
+    simulation_output_path: str | None = None
     paths: DataPaths = field(default_factory=DataPaths)
     dataset_params: Mapping[str, Any] = field(default_factory=dict)
 

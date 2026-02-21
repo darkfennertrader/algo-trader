@@ -209,6 +209,28 @@ class ModelSelectionComplexity:
 
 
 @dataclass(frozen=True)
+class FanChartsConfig:
+    enable: bool = False
+    assets_mode: Literal["all", "list"] = "all"
+    assets: tuple[str, ...] = field(default_factory=tuple)
+    quantiles: tuple[float, ...] = (
+        0.05,
+        0.10,
+        0.25,
+        0.50,
+        0.75,
+        0.90,
+        0.95,
+    )
+    coverage_levels: tuple[float, ...] = (0.5, 0.8, 0.9, 0.95)
+
+
+@dataclass(frozen=True)
+class DiagnosticsConfig:
+    fan_charts: FanChartsConfig = field(default_factory=FanChartsConfig)
+
+
+@dataclass(frozen=True)
 class ModelSelectionConfig:
     enable: bool = False
     phase_name: str = "post_tune_model_selection"
@@ -268,6 +290,7 @@ class EvaluationSpec:
     allocation: AllocationConfig
     cost: CostConfig
     model_selection: ModelSelectionConfig
+    diagnostics: DiagnosticsConfig
 
 
 @dataclass(frozen=True)

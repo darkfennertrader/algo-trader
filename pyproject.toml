@@ -20,6 +20,8 @@ dependencies = [
     "ray[default,tune]>=2.53.0",
     "scipy>=1.17.0",
     "ibapi",
+    "matplotlib>=3.10.8",
+    "seaborn[stats]>=0.13.2",
 ]
 
 [build-system]

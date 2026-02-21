@@ -22,13 +22,22 @@ class RayTuneContext:
 def select_best_with_ray(context: RayTuneContext) -> Mapping[str, Any]:
     if not context.candidates:
         raise ConfigError("No candidates available for Ray Tune")
-    ray, tune = _import_tune()
-    _init_ray(context.address, ray)
+    _, tune = _import_tune()
     trainable = _build_trainable(context, tune)
     tuner = _build_tuner(trainable, context.candidates, tune)
     best_candidate = _extract_best_candidate(tuner.fit())
-    merged = apply_param_updates(context.base_config, best_candidate)
-    return merged
+    return apply_param_updates(context.base_config, best_candidate)
+
+
+def init_ray_for_tuning(address: str | None) -> None:
+    ray, _ = _import_tune()
+    _init_ray(address, ray)
+
+
+def shutdown_ray_for_tuning() -> None:
+    ray, _ = _import_tune()
+    if ray.is_initialized():
+        ray.shutdown()
 
 
 def _import_tune():

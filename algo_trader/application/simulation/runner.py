@@ -57,7 +57,21 @@ from .tuning import (
     build_candidates,
     with_candidate_context,
 )
-from .tune_runner import RayTuneContext, select_best_with_ray
+from .tune_runner import (
+    RayTuneContext,
+    init_ray_for_tuning,
+    select_best_with_ray,
+    shutdown_ray_for_tuning,
+)
+from .runner_helpers import (
+    build_base_config,
+    build_group_by_index,
+    resolve_outer_test_group_ids,
+    should_stop_after,
+    with_fold_seed,
+    with_run_meta,
+)
+from .diagnostics import FanChartDiagnosticsContext, run_fan_chart_diagnostics
 from .model_selection import (
     GlobalSelectionContext,
     PostTuneSelectionContext,
@@ -96,17 +110,45 @@ def _run_context(config_path: Path | None) -> Mapping[str, str]:
 def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
     config = load_config(config_path)
     device = _resolve_device(config.flags.use_gpu)
-    hooks = (
-        stub_hooks()
-        if config.flags.simulation_mode == "stub"
-        else default_hooks()
+    setup = _prepare_run_state(config=config, device=device)
+    if setup.early_results is not None:
+        return setup.early_results
+    use_ray = config.modeling.tuning.engine == "ray"
+    ray_address = config.modeling.tuning.ray.address
+    if use_ray:
+        init_ray_for_tuning(ray_address)
+    try:
+        chosen_configs, outer_results = _evaluate_outer_folds(
+            outer_context=setup.outer_context,
+            candidates=setup.candidates,
+        )
+    finally:
+        if use_ray and ray_address is None:
+            shutdown_ray_for_tuning()
+    results = _build_results(
+        config,
+        setup.outer_context.context,
+        chosen_configs,
+        outer_results,
     )
-    base_dir = resolve_simulation_output_dir(
-        simulation_output_path=config.data.simulation_output_path,
-        dataset_params=config.data.dataset_params,
-    )
-    dataset, reused_inputs = _load_dataset_for_run(
-        config=config, base_dir=base_dir, device=device
+    results = with_run_meta(results, config.flags)
+    setup.outer_context.artifacts.write_results(results)
+    setup.outer_context.artifacts.write_cv_summary(results)
+    return results
+
+
+@dataclass(frozen=True)
+class RunSetup:
+    outer_context: OuterFoldContext
+    candidates: Sequence[CandidateSpec]
+    early_results: Mapping[str, Any] | None
+
+
+def _prepare_run_state(
+    *, config: SimulationConfig, device: str
+) -> RunSetup:
+    base_dir, dataset, reused_inputs = _resolve_run_inputs(
+        config=config, device=device
     )
     context = _build_context(config, dataset)
     artifacts = _build_artifacts(
@@ -115,13 +157,90 @@ def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
         context=context,
         write_inputs=not reused_inputs,
     )
-    if _should_stop_after("inputs", config.flags):
-        results = _build_results(
-            config, context, chosen_configs={}, outer_results=[]
+    early_results = _maybe_finalize_inputs(
+        config=config,
+        context=context,
+        artifacts=artifacts,
+    )
+    if early_results is not None:
+        return RunSetup(
+            outer_context=OuterFoldContext(
+                config=config,
+                context=context,
+                base_config={},
+                hooks=stub_hooks(),
+                artifacts=artifacts,
+                flags=config.flags,
+            ),
+            candidates=(),
+            early_results=early_results,
         )
-        results = _with_run_meta(results, config.flags)
-        artifacts.write_results(results)
-        return results
+    candidates, base_config = _prepare_candidates(
+        config=config,
+        artifacts=artifacts,
+        context=context,
+        dataset=dataset,
+    )
+    early_results = _maybe_finalize_cv(
+        config=config,
+        context=context,
+        artifacts=artifacts,
+    )
+    outer_context = OuterFoldContext(
+        config=config,
+        context=context,
+        base_config=base_config,
+        hooks=(
+            stub_hooks()
+            if config.flags.simulation_mode == "stub"
+            else default_hooks()
+        ),
+        artifacts=artifacts,
+        flags=config.flags,
+    )
+    return RunSetup(
+        outer_context=outer_context,
+        candidates=candidates,
+        early_results=early_results,
+    )
+
+
+def _resolve_run_inputs(
+    *, config: SimulationConfig, device: str
+) -> tuple[Path, PanelDataset, bool]:
+    base_dir = resolve_simulation_output_dir(
+        simulation_output_path=config.data.simulation_output_path,
+        dataset_params=config.data.dataset_params,
+    )
+    dataset, reused_inputs = _load_dataset_for_run(
+        config=config, base_dir=base_dir, device=device
+    )
+    return base_dir, dataset, reused_inputs
+
+
+def _maybe_finalize_inputs(
+    *,
+    config: SimulationConfig,
+    context: SimulationContext,
+    artifacts: SimulationArtifacts,
+) -> Mapping[str, Any] | None:
+    if not should_stop_after("inputs", config.flags):
+        return None
+    results = _build_results(
+        config, context, chosen_configs={}, outer_results=[]
+    )
+    results = with_run_meta(results, config.flags)
+    artifacts.write_results(results)
+    return results
+
+
+def _prepare_candidates(
+    *,
+    config: SimulationConfig,
+    artifacts: SimulationArtifacts,
+    context: SimulationContext,
+    dataset: PanelDataset,
+) -> tuple[Sequence[CandidateSpec], Mapping[str, Any]]:
     artifacts.write_cv_structure(
         inputs=CVStructureInputs(
             warmup_idx=context.cv.warmup_idx,
@@ -137,33 +256,24 @@ def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
     candidates = _write_candidate_artifacts(
         config=config, artifacts=artifacts
     )
-    base_config = _build_base_config(
+    base_config = build_base_config(
         config.modeling.model, config.modeling.training
     )
+    return candidates, base_config
 
-    if _should_stop_after("cv", config.flags):
-        results = _build_results(
-            config, context, chosen_configs={}, outer_results=[]
-        )
-        results = _with_run_meta(results, config.flags)
-        artifacts.write_results(results)
-        artifacts.write_cv_summary(results)
-        return results
 
-    chosen_configs, outer_results = _evaluate_outer_folds(
-        outer_context=OuterFoldContext(
-            config=config,
-            context=context,
-            base_config=base_config,
-            hooks=hooks,
-            artifacts=artifacts,
-            flags=config.flags,
-        ),
-        candidates=candidates,
+def _maybe_finalize_cv(
+    *,
+    config: SimulationConfig,
+    context: SimulationContext,
+    artifacts: SimulationArtifacts,
+) -> Mapping[str, Any] | None:
+    if not should_stop_after("cv", config.flags):
+        return None
+    results = _build_results(
+        config, context, chosen_configs={}, outer_results=[]
     )
-
-    results = _build_results(config, context, chosen_configs, outer_results)
-    results = _with_run_meta(results, config.flags)
+    results = with_run_meta(results, config.flags)
     artifacts.write_results(results)
     artifacts.write_cv_summary(results)
     return results
@@ -247,7 +357,7 @@ def _build_context(
     )
     if not groups:
         raise SimulationError("No groups available; check cv settings")
-    outer_ids = _resolve_outer_test_group_ids(
+    outer_ids = resolve_outer_test_group_ids(
         config.outer.test_group_ids, config.outer.last_n, len(groups)
     )
     outer_folds = make_outer_folds(
@@ -256,7 +366,9 @@ def _build_context(
         outer_test_group_ids=outer_ids,
         exclude_warmup=config.cv.exclude_warmup,
     )
-    group_by_index = _build_group_by_index(groups=groups, total_len=int(X.shape[0]))
+    group_by_index = build_group_by_index(
+        groups=groups, total_len=int(X.shape[0])
+    )
     return SimulationContext(
         X=X,
         M=M,
@@ -272,26 +384,6 @@ def _build_context(
         feature_names=list(dataset.features),
         assets=list(dataset.assets),
     )
-
-
-def _build_group_by_index(
-    *, groups: Sequence[np.ndarray], total_len: int
-) -> np.ndarray:
-    group_by_index = np.full(total_len, -1, dtype=int)
-    for group_id, indices in enumerate(groups):
-        np.put(group_by_index, np.asarray(indices, dtype=int), group_id)
-    return group_by_index
-
-
-def _with_fold_seed(cv: CVParams, fold_id: int) -> CVParams:
-    return replace(
-        cv,
-        cpcv=replace(cv.cpcv, seed=_fold_seed(cv.cpcv.seed, fold_id)),
-    )
-
-
-def _fold_seed(base_seed: int, fold_id: int) -> int:
-    return base_seed + 10_000 * fold_id
 
 
 @dataclass(frozen=True)
@@ -357,16 +449,20 @@ def _evaluate_outer_folds_global(
         outer_context=outer_context,
         candidates=candidates,
     )
+    _run_global_diagnostics(
+        outer_context=outer_context,
+        global_best=global_best,
+    )
     for outer_fold in outer_context.context.cv.outer_folds:
-        chosen_configs[outer_fold.k_test] = global_best
-    if _should_stop_after("inner", outer_context.flags):
+        chosen_configs[outer_fold.k_test] = global_best.best_config
+    if should_stop_after("inner", outer_context.flags):
         return chosen_configs, outer_results
     for outer_fold in outer_context.context.cv.outer_folds:
         started = time.perf_counter()
         result, cleaning_outer = _run_outer_evaluation(
             outer_context=outer_context,
             outer_fold=outer_fold,
-            best_config=global_best,
+            best_config=global_best.best_config,
         )
         _log_outer_complete(
             outer_k=outer_fold.k_test,
@@ -383,6 +479,12 @@ def _evaluate_outer_folds_global(
 class OuterFoldRunResult:
     best_config: Mapping[str, Any]
     outer_result: Mapping[str, Any] | None
+
+
+@dataclass(frozen=True)
+class GlobalBestConfig:
+    best_config: Mapping[str, Any]
+    candidate_id: int
 
 
 @dataclass(frozen=True)
@@ -446,7 +548,7 @@ def _run_outer_fold(
         inner_splits=inner_splits,
         best_config=best_config,
     )
-    if _should_stop_after("inner", outer_context.flags):
+    if should_stop_after("inner", outer_context.flags):
         _log_outer_complete(
             outer_k=outer_fold.k_test,
             started=started,
@@ -533,7 +635,7 @@ def _build_inner_splits(
         warmup_idx=outer_context.context.cv.warmup_idx,
         groups=outer_context.context.cv.groups,
         inner_group_ids=outer_fold.inner_group_ids,
-        params=_with_fold_seed(
+        params=with_fold_seed(
             outer_context.config.cv, outer_fold.k_test
         ),
     )
@@ -770,59 +872,6 @@ def _write_candidate_artifacts(
     return candidate_specs
 
 
-def _should_stop_after(phase: str, flags: SimulationFlags) -> bool:
-    if flags.stop_after is not None:
-        return phase == flags.stop_after
-    if flags.simulation_mode == "dry_run":
-        return phase == "cv"
-    return False
-
-
-def _with_run_meta(
-    results: Mapping[str, Any], flags: SimulationFlags
-) -> Mapping[str, Any]:
-    enriched = dict(results)
-    enriched["run_mode"] = flags.simulation_mode
-    enriched["stop_after"] = flags.stop_after
-    return enriched
-
-
-def _resolve_outer_test_group_ids(
-    outer_ids: list[int] | None,
-    outer_last_n: int | None,
-    n_groups: int,
-) -> list[int]:
-    if outer_ids is not None:
-        return outer_ids
-    if outer_last_n is not None:
-        if outer_last_n <= 0:
-            raise ConfigError("outer.last_n must be positive")
-        start = max(0, n_groups - outer_last_n)
-        return list(range(start, n_groups))
-    n_outer = min(5, n_groups)
-    return list(range(n_groups - n_outer, n_groups))
-
-
-def _build_base_config(
-    model: ModelConfig,
-    training: TrainingConfig,
-) -> dict[str, Any]:
-    return {
-        "model_name": model.model_name,
-        "guide_name": model.guide_name,
-        "model_params": dict(model.params),
-        "training": {
-            "num_steps": training.num_steps,
-            "learning_rate": training.learning_rate,
-            "tbptt_window_len": training.tbptt_window_len,
-            "tbptt_burn_in_len": training.tbptt_burn_in_len,
-            "grad_accum_steps": training.grad_accum_steps,
-            "num_elbo_particles": training.num_elbo_particles,
-            "log_every": training.log_every,
-        },
-    }
-
-
 def _select_best_config(
     context: BestConfigContext,
 ) -> Mapping[str, Any]:
@@ -898,7 +947,7 @@ def _select_global_best_config(
     *,
     outer_context: OuterFoldContext,
     candidates: Sequence[CandidateSpec],
-) -> Mapping[str, Any]:
+) -> GlobalBestConfig:
     selection = select_best_candidate_global(
         GlobalSelectionContext(
             artifacts=outer_context.artifacts,
@@ -914,4 +963,29 @@ def _select_global_best_config(
     )
     best_config = apply_param_updates(outer_context.base_config, params)
     outer_context.artifacts.write_global_best_config(payload=best_config)
-    return best_config
+    return GlobalBestConfig(
+        best_config=best_config,
+        candidate_id=int(selection.best_candidate_id),
+    )
+
+
+def _run_global_diagnostics(
+    *,
+    outer_context: OuterFoldContext,
+    global_best: GlobalBestConfig,
+) -> None:
+    diagnostics = outer_context.config.evaluation.diagnostics
+    if not diagnostics.fan_charts.enable:
+        return
+    if not outer_context.config.evaluation.model_selection.enable:
+        raise SimulationError(
+            "Diagnostics require model_selection.enable"
+        )
+    run_fan_chart_diagnostics(
+        FanChartDiagnosticsContext(
+            base_dir=outer_context.artifacts.base_dir,
+            outer_ids=outer_context.context.cv.outer_ids,
+            candidate_id=global_best.candidate_id,
+            config=diagnostics.fan_charts,
+        )
+    )

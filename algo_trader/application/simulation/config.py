@@ -16,7 +16,9 @@ from algo_trader.domain.simulation import (
     CVParams,
     CVWindow,
     DataConfig,
+    DiagnosticsConfig,
     EvaluationSpec,
+    FanChartsConfig,
     ModelConfig,
     ModelingSpec,
     OuterConfig,
@@ -565,12 +567,14 @@ def _build_evaluation_spec(
     allocation = _build_section(raw, "allocation", AllocationConfig, config_path)
     cost = _build_section(raw, "cost", CostConfig, config_path)
     model_selection = _build_model_selection_config(raw, config_path)
+    diagnostics = _build_diagnostics_config(raw, config_path)
     return EvaluationSpec(
         scoring=scoring,
         predictive=predictive,
         allocation=allocation,
         cost=cost,
         model_selection=model_selection,
+        diagnostics=diagnostics,
     )
 
 
@@ -602,6 +606,109 @@ def _build_model_selection_config(
         batching=batching,
         complexity=complexity,
     )
+
+
+def _build_diagnostics_config(
+    raw: Mapping[str, Any], config_path: Path
+) -> DiagnosticsConfig:
+    section = raw.get("diagnostics", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, Mapping):
+        raise ConfigError(
+            f"diagnostics must be a mapping in {config_path}"
+        )
+    fan_charts = _build_fan_charts_config(section, config_path)
+    return DiagnosticsConfig(fan_charts=fan_charts)
+
+
+def _build_fan_charts_config(
+    section: Mapping[str, Any], config_path: Path
+) -> FanChartsConfig:
+    raw_fan = section.get("fan_charts", {})
+    if raw_fan is None:
+        raw_fan = {}
+    if not isinstance(raw_fan, Mapping):
+        raise ConfigError(
+            f"diagnostics.fan_charts must be a mapping in {config_path}"
+        )
+    enable = bool(raw_fan.get("enable", False))
+    assets_mode, assets = _parse_fan_assets(
+        raw_fan.get("assets", "all"), config_path
+    )
+    quantiles = _parse_float_list(
+        raw_fan.get("quantiles"),
+        field="diagnostics.fan_charts.quantiles",
+        config_path=config_path,
+        default=FanChartsConfig().quantiles,
+    )
+    coverage_levels = _parse_float_list(
+        raw_fan.get("coverage_levels"),
+        field="diagnostics.fan_charts.coverage_levels",
+        config_path=config_path,
+        default=FanChartsConfig().coverage_levels,
+    )
+    return FanChartsConfig(
+        enable=enable,
+        assets_mode=assets_mode,
+        assets=assets,
+        quantiles=quantiles,
+        coverage_levels=coverage_levels,
+    )
+
+
+def _parse_fan_assets(
+    raw_assets: Any, config_path: Path
+) -> tuple[Literal["all", "list"], tuple[str, ...]]:
+    if raw_assets is None:
+        return "all", tuple()
+    if isinstance(raw_assets, str):
+        if raw_assets.strip().lower() == "all":
+            return "all", tuple()
+        return "list", (raw_assets.strip(),)
+    if isinstance(raw_assets, (list, tuple)):
+        assets: list[str] = []
+        for item in raw_assets:
+            if item is None:
+                continue
+            name = str(item).strip()
+            if not name:
+                raise ConfigError(
+                    f"diagnostics.fan_charts.assets must be non-empty in {config_path}"
+                )
+            assets.append(name)
+        if not assets:
+            raise ConfigError(
+                f"diagnostics.fan_charts.assets must be non-empty in {config_path}"
+            )
+        return "list", tuple(assets)
+    raise ConfigError(
+        f"diagnostics.fan_charts.assets must be 'all' or a list in {config_path}"
+    )
+
+
+def _parse_float_list(
+    raw: Any,
+    *,
+    field: str,
+    config_path: Path,
+    default: tuple[float, ...],
+) -> tuple[float, ...]:
+    if raw is None:
+        values = list(default)
+    elif isinstance(raw, (list, tuple)):
+        values = [float(item) for item in raw]
+    else:
+        values = [float(raw)]
+    if not values:
+        raise ConfigError(f"{field} must be non-empty in {config_path}")
+    for value in values:
+        if not 0.0 < float(value) < 1.0:
+            raise ConfigError(
+                f"{field} entries must be in (0, 1) in {config_path}"
+            )
+    unique = sorted(set(values))
+    return tuple(unique)
 
 
 def _build_model_selection_es_band(

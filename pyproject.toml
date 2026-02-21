@@ -6,7 +6,6 @@ authors = [{ name = "Raimondo Marino", email = "raimondo.marino69@gmail.com" }]
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "ibapi",
     "pandas>=2.3.3",
     "pytest>=9.0.2",
     "python-dotenv>=1.2.1",
@@ -20,6 +19,7 @@ dependencies = [
     "ta-lib==0.6.8",
     "ray[default,tune]>=2.53.0",
     "scipy>=1.17.0",
+    "ibapi",
 ]
 
 [build-system]
@@ -45,10 +45,10 @@ addopts = "-ra"
 testpaths = ["tests"]
 
 [tool.uv.sources]
-ibapi = { path = "../../IBKR/twsapi_macunix.1042.01/IBJts/source/pythonclient" }
 torch = { index = "pytorch-cu126" }
 torchvision = { index = "pytorch-cu126" }
 torchaudio = { index = "pytorch-cu126" }
+ibapi = { path = "vendor/ibapi" }
 
 [[tool.uv.index]]
 name = "pytorch-cu126"

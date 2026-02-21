@@ -7,12 +7,16 @@ import time
 
 import numpy as np
 import torch
+from torch.linalg import cholesky, solve_triangular
 
+from algo_trader.domain import SimulationError
 from algo_trader.domain.simulation import (
     CPCVSplit,
     FeatureCleaningState,
+    ModelSelectionConfig,
     PreprocessSpec,
 )
+from .artifacts import SimulationArtifacts
 from .hooks import SimulationHooks
 from .preprocessing import (
     TransformState,
@@ -42,8 +46,11 @@ class InnerObjectiveParams:
 @dataclass(frozen=True)
 class InnerObjectiveContext:
     data: InnerObjectiveData
+    artifacts: SimulationArtifacts
+    group_by_index: np.ndarray
     inner_splits: list[CPCVSplit]
     params: InnerObjectiveParams
+    model_selection: ModelSelectionConfig
 
 
 logger = logging.getLogger(__name__)
@@ -56,6 +63,7 @@ def make_inner_objective(
 ) -> Callable[[Mapping[str, Any]], float]:
     def objective(config: Mapping[str, Any]) -> float:
         fold_scores: list[float] = []
+        candidate_id = _require_candidate_id(config)
         for split_id, split in enumerate(context.inner_splits):
             result = _evaluate_split(
                 SplitContext(
@@ -63,8 +71,14 @@ def make_inner_objective(
                     params=context.params,
                     split=split,
                     split_id=split_id,
-                    hooks=hooks,
                     config=config,
+                    candidate_id=candidate_id,
+                    resources=SplitResources(
+                        hooks=hooks,
+                        artifacts=context.artifacts,
+                        group_by_index=context.group_by_index,
+                        model_selection=context.model_selection,
+                    ),
                 )
             )
             if result is None:
@@ -94,6 +108,19 @@ def make_inner_objective(
     return objective
 
 
+def _require_candidate_id(config: Mapping[str, Any]) -> int:
+    run_context = config.get("run_context")
+    if not isinstance(run_context, Mapping):
+        return -1
+    candidate_id = run_context.get("candidate_id", -1)
+    try:
+        return int(candidate_id)
+    except (TypeError, ValueError) as exc:
+        raise SimulationError(
+            "candidate_id must be an int in run_context"
+        ) from exc
+
+
 @dataclass(frozen=True)
 class SplitResult:
     score: float
@@ -109,8 +136,17 @@ class SplitContext:
     params: InnerObjectiveParams
     split: CPCVSplit
     split_id: int
-    hooks: SimulationHooks
     config: Mapping[str, Any]
+    candidate_id: int
+    resources: "SplitResources"
+
+
+@dataclass(frozen=True)
+class SplitResources:
+    hooks: SimulationHooks
+    artifacts: SimulationArtifacts
+    group_by_index: np.ndarray
+    model_selection: ModelSelectionConfig
 
 
 @dataclass(frozen=True)
@@ -130,20 +166,31 @@ def _evaluate_split(context: SplitContext) -> SplitResult | None:
     batches = _prepare_split_batches(context)
     if batches is None:
         return None
-    model_state = context.hooks.fit_model(
+    model_state = context.resources.hooks.fit_model(
         X_train=batches.X_train,
         y_train=batches.y_train,
         config=split_config,
         init_state=None,
     )
-    pred = context.hooks.predict(
+    pred = context.resources.hooks.predict(
         X_pred=batches.X_test,
         state=model_state,
         config=split_config,
         num_samples=context.params.num_pp_samples,
     )
+    pred = _maybe_prepare_energy_score_pred(
+        pred=pred,
+        y_train=batches.y_train,
+        score_spec=context.params.score_spec,
+    )
+    _maybe_write_postprocess_inputs(
+        context=context,
+        pred=pred,
+        y_train=batches.y_train,
+        y_test=batches.y_test,
+    )
     score = float(
-        context.hooks.score(
+        context.resources.hooks.score(
             y_true=batches.y_test,
             pred=pred,
             score_spec=context.params.score_spec,
@@ -228,10 +275,166 @@ def _split_config(
     outer_k: int,
     split_id: int,
 ) -> Mapping[str, Any]:
+    run_context = config.get("run_context")
+    if isinstance(run_context, Mapping):
+        merged_context = dict(run_context)
+    else:
+        merged_context = {}
+    merged_context["outer_k"] = outer_k
+    merged_context["split_id"] = split_id
     return {
         **config,
-        "run_context": {
-            "outer_k": outer_k,
-            "split_id": split_id,
-        },
+        "run_context": merged_context,
     }
+
+
+def _maybe_prepare_energy_score_pred(
+    *,
+    pred: Mapping[str, Any],
+    y_train: torch.Tensor,
+    score_spec: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    metric = str(score_spec.get("metric_name", "")).strip().lower()
+    if metric != "energy_score":
+        return pred
+    transform = _build_energy_score_transform(
+        y_train=y_train, score_spec=score_spec
+    )
+    enriched = dict(pred)
+    enriched["energy_score"] = transform
+    return enriched
+
+
+def _maybe_write_postprocess_inputs(
+    *,
+    context: SplitContext,
+    pred: Mapping[str, Any],
+    y_train: torch.Tensor,
+    y_test: torch.Tensor,
+) -> None:
+    if not context.resources.model_selection.enable:
+        return
+    if context.candidate_id < 0:
+        raise SimulationError(
+            "Postprocess requires candidate_id in run_context"
+        )
+    samples = _require_samples_tensor(pred)
+    transform = _resolve_energy_score_transform(
+        pred=pred, y_train=y_train, score_spec=context.params.score_spec
+    )
+    if y_test.ndim != 2:
+        raise SimulationError("Postprocess y_test must be [T, A]")
+    if samples.shape[1] != y_test.shape[0]:
+        raise SimulationError("Postprocess samples and y_test must align on T")
+    if samples.shape[2] != y_test.shape[1]:
+        raise SimulationError("Postprocess samples and y_test must align on A")
+    z_true = y_test / transform["scale"]
+    z_samples = samples / transform["scale"]
+    test_groups = context.resources.group_by_index[context.split.test_idx]
+    if np.any(test_groups < 0):
+        raise SimulationError("Postprocess test groups contain invalid ids")
+    payload = {
+        "z_true": z_true.detach().cpu(),
+        "z_samples": z_samples.detach().cpu(),
+        "scale": transform["scale"].detach().cpu(),
+        "whitener": transform["whitener"].detach().cpu(),
+        "test_idx": context.split.test_idx.tolist(),
+        "test_groups": test_groups.tolist(),
+    }
+    context.resources.artifacts.write_postprocess_candidate_split(
+        outer_k=context.params.outer_k,
+        candidate_id=context.candidate_id,
+        split_id=context.split_id,
+        payload=payload,
+    )
+
+
+def _require_samples_tensor(pred: Mapping[str, Any]) -> torch.Tensor:
+    samples = pred.get("samples")
+    if not isinstance(samples, torch.Tensor):
+        raise SimulationError("Postprocess requires pred['samples'] tensor")
+    if samples.ndim == 2:
+        return samples.unsqueeze(0)
+    if samples.ndim != 3:
+        raise SimulationError("Postprocess samples must be [S, T, A]")
+    return samples
+
+
+def _resolve_energy_score_transform(
+    *,
+    pred: Mapping[str, Any],
+    y_train: torch.Tensor,
+    score_spec: Mapping[str, Any],
+) -> Mapping[str, torch.Tensor]:
+    existing = pred.get("energy_score")
+    if isinstance(existing, Mapping):
+        scale = existing.get("scale")
+        whitener = existing.get("whitener")
+        if isinstance(scale, torch.Tensor) and isinstance(
+            whitener, torch.Tensor
+        ):
+            return {"scale": scale, "whitener": whitener}
+    return _build_energy_score_transform(
+        y_train=y_train, score_spec=score_spec
+    )
+
+
+def _build_energy_score_transform(
+    *, y_train: torch.Tensor, score_spec: Mapping[str, Any]
+) -> Mapping[str, torch.Tensor]:
+    if y_train.ndim != 2:
+        raise SimulationError("Energy score requires y_train [T, A]")
+    if not torch.isfinite(y_train).all():
+        raise SimulationError(
+            "Energy score training data must be fully observed"
+        )
+    n_eff = int(y_train.shape[0])
+    if n_eff <= 1:
+        raise SimulationError("Energy score requires at least 2 rows")
+    scale = _mad_scale(y_train, score_spec)
+    z_train = y_train / scale
+    z_centered = z_train - z_train.mean(dim=0, keepdim=True)
+    cov = (z_centered.T @ z_centered) / float(n_eff - 1)
+    shrinkage = _energy_score_shrinkage(n_eff)
+    diag = torch.diag(torch.diag(cov))
+    cov_shrunk = (1.0 - shrinkage) * cov + shrinkage * diag
+    eps = float(score_spec.get("eps", 1e-5))
+    cov_shrunk = cov_shrunk + eps * torch.eye(
+        cov_shrunk.shape[0],
+        device=cov_shrunk.device,
+        dtype=cov_shrunk.dtype,
+    )
+    whitener = _inverse_cholesky(cov_shrunk)
+    return {"scale": scale, "whitener": whitener}
+
+
+def _mad_scale(
+    y_train: torch.Tensor, score_spec: Mapping[str, Any]
+) -> torch.Tensor:
+    median = y_train.median(dim=0).values
+    mad = (y_train - median).abs().median(dim=0).values
+    mad_eps = float(score_spec.get("mad_eps", 1e-12))
+    return mad + mad_eps
+
+
+def _energy_score_shrinkage(n_eff: int) -> float:
+    if n_eff >= 300:
+        return 0.075
+    if n_eff >= 150:
+        return 0.15
+    return 0.30
+
+
+def _inverse_cholesky(matrix: torch.Tensor) -> torch.Tensor:
+    try:
+        chol = cholesky(matrix)  # pylint: disable=not-callable
+        identity = torch.eye(
+            chol.shape[0], device=chol.device, dtype=chol.dtype
+        )
+        return solve_triangular(  # pylint: disable=not-callable
+            chol, identity, upper=False
+        )
+    except RuntimeError as exc:
+        raise SimulationError(
+            "Energy score covariance is not positive definite"
+        ) from exc

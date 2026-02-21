@@ -36,6 +36,7 @@ from dataclasses import dataclass
 import torch
 import pyro
 import pyro.distributions as dist
+from pyro import poutine
 from algo_trader.domain import ConfigError
 from algo_trader.pipeline.stages.modeling import ModelBatch, PyroModel
 
@@ -194,17 +195,20 @@ class StaticStudentTFactorReturnsModel(PyroModel):
             # ------------------------------------------------------------------
             # 5. Observation model in z-space
             # ------------------------------------------------------------------
-            pyro.sample(
-                "obs",
-                dist.StudentT(
-                    df=df_idio,
-                    loc=mean_t,  # [T, N]
-                    scale=idio_scale,  # [N], broadcast across T
-                ).to_event(
-                    1
-                ),  # event dim is asset dimension
-                obs=y_obs,
-            )
+            obs_dist = dist.StudentT(
+                df=df_idio,
+                loc=mean_t,  # [T, N]
+                scale=idio_scale,  # [N], broadcast across T
+            ).to_event(
+                1
+            )  # event dim is asset dimension
+            if batch.M is None:
+                pyro.sample("obs", obs_dist, obs=y_obs)
+            else:
+                with poutine.mask(  # pylint: disable=not-context-manager
+                    mask=batch.M
+                ):
+                    pyro.sample("obs", obs_dist, obs=y_obs)
 
 
 def _resolve_returns(

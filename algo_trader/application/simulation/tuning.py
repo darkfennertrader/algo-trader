@@ -7,7 +7,7 @@ from typing import Any, Mapping, MutableMapping, Sequence
 import numpy as np
 
 from algo_trader.domain import ConfigError
-from algo_trader.domain.simulation import TuningParamSpec
+from algo_trader.domain.simulation import CandidateSpec, TuningParamSpec
 
 
 @dataclass(frozen=True)
@@ -50,6 +50,29 @@ def build_candidates(
             )
         )
     return candidates
+
+
+def assign_candidate_ids(
+    candidates: Sequence[Mapping[str, Any]],
+) -> list[CandidateSpec]:
+    return [
+        CandidateSpec(candidate_id=idx, params=dict(candidate))
+        for idx, candidate in enumerate(candidates)
+    ]
+
+
+def with_candidate_context(
+    config: Mapping[str, Any], candidate_id: int
+) -> dict[str, Any]:
+    enriched = dict(config)
+    run_context = enriched.get("run_context")
+    if isinstance(run_context, Mapping):
+        merged_context = dict(run_context)
+    else:
+        merged_context = {}
+    merged_context["candidate_id"] = candidate_id
+    enriched["run_context"] = merged_context
+    return enriched
 
 
 def apply_param_updates(

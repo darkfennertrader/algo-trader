@@ -1,5 +1,6 @@
 """Inner-loop metric registrations."""
 
-from . import neg_mse
+from . import energy_score, neg_mse
+from .energy_score import energy_score_terms
 
-__all__ = ["neg_mse"]
+__all__ = ["energy_score", "energy_score_terms", "neg_mse"]

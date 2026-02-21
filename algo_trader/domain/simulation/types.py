@@ -122,10 +122,11 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    trainer_name: str = "svi_trainer"
     num_steps: int = 2_000
     learning_rate: float = 1e-3
-    batch_size: int | None = None
+    tbptt_window_len: int | None = None
+    tbptt_burn_in_len: int = 0
+    grad_accum_steps: int = 1
     num_elbo_particles: int = 1
     log_every: int | None = 100
 
@@ -178,6 +179,61 @@ class TuningConfig:
 
 
 @dataclass(frozen=True)
+class ModelSelectionESBand:
+    c: float = 1.0
+    min_keep: int = 1
+    max_keep: int = 10
+
+
+@dataclass(frozen=True)
+class ModelSelectionBootstrap:
+    num_samples: int = 500
+    seed: int = 123
+
+
+@dataclass(frozen=True)
+class ModelSelectionTail:
+    alpha: float = 0.1
+
+
+@dataclass(frozen=True)
+class ModelSelectionBatching:
+    candidates: int = 1
+    splits: int = 1
+
+
+@dataclass(frozen=True)
+class ModelSelectionComplexity:
+    method: Literal["random"] = "random"
+    seed: int = 123
+
+
+@dataclass(frozen=True)
+class ModelSelectionConfig:
+    enable: bool = False
+    phase_name: str = "post_tune_model_selection"
+    es_band: ModelSelectionESBand = field(
+        default_factory=ModelSelectionESBand
+    )
+    bootstrap: ModelSelectionBootstrap = field(
+        default_factory=ModelSelectionBootstrap
+    )
+    tail: ModelSelectionTail = field(default_factory=ModelSelectionTail)
+    batching: ModelSelectionBatching = field(
+        default_factory=ModelSelectionBatching
+    )
+    complexity: ModelSelectionComplexity = field(
+        default_factory=ModelSelectionComplexity
+    )
+
+
+@dataclass(frozen=True)
+class CandidateSpec:
+    candidate_id: int
+    params: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
 class PredictiveConfig:
     num_samples_inner: int = 100
     num_samples_outer: int = 100
@@ -211,6 +267,7 @@ class EvaluationSpec:
     predictive: PredictiveConfig
     allocation: AllocationConfig
     cost: CostConfig
+    model_selection: ModelSelectionConfig
 
 
 @dataclass(frozen=True)

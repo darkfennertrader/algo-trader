@@ -4,16 +4,16 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from algo_trader.domain import ConfigError
-from algo_trader.domain.simulation import TuningResourcesConfig
+from algo_trader.domain.simulation import CandidateSpec, TuningResourcesConfig
 
-from .tuning import apply_param_updates
+from .tuning import apply_param_updates, with_candidate_context
 
 
 @dataclass(frozen=True)
 class RayTuneContext:
     objective: Any
     base_config: Mapping[str, Any]
-    candidates: Sequence[Mapping[str, Any]]
+    candidates: Sequence[CandidateSpec]
     resources: TuningResourcesConfig
     use_gpu: bool
     address: str | None
@@ -27,7 +27,8 @@ def select_best_with_ray(context: RayTuneContext) -> Mapping[str, Any]:
     trainable = _build_trainable(context, tune)
     tuner = _build_tuner(trainable, context.candidates, tune)
     best_candidate = _extract_best_candidate(tuner.fit())
-    return apply_param_updates(context.base_config, best_candidate)
+    merged = apply_param_updates(context.base_config, best_candidate)
+    return merged
 
 
 def _import_tune():
@@ -56,8 +57,11 @@ def _init_ray(address: str | None, ray: Any) -> None:
 
 def _build_trainable(context: RayTuneContext, tune: Any):
     def trainable(config: Mapping[str, Any]) -> None:
-        candidate = config["candidate"]
-        merged = apply_param_updates(context.base_config, candidate)
+        candidate = _require_candidate_payload(config)
+        merged = apply_param_updates(context.base_config, candidate["params"])
+        merged = with_candidate_context(
+            merged, int(candidate["candidate_id"])
+        )
         score = float(context.objective(merged))
         tune.report({"score": score})
 
@@ -69,10 +73,14 @@ def _build_trainable(context: RayTuneContext, tune: Any):
     )
 
 
-def _build_tuner(trainable, candidates: Sequence[Mapping[str, Any]], tune: Any):
+def _build_tuner(
+    trainable, candidates: Sequence[CandidateSpec], tune: Any
+):
     return tune.Tuner(
         trainable,
-        param_space={"candidate": tune.grid_search(list(candidates))},
+        param_space={
+            "candidate": tune.grid_search(_candidate_payloads(candidates))
+        },
         tune_config=tune.TuneConfig(metric="score", mode="max"),
     )
 
@@ -87,7 +95,35 @@ def _extract_best_candidate(results) -> Mapping[str, Any]:
     best_candidate = config.get("candidate")
     if not isinstance(best_candidate, Mapping):
         raise ConfigError("Ray Tune best config is missing candidate data")
-    return best_candidate
+    params = best_candidate.get("params")
+    if not isinstance(params, Mapping):
+        raise ConfigError("Ray Tune best candidate missing params")
+    return params
+
+
+def _candidate_payloads(
+    candidates: Sequence[CandidateSpec],
+) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for candidate in candidates:
+        payloads.append(
+            {
+                "candidate_id": int(candidate.candidate_id),
+                "params": dict(candidate.params),
+            }
+        )
+    return payloads
+
+
+def _require_candidate_payload(
+    config: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    candidate = config.get("candidate")
+    if not isinstance(candidate, Mapping):
+        raise ConfigError("Ray Tune candidate payload is invalid")
+    if "candidate_id" not in candidate or "params" not in candidate:
+        raise ConfigError("Ray Tune candidate payload is missing fields")
+    return candidate
 
 
 def _with_resources(

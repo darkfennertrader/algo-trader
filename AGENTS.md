@@ -6,7 +6,25 @@
 - Code contributions: ensure every Python snippet follows idiomatic patterns and aligns SOLID with the modern principles below (SRP -> cohesion, DIP/ISP -> depend on abstractions and keep interfaces lean, LSP -> prefer composition over inheritance, OCP -> low coupling, decouple creation from use).
 - Type checking: write Python code with complete and correct type hints, and ensure it passes static type checking with both Pyright/Pylance and Pylint (with type checking enabled), fixing any type or lint issues they would report.
 - Lint guardrails: proactively avoid pylint complexity warnings. Stay within these limits (or refactor): locals <= 15, branches <= 12, arguments <= 5, return statements <= 6. Do not leave known pylint warnings in the codebase.
-- For third-party library features, consult documentation via Context7 before implementing to ensure alignment with upstream APIs and usage.
+- For third-party library features, always base code on real documentation, in this order:
+  1. Use Context7 (`context7` MCP) as the primary source:
+     - Search using the exact package name and, if known, its version (e.g. `pydantic 2.8`).
+     - Prefer what you read there over your own “memory” of the API.
+  2. If Context7 does not have the library or is clearly incomplete, use the `fetch` MCP:
+     - First fetch `https://pypi.org/project/<package_name>/`.
+     - From the PyPI page, follow “Homepage”, “Documentation”, or “ReadTheDocs” links.
+     - Fetch those official docs pages and use them as the main reference.
+     - Only fall back to `tavily` web search if both Context7 and fetch cannot locate official docs.
+  3. When code execution is available, verify APIs against the actual installed package in the `uv` environment:
+     - Use `uv run python -c "import <pkg>; print(<pkg>.__version__)"` to check the version when relevant.
+     - Use `uv run` with `dir()`, `help()`, or `inspect.signature()` to confirm functions, methods, and parameters.
+  4. Never invent functions, methods, attributes, or parameters that you have not seen in:
+     - Context7 docs, or
+     - official docs fetched via `fetch`, or
+     - runtime introspection via `uv run`.
+     If you cannot confirm an API, say you are unsure and suggest a small `uv run` check instead of guessing.
+  5. Always target the latest stable documentation **unless** you know a specific version is installed. If the installed version is unclear, mention that behavior may differ across versions.
+  6. Only ask the user for a documentation link if Context7, `fetch` (PyPI + official docs), and reasonable introspection all fail to provide enough information to safely use the library.
 - Pyro: review guidance in `docs/pyro` before implementing or modifying models/guides.
 
 ## Coding Workflow

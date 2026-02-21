@@ -93,7 +93,7 @@ def _build_parser() -> argparse.ArgumentParser:
     simulation_parser.add_argument(
         "--simulation-config",
         type=Path,
-        help="Path to model_selection.yml (defaults to config/model_selection.yml).",
+        help="Path to simulation.yml (defaults to config/simulation.yml).",
     )
 
     feature_parser = subparsers.add_parser(

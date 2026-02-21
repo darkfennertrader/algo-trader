@@ -70,7 +70,7 @@ def run() -> int:
     if workflow == "simulation":
         print(
             "\nReminder: simulation behavior is controlled by "
-            "config/model_selection.yml."
+            "config/simulation.yml."
         )
     return 0
 
@@ -136,7 +136,7 @@ def _feature_engineering_command() -> WizardCommand:
 def _simulation_command() -> WizardCommand:
     args: list[str] = ["algotrader", "simulation"]
     config_path = _prompt_optional(
-        "Simulation config path (blank for config/model_selection.yml)"
+        "Simulation config path (blank for config/simulation.yml)"
     )
     if config_path:
         args.extend(["--simulation-config", config_path])

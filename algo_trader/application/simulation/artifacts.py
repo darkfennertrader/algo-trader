@@ -12,6 +12,7 @@ import torch
 
 from algo_trader.domain import SimulationError
 from algo_trader.domain.simulation import (
+    CandidateSpec,
     CPCVSplit,
     FeatureCleaningState,
     PreprocessSpec,
@@ -230,14 +231,111 @@ class SimulationArtifacts:
         )
 
     def write_candidates(
-        self, *, candidates: Sequence[Mapping[str, Any]]
+        self, *, candidates: Sequence[CandidateSpec]
     ) -> None:
         _ensure_dir(self._cv_dir, message="Failed to create CV output")
-        payload = _to_serializable(list(candidates))
+        payload = _to_serializable(
+            {str(item.candidate_id): item.params for item in candidates}
+        )
         _write_json(
             self._cv_dir / "candidates.json",
             payload,
             message="Failed to write candidate configs",
+        )
+
+    def write_postprocess_metadata(
+        self,
+        *,
+        outer_k: int,
+        metadata: Mapping[str, Any],
+    ) -> None:
+        target_dir = self._postprocess_dir(outer_k)
+        _ensure_dir(target_dir, message="Failed to create postprocess output")
+        _write_json(
+            target_dir / "metadata.json",
+            _to_serializable(metadata),
+            message="Failed to write postprocess metadata",
+        )
+
+    def write_postprocess_candidate_split(
+        self,
+        *,
+        outer_k: int,
+        candidate_id: int,
+        split_id: int,
+        payload: Mapping[str, Any],
+    ) -> None:
+        target_dir = self._postprocess_dir(outer_k) / "candidates"
+        _ensure_dir(target_dir, message="Failed to create postprocess candidates")
+        filename = f"candidate_{candidate_id:04d}_split_{split_id:04d}.pt"
+        _save_torch(
+            payload,
+            target_dir / filename,
+            message="Failed to write postprocess candidate split",
+        )
+
+    def write_postprocess_metrics(
+        self,
+        *,
+        outer_k: int,
+        metrics: Mapping[str, Any],
+    ) -> None:
+        target_dir = self._postprocess_dir(outer_k)
+        _ensure_dir(target_dir, message="Failed to create postprocess output")
+        _write_json(
+            target_dir / "metrics.json",
+            _to_serializable(metrics),
+            message="Failed to write postprocess metrics",
+        )
+
+    def write_postprocess_selection(
+        self,
+        *,
+        outer_k: int,
+        selection: Mapping[str, Any],
+    ) -> None:
+        target_dir = self._postprocess_dir(outer_k)
+        _ensure_dir(target_dir, message="Failed to create postprocess output")
+        _write_json(
+            target_dir / "selection.json",
+            _to_serializable(selection),
+            message="Failed to write postprocess selection",
+        )
+
+    def _postprocess_dir(self, outer_k: int) -> Path:
+        return self._inner_dir / f"outer_{outer_k}" / "postprocessing"
+
+    def write_global_selection(
+        self, *, payload: Mapping[str, Any]
+    ) -> None:
+        target_dir = self._outer_dir
+        _ensure_dir(target_dir, message="Failed to create outer output")
+        _write_json(
+            target_dir / "selection.json",
+            _to_serializable(payload),
+            message="Failed to write global selection",
+        )
+
+    def write_global_best_config(
+        self, *, payload: Mapping[str, Any]
+    ) -> None:
+        target_dir = self._outer_dir
+        _ensure_dir(target_dir, message="Failed to create outer output")
+        _write_json(
+            target_dir / "best_config.json",
+            _to_serializable(payload),
+            message="Failed to write global best config",
+        )
+
+    def write_global_metrics(
+        self, *, payload: Mapping[str, Any]
+    ) -> None:
+        target_dir = self._outer_dir
+        _ensure_dir(target_dir, message="Failed to create outer output")
+        _write_json(
+            target_dir / "metrics.json",
+            _to_serializable(payload),
+            message="Failed to write global metrics",
         )
 
 

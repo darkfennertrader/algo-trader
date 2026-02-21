@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pyro
 import pyro.distributions as dist
 import torch
+from pyro import poutine
 
 from .batch_utils import resolve_batch_shape
 from .protocols import ModelBatch, PyroModel
@@ -33,11 +34,14 @@ class TestModel(PyroModel):
             dist.LogNormal(zeros, ones).to_event(1),
         )
         with pyro.plate("data", T):
-            pyro.sample(
-                "obs",
-                dist.Normal(loc, scale).to_event(1),
-                obs=y_obs,
-            )
+            obs_dist = dist.Normal(loc, scale).to_event(1)
+            if batch.M is None:
+                pyro.sample("obs", obs_dist, obs=y_obs)
+            else:
+                with poutine.mask(  # pylint: disable=not-context-manager
+                    mask=batch.M
+                ):
+                    pyro.sample("obs", obs_dist, obs=y_obs)
 
 
 @register_model("test_model")

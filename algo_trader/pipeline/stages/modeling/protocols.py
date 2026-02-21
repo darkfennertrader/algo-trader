@@ -10,7 +10,7 @@ import torch
 class ModelBatch:
     X: torch.Tensor | None
     y: torch.Tensor | None
-    M: torch.Tensor | None = None
+    M: torch.BoolTensor | None = None
 
 
 class PyroModel(Protocol):

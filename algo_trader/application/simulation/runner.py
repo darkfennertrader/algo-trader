@@ -11,11 +11,13 @@ import torch
 
 from algo_trader.domain import ConfigError, SimulationError
 from algo_trader.domain.simulation import (
+    CandidateSpec,
     CPCVSplit,
     CVParams,
     DataPaths,
     FeatureCleaningState,
     ModelConfig,
+    ModelSelectionConfig,
     OuterFold,
     PanelDataset,
     PreprocessSpec,
@@ -49,8 +51,19 @@ from .artifacts import (
 )
 from .preprocessing import InnerCleaningSummaryContext, summarize_inner_cleaning
 from .registry import default_registries
-from .tuning import apply_param_updates, build_candidates
+from .tuning import (
+    apply_param_updates,
+    assign_candidate_ids,
+    build_candidates,
+    with_candidate_context,
+)
 from .tune_runner import RayTuneContext, select_best_with_ray
+from .model_selection import (
+    GlobalSelectionContext,
+    PostTuneSelectionContext,
+    select_best_candidate_global,
+    select_best_candidate_post_tune,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +74,7 @@ class CVStructure:
     groups: list[np.ndarray]
     outer_ids: list[int]
     outer_folds: list
+    group_by_index: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -71,6 +85,7 @@ class SimulationContext:
     preprocess_spec: PreprocessSpec
     cv: CVStructure
     feature_names: Sequence[str]
+    assets: Sequence[str]
 
 
 def _run_context(config_path: Path | None) -> Mapping[str, str]:
@@ -241,6 +256,7 @@ def _build_context(
         outer_test_group_ids=outer_ids,
         exclude_warmup=config.cv.exclude_warmup,
     )
+    group_by_index = _build_group_by_index(groups=groups, total_len=int(X.shape[0]))
     return SimulationContext(
         X=X,
         M=M,
@@ -251,9 +267,20 @@ def _build_context(
             groups=groups,
             outer_ids=outer_ids,
             outer_folds=outer_folds,
+            group_by_index=group_by_index,
         ),
         feature_names=list(dataset.features),
+        assets=list(dataset.assets),
     )
+
+
+def _build_group_by_index(
+    *, groups: Sequence[np.ndarray], total_len: int
+) -> np.ndarray:
+    group_by_index = np.full(total_len, -1, dtype=int)
+    for group_id, indices in enumerate(groups):
+        np.put(group_by_index, np.asarray(indices, dtype=int), group_id)
+    return group_by_index
 
 
 def _with_fold_seed(cv: CVParams, fold_id: int) -> CVParams:
@@ -280,11 +307,27 @@ class OuterFoldContext:
 def _evaluate_outer_folds(
     *,
     outer_context: OuterFoldContext,
-    candidates: Sequence[Mapping[str, Any]],
+    candidates: Sequence[CandidateSpec],
+) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
+    selection = outer_context.config.evaluation.model_selection
+    if selection.enable:
+        return _evaluate_outer_folds_global(
+            outer_context=outer_context,
+            candidates=candidates,
+        )
+    return _evaluate_outer_folds_per_outer(
+        outer_context=outer_context,
+        candidates=candidates,
+    )
+
+
+def _evaluate_outer_folds_per_outer(
+    *,
+    outer_context: OuterFoldContext,
+    candidates: Sequence[CandidateSpec],
 ) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
     chosen_configs: dict[int, Mapping[str, Any]] = {}
     outer_results: list[Mapping[str, Any]] = []
-
     for outer_fold in outer_context.context.cv.outer_folds:
         fold_result = _run_outer_fold(
             outer_context=outer_context,
@@ -294,7 +337,45 @@ def _evaluate_outer_folds(
         chosen_configs[outer_fold.k_test] = fold_result.best_config
         if fold_result.outer_result is not None:
             outer_results.append(fold_result.outer_result)
+    return chosen_configs, outer_results
 
+
+def _evaluate_outer_folds_global(
+    *,
+    outer_context: OuterFoldContext,
+    candidates: Sequence[CandidateSpec],
+) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
+    chosen_configs: dict[int, Mapping[str, Any]] = {}
+    outer_results: list[Mapping[str, Any]] = []
+    for outer_fold in outer_context.context.cv.outer_folds:
+        _run_outer_fold_inner_only(
+            outer_context=outer_context,
+            outer_fold=outer_fold,
+            candidates=candidates,
+        )
+    global_best = _select_global_best_config(
+        outer_context=outer_context,
+        candidates=candidates,
+    )
+    for outer_fold in outer_context.context.cv.outer_folds:
+        chosen_configs[outer_fold.k_test] = global_best
+    if _should_stop_after("inner", outer_context.flags):
+        return chosen_configs, outer_results
+    for outer_fold in outer_context.context.cv.outer_folds:
+        started = time.perf_counter()
+        result, cleaning_outer = _run_outer_evaluation(
+            outer_context=outer_context,
+            outer_fold=outer_fold,
+            best_config=global_best,
+        )
+        _log_outer_complete(
+            outer_k=outer_fold.k_test,
+            started=started,
+            phase="outer",
+            result=result,
+            cleaning=cleaning_outer,
+        )
+        outer_results.append(result)
     return chosen_configs, outer_results
 
 
@@ -304,11 +385,28 @@ class OuterFoldRunResult:
     outer_result: Mapping[str, Any] | None
 
 
+@dataclass(frozen=True)
+class BestConfigContext:
+    objective: Any
+    base_config: Mapping[str, Any]
+    candidates: Sequence[CandidateSpec]
+    resources: "BestConfigResources"
+
+
+@dataclass(frozen=True)
+class BestConfigResources:
+    tuning: TuningConfig
+    use_gpu: bool
+    model_selection: ModelSelectionConfig
+    artifacts: SimulationArtifacts
+    outer_k: int
+
+
 def _run_outer_fold(
     *,
     outer_context: OuterFoldContext,
     outer_fold: OuterFold,
-    candidates: Sequence[Mapping[str, Any]],
+    candidates: Sequence[CandidateSpec],
 ) -> OuterFoldRunResult:
     started = time.perf_counter()
     inner_splits = _build_inner_splits(
@@ -320,12 +418,27 @@ def _run_outer_fold(
         outer_fold=outer_fold,
         inner_splits=inner_splits,
     )
-    best_config = _select_best_config(
-        objective=objective,
-        base_config=outer_context.base_config,
+    _write_postprocess_metadata(
+        outer_context=outer_context,
+        outer_fold=outer_fold,
+        inner_splits=inner_splits,
         candidates=candidates,
-        tuning=outer_context.config.modeling.tuning,
-        use_gpu=outer_context.flags.use_gpu,
+    )
+    best_config = _select_best_config(
+        BestConfigContext(
+            objective=objective,
+            base_config=outer_context.base_config,
+            candidates=candidates,
+            resources=BestConfigResources(
+                tuning=outer_context.config.modeling.tuning,
+                use_gpu=outer_context.flags.use_gpu,
+                model_selection=(
+                    outer_context.config.evaluation.model_selection
+                ),
+                artifacts=outer_context.artifacts,
+                outer_k=outer_fold.k_test,
+            ),
+        )
     )
     _write_inner_outputs(
         outer_context=outer_context,
@@ -355,6 +468,60 @@ def _run_outer_fold(
         cleaning=cleaning_outer,
     )
     return OuterFoldRunResult(best_config=best_config, outer_result=result)
+
+
+def _run_outer_fold_inner_only(
+    *,
+    outer_context: OuterFoldContext,
+    outer_fold: OuterFold,
+    candidates: Sequence[CandidateSpec],
+) -> Mapping[str, Any]:
+    started = time.perf_counter()
+    inner_splits = _build_inner_splits(
+        outer_context=outer_context,
+        outer_fold=outer_fold,
+    )
+    objective = _build_inner_objective(
+        outer_context=outer_context,
+        outer_fold=outer_fold,
+        inner_splits=inner_splits,
+    )
+    _write_postprocess_metadata(
+        outer_context=outer_context,
+        outer_fold=outer_fold,
+        inner_splits=inner_splits,
+        candidates=candidates,
+    )
+    best_config = _select_best_config(
+        BestConfigContext(
+            objective=objective,
+            base_config=outer_context.base_config,
+            candidates=candidates,
+            resources=BestConfigResources(
+                tuning=outer_context.config.modeling.tuning,
+                use_gpu=outer_context.flags.use_gpu,
+                model_selection=(
+                    outer_context.config.evaluation.model_selection
+                ),
+                artifacts=outer_context.artifacts,
+                outer_k=outer_fold.k_test,
+            ),
+        )
+    )
+    _write_inner_outputs(
+        outer_context=outer_context,
+        outer_fold=outer_fold,
+        inner_splits=inner_splits,
+        best_config=best_config,
+    )
+    _log_outer_complete(
+        outer_k=outer_fold.k_test,
+        started=started,
+        phase="inner",
+        result=None,
+        cleaning=None,
+    )
+    return best_config
 
 
 def _build_inner_splits(
@@ -391,6 +558,8 @@ def _build_inner_objective(
                 M=outer_context.context.M,
                 y=outer_context.context.y,
             ),
+            artifacts=outer_context.artifacts,
+            group_by_index=outer_context.context.cv.group_by_index,
             inner_splits=inner_splits,
             params=InnerObjectiveParams(
                 preprocess_spec=outer_context.context.preprocess_spec,
@@ -404,6 +573,7 @@ def _build_inner_objective(
                     outer_context.config.modeling.tuning.aggregate.penalty
                 ),
             ),
+            model_selection=outer_context.config.evaluation.model_selection,
         ),
         hooks=outer_context.hooks,
     )
@@ -434,6 +604,40 @@ def _write_inner_outputs(
     outer_context.artifacts.write_inner_cleaning_summary(
         outer_k=outer_fold.k_test,
         summary=inner_summary,
+    )
+
+
+def _write_postprocess_metadata(
+    *,
+    outer_context: OuterFoldContext,
+    outer_fold: OuterFold,
+    inner_splits: Sequence[CPCVSplit],
+    candidates: Sequence[CandidateSpec],
+) -> None:
+    selection = outer_context.config.evaluation.model_selection
+    if not selection.enable:
+        return
+    metadata = {
+        "outer_k": int(outer_fold.k_test),
+        "num_candidates": int(len(candidates)),
+        "num_splits": int(len(inner_splits)),
+        "num_pp_samples": int(
+            outer_context.config.evaluation.predictive.num_samples_inner
+        ),
+        "assets": list(outer_context.context.assets),
+        "phase_name": selection.phase_name,
+        "candidates": {
+            str(item.candidate_id): item.params for item in candidates
+        },
+        "splits_path": str(
+            outer_context.artifacts.base_dir
+            / "inner"
+            / f"outer_{outer_fold.k_test}"
+            / "splits.json"
+        ),
+    }
+    outer_context.artifacts.write_postprocess_metadata(
+        outer_k=outer_fold.k_test, metadata=metadata
     )
 
 
@@ -554,15 +758,16 @@ def _write_candidate_artifacts(
     *,
     config: SimulationConfig,
     artifacts: SimulationArtifacts,
-) -> list[dict[str, Any]]:
+) -> list[CandidateSpec]:
     tuning = config.modeling.tuning
     candidates = build_candidates(
         space=tuning.space,
         num_samples=tuning.num_samples,
         seed=tuning.seed,
     )
-    artifacts.write_candidates(candidates=candidates)
-    return candidates
+    candidate_specs = assign_candidate_ids(candidates)
+    artifacts.write_candidates(candidates=candidate_specs)
+    return candidate_specs
 
 
 def _should_stop_after(phase: str, flags: SimulationFlags) -> bool:
@@ -607,10 +812,11 @@ def _build_base_config(
         "guide_name": model.guide_name,
         "model_params": dict(model.params),
         "training": {
-            "trainer_name": training.trainer_name,
             "num_steps": training.num_steps,
             "learning_rate": training.learning_rate,
-            "batch_size": training.batch_size,
+            "tbptt_window_len": training.tbptt_window_len,
+            "tbptt_burn_in_len": training.tbptt_burn_in_len,
+            "grad_accum_steps": training.grad_accum_steps,
             "num_elbo_particles": training.num_elbo_particles,
             "log_every": training.log_every,
         },
@@ -618,45 +824,94 @@ def _build_base_config(
 
 
 def _select_best_config(
-    *,
-    objective,
-    base_config: Mapping[str, Any],
-    candidates: Sequence[Mapping[str, Any]],
-    tuning: TuningConfig,
-    use_gpu: bool,
+    context: BestConfigContext,
 ) -> Mapping[str, Any]:
-    if tuning.engine == "ray":
-        return select_best_with_ray(
+    resources = context.resources
+    if resources.tuning.engine == "ray":
+        best_config = select_best_with_ray(
             RayTuneContext(
-                objective=objective,
-                base_config=base_config,
-                candidates=candidates,
-                resources=tuning.ray.resources,
-                use_gpu=use_gpu,
-                address=tuning.ray.address,
+                objective=context.objective,
+                base_config=context.base_config,
+                candidates=context.candidates,
+                resources=resources.tuning.ray.resources,
+                use_gpu=resources.use_gpu,
+                address=resources.tuning.ray.address,
             )
         )
-    return _select_best_config_local(
-        objective=objective,
-        base_config=base_config,
-        candidates=candidates,
+    else:
+        best_config = _select_best_config_local(
+            objective=context.objective,
+            base_config=context.base_config,
+            candidates=context.candidates,
+        )
+    if not resources.model_selection.enable:
+        return best_config
+    selection = select_best_candidate_post_tune(
+        PostTuneSelectionContext(
+            artifacts=resources.artifacts,
+            outer_k=resources.outer_k,
+            candidates=context.candidates,
+            model_selection=resources.model_selection,
+            use_gpu=resources.use_gpu,
+        )
     )
+    params = _candidate_params_by_id(
+        candidates=context.candidates,
+        candidate_id=selection.best_candidate_id,
+    )
+    return apply_param_updates(context.base_config, params)
 
 
 def _select_best_config_local(
     *,
     objective,
     base_config: Mapping[str, Any],
-    candidates: Sequence[Mapping[str, Any]],
+    candidates: Sequence[CandidateSpec],
 ) -> Mapping[str, Any]:
     best_score = float("-inf")
     best_config: Mapping[str, Any] = dict(base_config)
 
     for candidate in candidates:
-        merged = apply_param_updates(base_config, candidate)
+        merged = apply_param_updates(base_config, candidate.params)
+        merged = with_candidate_context(merged, candidate.candidate_id)
         score = float(objective(merged))
         if score > best_score:
             best_score = score
             best_config = merged
 
+    return best_config
+
+
+def _candidate_params_by_id(
+    *, candidates: Sequence[CandidateSpec], candidate_id: int
+) -> Mapping[str, Any]:
+    for candidate in candidates:
+        if candidate.candidate_id == candidate_id:
+            return candidate.params
+    raise SimulationError(
+        "Post-tune selection returned unknown candidate id",
+        context={"candidate_id": str(candidate_id)},
+    )
+
+
+def _select_global_best_config(
+    *,
+    outer_context: OuterFoldContext,
+    candidates: Sequence[CandidateSpec],
+) -> Mapping[str, Any]:
+    selection = select_best_candidate_global(
+        GlobalSelectionContext(
+            artifacts=outer_context.artifacts,
+            outer_ids=outer_context.context.cv.outer_ids,
+            candidates=candidates,
+            model_selection=(
+                outer_context.config.evaluation.model_selection
+            ),
+        )
+    )
+    params = _candidate_params_by_id(
+        candidates=candidates, candidate_id=selection.best_candidate_id
+    )
+    best_config = apply_param_updates(outer_context.base_config, params)
+    outer_context.artifacts.write_global_best_config(payload=best_config)
     return best_config

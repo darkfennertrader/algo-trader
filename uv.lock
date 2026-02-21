@@ -141,7 +141,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ibapi", directory = "../../IBKR/twsapi_macunix.1042.01/IBJts/source/pythonclient" },
+    { name = "ibapi", directory = "vendor/ibapi" },
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "pyro-ppl", specifier = ">=1.9.1" },
     { name = "pytest", specifier = ">=9.0.2" },
@@ -597,7 +597,7 @@ wheels = [
 [[package]]
 name = "ibapi"
 version = "10.42.1"
-source = { directory = "../../IBKR/twsapi_macunix.1042.01/IBJts/source/pythonclient" }
+source = { directory = "vendor/ibapi" }
 dependencies = [
     { name = "protobuf" },
 ]

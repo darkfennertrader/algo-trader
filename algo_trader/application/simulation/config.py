@@ -27,6 +27,12 @@ from algo_trader.domain.simulation import (
     SimulationConfig,
     SimulationFlags,
     TrainingConfig,
+    ModelSelectionBatching,
+    ModelSelectionBootstrap,
+    ModelSelectionComplexity,
+    ModelSelectionConfig,
+    ModelSelectionESBand,
+    ModelSelectionTail,
     TuningAggregateConfig,
     TuningConfig,
     TuningRayConfig,
@@ -37,7 +43,7 @@ from algo_trader.domain.simulation import (
 )
 
 DEFAULT_CONFIG_PATH = (
-    Path(__file__).resolve().parents[3] / "config" / "model_selection.yml"
+    Path(__file__).resolve().parents[3] / "config" / "simulation.yml"
 )
 
 
@@ -558,12 +564,151 @@ def _build_evaluation_spec(
     predictive = _build_section(raw, "predictive", PredictiveConfig, config_path)
     allocation = _build_section(raw, "allocation", AllocationConfig, config_path)
     cost = _build_section(raw, "cost", CostConfig, config_path)
+    model_selection = _build_model_selection_config(raw, config_path)
     return EvaluationSpec(
         scoring=scoring,
         predictive=predictive,
         allocation=allocation,
         cost=cost,
+        model_selection=model_selection,
     )
+
+
+def _build_model_selection_config(
+    raw: Mapping[str, Any], config_path: Path
+) -> ModelSelectionConfig:
+    section = raw.get("model_selection", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, Mapping):
+        raise ConfigError(
+            f"model_selection must be a mapping in {config_path}"
+        )
+    enable = bool(section.get("enable", False))
+    phase_name = str(
+        section.get("phase_name", "post_tune_model_selection")
+    )
+    es_band = _build_model_selection_es_band(section, config_path)
+    bootstrap = _build_model_selection_bootstrap(section, config_path)
+    tail = _build_model_selection_tail(section, config_path)
+    batching = _build_model_selection_batching(section, config_path)
+    complexity = _build_model_selection_complexity(section, config_path)
+    return ModelSelectionConfig(
+        enable=enable,
+        phase_name=phase_name,
+        es_band=es_band,
+        bootstrap=bootstrap,
+        tail=tail,
+        batching=batching,
+        complexity=complexity,
+    )
+
+
+def _build_model_selection_es_band(
+    section: Mapping[str, Any], config_path: Path
+) -> ModelSelectionESBand:
+    raw_band = section.get("es_band", {})
+    if raw_band is None:
+        raw_band = {}
+    if not isinstance(raw_band, Mapping):
+        raise ConfigError(
+            f"model_selection.es_band must be a mapping in {config_path}"
+        )
+    c = float(raw_band.get("c", 1.0))
+    min_keep = int(raw_band.get("min_keep", 1))
+    max_keep = int(raw_band.get("max_keep", 10))
+    if min_keep <= 0:
+        raise ConfigError(
+            f"model_selection.es_band.min_keep must be positive in {config_path}"
+        )
+    if max_keep <= 0:
+        raise ConfigError(
+            f"model_selection.es_band.max_keep must be positive in {config_path}"
+        )
+    if min_keep > max_keep:
+        raise ConfigError(
+            f"model_selection.es_band.min_keep must be <= max_keep in {config_path}"
+        )
+    return ModelSelectionESBand(c=c, min_keep=min_keep, max_keep=max_keep)
+
+
+def _build_model_selection_bootstrap(
+    section: Mapping[str, Any], config_path: Path
+) -> ModelSelectionBootstrap:
+    raw_boot = section.get("bootstrap", {})
+    if raw_boot is None:
+        raw_boot = {}
+    if not isinstance(raw_boot, Mapping):
+        raise ConfigError(
+            f"model_selection.bootstrap must be a mapping in {config_path}"
+        )
+    num_samples = int(raw_boot.get("num_samples", 500))
+    seed = int(raw_boot.get("seed", 123))
+    if num_samples <= 0:
+        raise ConfigError(
+            f"model_selection.bootstrap.num_samples must be positive in {config_path}"
+        )
+    return ModelSelectionBootstrap(num_samples=num_samples, seed=seed)
+
+
+def _build_model_selection_tail(
+    section: Mapping[str, Any], config_path: Path
+) -> ModelSelectionTail:
+    raw_tail = section.get("tail", {})
+    if raw_tail is None:
+        raw_tail = {}
+    if not isinstance(raw_tail, Mapping):
+        raise ConfigError(
+            f"model_selection.tail must be a mapping in {config_path}"
+        )
+    alpha = float(raw_tail.get("alpha", 0.1))
+    if not 0.0 < alpha < 1.0:
+        raise ConfigError(
+            f"model_selection.tail.alpha must be in (0, 1) in {config_path}"
+        )
+    return ModelSelectionTail(alpha=alpha)
+
+
+def _build_model_selection_batching(
+    section: Mapping[str, Any], config_path: Path
+) -> ModelSelectionBatching:
+    raw_batch = section.get("batching", {})
+    if raw_batch is None:
+        raw_batch = {}
+    if not isinstance(raw_batch, Mapping):
+        raise ConfigError(
+            f"model_selection.batching must be a mapping in {config_path}"
+        )
+    candidates = int(raw_batch.get("candidates", 1))
+    splits = int(raw_batch.get("splits", 1))
+    if candidates <= 0:
+        raise ConfigError(
+            f"model_selection.batching.candidates must be positive in {config_path}"
+        )
+    if splits <= 0:
+        raise ConfigError(
+            f"model_selection.batching.splits must be positive in {config_path}"
+        )
+    return ModelSelectionBatching(candidates=candidates, splits=splits)
+
+
+def _build_model_selection_complexity(
+    section: Mapping[str, Any], config_path: Path
+) -> ModelSelectionComplexity:
+    raw_complexity = section.get("complexity", {})
+    if raw_complexity is None:
+        raw_complexity = {}
+    if not isinstance(raw_complexity, Mapping):
+        raise ConfigError(
+            f"model_selection.complexity must be a mapping in {config_path}"
+        )
+    method = str(raw_complexity.get("method", "random")).strip().lower()
+    if method != "random":
+        raise ConfigError(
+            f"model_selection.complexity.method must be 'random' in {config_path}"
+        )
+    seed = int(raw_complexity.get("seed", 123))
+    return ModelSelectionComplexity(method="random", seed=seed)
 
 
 def _build_section(

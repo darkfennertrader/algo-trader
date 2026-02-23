@@ -53,6 +53,7 @@ class SimulationArtifacts:
         self._inner_dir = self._base_dir / "inner"
         self._outer_dir = self._base_dir / "outer"
         self._cv_dir = self._base_dir / "cv"
+        self._prebuild_dir = self._base_dir / "artifacts" / "prebuild"
         _ensure_dir(self._base_dir, message="Failed to create simulation output")
 
     @property
@@ -243,6 +244,14 @@ class SimulationArtifacts:
             message="Failed to write candidate configs",
         )
 
+    def write_prebuild(self, *, payload: Mapping[str, Any]) -> None:
+        _ensure_dir(self._prebuild_dir, message="Failed to create prebuild output")
+        _write_json(
+            self._prebuild_dir / "prebuild.json",
+            _to_serializable(payload),
+            message="Failed to write prebuild payload",
+        )
+
     def write_postprocess_metadata(
         self,
         *,
@@ -272,6 +281,23 @@ class SimulationArtifacts:
             payload,
             target_dir / filename,
             message="Failed to write postprocess candidate split",
+        )
+
+    def write_postprocess_diagnostics(
+        self,
+        *,
+        outer_k: int,
+        candidate_id: int,
+        split_id: int,
+        payload: Mapping[str, Any],
+    ) -> None:
+        target_dir = self._postprocess_dir(outer_k) / "diagnostics"
+        _ensure_dir(target_dir, message="Failed to create postprocess diagnostics")
+        filename = f"candidate_{candidate_id:04d}_split_{split_id:04d}.json"
+        _write_json(
+            target_dir / filename,
+            _to_serializable(payload),
+            message="Failed to write postprocess diagnostics",
         )
 
     def write_postprocess_metrics(

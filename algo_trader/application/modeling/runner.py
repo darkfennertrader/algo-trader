@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 import pandas as pd
 import pyro
@@ -286,14 +286,18 @@ def _load_frame(path: Path) -> pd.DataFrame:
     return numeric
 
 
-def _resolve_model(name: str) -> modeling.PyroModel:
+def _resolve_model(
+    name: str, params: Mapping[str, Any] | None = None
+) -> modeling.PyroModel:
     registry = modeling.default_model_registry()
-    return registry.get(name)
+    return registry.get(name, params)
 
 
-def _resolve_guide(name: str) -> modeling.PyroGuide:
+def _resolve_guide(
+    name: str, params: Mapping[str, Any] | None = None
+) -> modeling.PyroGuide:
     registry = modeling.default_guide_registry()
-    return registry.get(name)
+    return registry.get(name, params)
 
 
 def _run_inference(

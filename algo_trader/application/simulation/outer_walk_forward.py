@@ -190,7 +190,9 @@ def _prepare_batches(
         scaler=scaler_t,
         spec=eval_context.preprocess_spec,
     )
-    X_train_t = transform_X(eval_context.X, eval_context.M, train_idx, state_t)
+    X_train_t = transform_X(
+        eval_context.X, eval_context.M, train_idx, state_t, validate=True
+    )
     y_train_t = eval_context.y[
         torch.as_tensor(train_idx, dtype=torch.long, device=eval_context.y.device)
     ]

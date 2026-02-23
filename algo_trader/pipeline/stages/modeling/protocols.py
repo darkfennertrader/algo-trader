@@ -11,6 +11,7 @@ class ModelBatch:
     X: torch.Tensor | None
     y: torch.Tensor | None
     M: torch.BoolTensor | None = None
+    obs_scale: float | None = None
 
 
 class PyroModel(Protocol):

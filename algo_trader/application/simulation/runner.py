@@ -16,7 +16,6 @@ from algo_trader.domain.simulation import (
     CVParams,
     DataPaths,
     FeatureCleaningState,
-    ModelConfig,
     ModelSelectionConfig,
     OuterFold,
     PanelDataset,
@@ -66,6 +65,7 @@ from .tune_runner import (
 from .runner_helpers import (
     build_base_config,
     build_group_by_index,
+    outer_fold_payload,
     resolve_outer_test_group_ids,
     should_stop_after,
     with_fold_seed,
@@ -78,9 +78,9 @@ from .model_selection import (
     select_best_candidate_global,
     select_best_candidate_post_tune,
 )
+from .prebuild import PrebuildInputs, apply_prebuild, maybe_run_prebuild
 
 logger = logging.getLogger(__name__)
-
 
 @dataclass(frozen=True)
 class CVStructure:
@@ -89,7 +89,6 @@ class CVStructure:
     outer_ids: list[int]
     outer_folds: list
     group_by_index: np.ndarray
-
 
 @dataclass(frozen=True)
 class SimulationContext:
@@ -101,10 +100,8 @@ class SimulationContext:
     feature_names: Sequence[str]
     assets: Sequence[str]
 
-
 def _run_context(config_path: Path | None) -> Mapping[str, str]:
     return {"config": str(config_path or DEFAULT_CONFIG_PATH)}
-
 
 @log_boundary("simulation.run", context=_run_context)
 def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
@@ -136,13 +133,11 @@ def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
     setup.outer_context.artifacts.write_cv_summary(results)
     return results
 
-
 @dataclass(frozen=True)
 class RunSetup:
     outer_context: OuterFoldContext
     candidates: Sequence[CandidateSpec]
     early_results: Mapping[str, Any] | None
-
 
 def _prepare_run_state(
     *, config: SimulationConfig, device: str
@@ -204,7 +199,6 @@ def _prepare_run_state(
         early_results=early_results,
     )
 
-
 def _resolve_run_inputs(
     *, config: SimulationConfig, device: str
 ) -> tuple[Path, PanelDataset, bool]:
@@ -216,7 +210,6 @@ def _resolve_run_inputs(
         config=config, base_dir=base_dir, device=device
     )
     return base_dir, dataset, reused_inputs
-
 
 def _maybe_finalize_inputs(
     *,
@@ -233,7 +226,6 @@ def _maybe_finalize_inputs(
     artifacts.write_results(results)
     return results
 
-
 def _prepare_candidates(
     *,
     config: SimulationConfig,
@@ -247,11 +239,24 @@ def _prepare_candidates(
             groups=context.cv.groups,
             outer_ids=context.cv.outer_ids,
             outer_folds=[
-                _outer_fold_payload(fold)
+                outer_fold_payload(fold)
                 for fold in context.cv.outer_folds
             ],
             timestamps=dataset.dates,
         )
+    )
+    prebuild = maybe_run_prebuild(
+        prebuild=config.modeling.model.prebuild,
+        inputs=PrebuildInputs(
+            X=context.X,
+            y=context.y,
+            M=context.M,
+            outer_folds=context.cv.outer_folds,
+            group_by_index=context.cv.group_by_index,
+            feature_names=context.feature_names,
+            assets=context.assets,
+        ),
+        artifacts=artifacts,
     )
     candidates = _write_candidate_artifacts(
         config=config, artifacts=artifacts
@@ -259,8 +264,9 @@ def _prepare_candidates(
     base_config = build_base_config(
         config.modeling.model, config.modeling.training
     )
+    if prebuild is not None:
+        base_config = apply_prebuild(base_config, prebuild)
     return candidates, base_config
-
 
 def _maybe_finalize_cv(
     *,
@@ -278,12 +284,10 @@ def _maybe_finalize_cv(
     artifacts.write_cv_summary(results)
     return results
 
-
 def _resolve_device(use_gpu: bool) -> str:
     if use_gpu and not torch.cuda.is_available():
         raise ConfigError("use_gpu is true but CUDA is not available")
     return "cuda" if use_gpu else "cpu"
-
 
 def _resolve_preprocess_spec(
     spec: PreprocessSpec,
@@ -292,15 +296,17 @@ def _resolve_preprocess_spec(
 ) -> PreprocessSpec:
     if not use_feature_names_for_scaling:
         return spec
-    if spec.scaling.feature_names is not None:
+    if spec.scaling.inputs.feature_names is not None:
         return spec
     return replace(
         spec,
         scaling=replace(
-            spec.scaling, feature_names=list(dataset.features)
+            spec.scaling,
+            inputs=replace(
+                spec.scaling.inputs, feature_names=list(dataset.features)
+            ),
         ),
     )
-
 
 def _load_dataset(config: SimulationConfig, device: str) -> PanelDataset:
     registries = default_registries()
@@ -308,10 +314,8 @@ def _load_dataset(config: SimulationConfig, device: str) -> PanelDataset:
         "feature_store_panel", config=config.data, device=device
     )
 
-
 def _panel_tensor_path(base_dir: Path) -> Path:
     return base_dir / "inputs" / "panel_tensor.pt"
-
 
 def _load_dataset_for_run(
     *,
@@ -341,7 +345,6 @@ def _load_dataset_for_run(
         return dataset, True
     dataset = _load_dataset(config, device)
     return dataset, False
-
 
 def _build_context(
     config: SimulationConfig, dataset: PanelDataset
@@ -385,7 +388,6 @@ def _build_context(
         assets=list(dataset.assets),
     )
 
-
 @dataclass(frozen=True)
 class OuterFoldContext:
     config: SimulationConfig
@@ -394,7 +396,6 @@ class OuterFoldContext:
     hooks: SimulationHooks
     artifacts: SimulationArtifacts
     flags: SimulationFlags
-
 
 def _evaluate_outer_folds(
     *,
@@ -411,7 +412,6 @@ def _evaluate_outer_folds(
         outer_context=outer_context,
         candidates=candidates,
     )
-
 
 def _evaluate_outer_folds_per_outer(
     *,
@@ -430,7 +430,6 @@ def _evaluate_outer_folds_per_outer(
         if fold_result.outer_result is not None:
             outer_results.append(fold_result.outer_result)
     return chosen_configs, outer_results
-
 
 def _evaluate_outer_folds_global(
     *,
@@ -474,18 +473,15 @@ def _evaluate_outer_folds_global(
         outer_results.append(result)
     return chosen_configs, outer_results
 
-
 @dataclass(frozen=True)
 class OuterFoldRunResult:
     best_config: Mapping[str, Any]
     outer_result: Mapping[str, Any] | None
 
-
 @dataclass(frozen=True)
 class GlobalBestConfig:
     best_config: Mapping[str, Any]
     candidate_id: int
-
 
 @dataclass(frozen=True)
 class BestConfigContext:
@@ -494,7 +490,6 @@ class BestConfigContext:
     candidates: Sequence[CandidateSpec]
     resources: "BestConfigResources"
 
-
 @dataclass(frozen=True)
 class BestConfigResources:
     tuning: TuningConfig
@@ -502,7 +497,6 @@ class BestConfigResources:
     model_selection: ModelSelectionConfig
     artifacts: SimulationArtifacts
     outer_k: int
-
 
 def _run_outer_fold(
     *,
@@ -571,7 +565,6 @@ def _run_outer_fold(
     )
     return OuterFoldRunResult(best_config=best_config, outer_result=result)
 
-
 def _run_outer_fold_inner_only(
     *,
     outer_context: OuterFoldContext,
@@ -625,7 +618,6 @@ def _run_outer_fold_inner_only(
     )
     return best_config
 
-
 def _build_inner_splits(
     *,
     outer_context: OuterFoldContext,
@@ -645,7 +637,6 @@ def _build_inner_splits(
             context={"outer_group": str(outer_fold.k_test)},
         )
     return inner_splits
-
 
 def _build_inner_objective(
     *,
@@ -680,7 +671,6 @@ def _build_inner_objective(
         hooks=outer_context.hooks,
     )
 
-
 def _write_inner_outputs(
     *,
     outer_context: OuterFoldContext,
@@ -707,7 +697,6 @@ def _write_inner_outputs(
         outer_k=outer_fold.k_test,
         summary=inner_summary,
     )
-
 
 def _write_postprocess_metadata(
     *,
@@ -741,7 +730,6 @@ def _write_postprocess_metadata(
     outer_context.artifacts.write_postprocess_metadata(
         outer_k=outer_fold.k_test, metadata=metadata
     )
-
 
 def _run_outer_evaluation(
     *,
@@ -780,7 +768,6 @@ def _run_outer_evaluation(
     )
     return result, cleaning_outer
 
-
 def _log_outer_complete(
     *,
     outer_k: int,
@@ -808,7 +795,6 @@ def _log_outer_complete(
         payload,
     )
 
-
 def _build_artifacts(
     *,
     base_dir: Path,
@@ -830,16 +816,6 @@ def _build_artifacts(
         )
     return artifacts
 
-
-def _outer_fold_payload(outer_fold: OuterFold) -> Mapping[str, Any]:
-    return {
-        "k_test": int(outer_fold.k_test),
-        "train_idx": outer_fold.train_idx.tolist(),
-        "test_idx": outer_fold.test_idx.tolist(),
-        "inner_group_ids": list(outer_fold.inner_group_ids),
-    }
-
-
 def _build_results(
     config: SimulationConfig,
     context: SimulationContext,
@@ -855,7 +831,6 @@ def _build_results(
         "outer_results": outer_results,
     }
 
-
 def _write_candidate_artifacts(
     *,
     config: SimulationConfig,
@@ -870,7 +845,6 @@ def _write_candidate_artifacts(
     candidate_specs = assign_candidate_ids(candidates)
     artifacts.write_candidates(candidates=candidate_specs)
     return candidate_specs
-
 
 def _select_best_config(
     context: BestConfigContext,
@@ -910,7 +884,6 @@ def _select_best_config(
     )
     return apply_param_updates(context.base_config, params)
 
-
 def _select_best_config_local(
     *,
     objective,
@@ -930,7 +903,6 @@ def _select_best_config_local(
 
     return best_config
 
-
 def _candidate_params_by_id(
     *, candidates: Sequence[CandidateSpec], candidate_id: int
 ) -> Mapping[str, Any]:
@@ -941,7 +913,6 @@ def _candidate_params_by_id(
         "Post-tune selection returned unknown candidate id",
         context={"candidate_id": str(candidate_id)},
     )
-
 
 def _select_global_best_config(
     *,
@@ -967,7 +938,6 @@ def _select_global_best_config(
         best_config=best_config,
         candidate_id=int(selection.best_candidate_id),
     )
-
 
 def _run_global_diagnostics(
     *,

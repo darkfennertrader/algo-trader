@@ -9,6 +9,7 @@ from algo_trader.domain import ConfigError
 from algo_trader.domain.simulation import (
     CVParams,
     ModelConfig,
+    OuterFold,
     SimulationFlags,
     TrainingConfig,
 )
@@ -72,16 +73,32 @@ def build_base_config(
     training: TrainingConfig,
 ) -> dict[str, Any]:
     return {
-        "model_name": model.model_name,
-        "guide_name": model.guide_name,
-        "model_params": dict(model.params),
-        "training": {
-            "num_steps": training.num_steps,
-            "learning_rate": training.learning_rate,
-            "tbptt_window_len": training.tbptt_window_len,
-            "tbptt_burn_in_len": training.tbptt_burn_in_len,
-            "grad_accum_steps": training.grad_accum_steps,
-            "num_elbo_particles": training.num_elbo_particles,
-            "log_every": training.log_every,
+        "model": {
+            "model_name": model.model_name,
+            "guide_name": model.guide_name,
+            "params": dict(model.params),
+            "guide_params": dict(model.guide_params),
         },
+        "training": {
+            "target_normalization": training.target_normalization,
+            "log_prob_scaling": training.log_prob_scaling,
+            "svi": {
+                "num_steps": training.svi.num_steps,
+                "learning_rate": training.svi.learning_rate,
+                "tbptt_window_len": training.svi.tbptt_window_len,
+                "tbptt_burn_in_len": training.svi.tbptt_burn_in_len,
+                "grad_accum_steps": training.svi.grad_accum_steps,
+                "num_elbo_particles": training.svi.num_elbo_particles,
+                "log_every": training.svi.log_every,
+            }
+        },
+    }
+
+
+def outer_fold_payload(outer_fold: OuterFold) -> Mapping[str, Any]:
+    return {
+        "k_test": int(outer_fold.k_test),
+        "train_idx": outer_fold.train_idx.tolist(),
+        "test_idx": outer_fold.test_idx.tolist(),
+        "inner_group_ids": list(outer_fold.inner_group_ids),
     }

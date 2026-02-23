@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Mapping
 
 import pyro
 import pyro.distributions as dist
@@ -48,5 +49,6 @@ class TestGuide(PyroGuide):
 
 
 @register_guide("test_guide")
-def build_test_guide() -> PyroGuide:
+def build_test_guide(params: Mapping[str, Any]) -> PyroGuide:
+    _ = params
     return TestGuide()

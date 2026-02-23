@@ -15,13 +15,19 @@ def test_build_tbptt_batches_masks_burn_in_and_invalid_targets() -> None:
         ]
     )
     params = hooks._TrainingParams(  # pylint: disable=protected-access
-        steps=1,
-        learning_rate=1e-3,
-        num_elbo_particles=1,
-        log_every=None,
-        tbptt_window_len=3,
-        tbptt_burn_in_len=1,
-        grad_accum_steps=1,
+        svi=hooks._SVIParams(  # pylint: disable=protected-access
+            steps=1,
+            learning_rate=1e-3,
+            num_elbo_particles=1,
+            log_every=None,
+            grad_accum_steps=1,
+        ),
+        tbptt=hooks._TBPTTParams(  # pylint: disable=protected-access
+            window_len=3,
+            burn_in_len=1,
+        ),
+        log_prob_scaling=False,
+        target_normalization=False,
     )
 
     batches = hooks._build_tbptt_batches(  # pylint: disable=protected-access
@@ -31,6 +37,10 @@ def test_build_tbptt_batches_masks_burn_in_and_invalid_targets() -> None:
     assert len(batches) == 2
     assert batches[0].M is not None
     assert batches[1].M is not None
-    assert batches[0].M.tolist() == [False, True, False]
-    assert batches[1].M.tolist() == [False, True]
+    assert batches[0].M.tolist() == [
+        [False, False],
+        [True, True],
+        [False, True],
+    ]
+    assert batches[1].M.tolist() == [[False, False], [True, True]]
     assert torch.isfinite(batches[0].y).all()

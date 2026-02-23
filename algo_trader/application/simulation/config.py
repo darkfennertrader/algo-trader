@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal, Mapping, cast
+from typing import Any, Literal, Mapping
 
 import yaml
 
@@ -18,31 +18,32 @@ from algo_trader.domain.simulation import (
     DataConfig,
     DiagnosticsConfig,
     EvaluationSpec,
+    GuardrailSpec,
     FanChartsConfig,
     ModelConfig,
     ModelingSpec,
     OuterConfig,
     PredictiveConfig,
     PreprocessSpec,
+    WinsorSpec,
+    ClipSpec,
+    ScalingInputSpec,
     ScalingSpec,
     ScoringConfig,
     SimulationConfig,
     SimulationFlags,
     TrainingConfig,
+    TrainingSVIConfig,
     ModelSelectionBatching,
     ModelSelectionBootstrap,
     ModelSelectionComplexity,
     ModelSelectionConfig,
     ModelSelectionESBand,
     ModelSelectionTail,
-    TuningAggregateConfig,
-    TuningConfig,
-    TuningRayConfig,
-    TuningResourcesConfig,
-    TuningParamSpec,
-    TuningParamType,
-    TuningTransform,
+    ModelPrebuildConfig,
 )
+from .config_tuning import build_tuning_config
+from .config_utils import coerce_mapping, require_bool, require_string
 
 DEFAULT_CONFIG_PATH = (
     Path(__file__).resolve().parents[3] / "config" / "simulation.yml"
@@ -96,8 +97,6 @@ def _build_flags(raw: Mapping[str, Any]) -> SimulationFlags:
 
 SimulationMode = Literal["dry_run", "stub", "full"]
 StopAfter = Literal["inputs", "cv", "inner", "outer", "results"] | None
-TuningEngine = Literal["local", "ray"]
-AggregateMethod = Literal["mean", "median", "mean_minus_std"]
 
 
 def _normalize_simulation_mode(value: object) -> SimulationMode:
@@ -164,399 +163,168 @@ def _build_outer_config(
 def _build_modeling_spec(
     raw: Mapping[str, Any], config_path: Path
 ) -> ModelingSpec:
-    model = _build_section(raw, "model", ModelConfig, config_path)
-    training = _build_section(raw, "training", TrainingConfig, config_path)
-    tuning = _build_tuning_config(raw, config_path)
+    model = _build_model_config(raw, config_path)
+    training = _build_training_config(raw, config_path)
+    tuning = build_tuning_config(raw, config_path)
     return ModelingSpec(model=model, training=training, tuning=tuning)
 
 
-def _build_tuning_config(
+def _build_model_config(
     raw: Mapping[str, Any], config_path: Path
-) -> TuningConfig:
-    section = raw.get("tuning")
+) -> ModelConfig:
+    section = raw.get("model")
     if not isinstance(section, Mapping):
-        raise ConfigError(f"tuning must be a mapping in {config_path}")
-    try:
-        space = _build_tuning_space(
-            section.get("space", None), config_path
-        )
-        aggregate = _build_tuning_aggregate_config(
-            section.get("aggregate", {}), config_path
-        )
-        resources = _build_tuning_resources_config(
-            section.get("resources", {}), config_path
-        )
-        ray = _build_tuning_ray_config(
-            section.get("ray", {}), resources, config_path
-        )
-        tuning = TuningConfig(
-            space=space,
-            num_samples=int(section.get("num_samples", 1)),
-            seed=int(section.get("seed", 0)),
-            kwargs=section.get("kwargs", {}),
-            engine=section.get("engine", "local"),
-            aggregate=aggregate,
-            ray=ray,
-        )
-    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"model must be a mapping in {config_path}")
+    extra = set(section) - {
+        "model_name",
+        "guide_name",
+        "params",
+        "guide_params",
+        "prebuild",
+    }
+    if extra:
         raise ConfigError(
-            f"Invalid tuning configuration in {config_path}",
-            context={"section": "tuning"},
-        ) from exc
-    return _normalize_tuning_config(tuning, config_path)
-
-
-def _normalize_tuning_config(
-    tuning: TuningConfig, config_path: Path
-) -> TuningConfig:
-    if tuning.num_samples <= 0:
-        raise ConfigError(
-            f"tuning.num_samples must be positive in {config_path}"
+            f"model contains unknown keys in {config_path}",
+            context={"keys": ", ".join(sorted(extra))},
         )
-    if tuning.seed < 0:
-        raise ConfigError(
-            f"tuning.seed must be non-negative in {config_path}"
-        )
-    return replace(
-        tuning,
-        engine=_normalize_tuning_engine(tuning.engine),
-        aggregate=_normalize_aggregate_config(
-            tuning.aggregate, config_path
-        ),
-        ray=_normalize_tuning_ray_config(tuning.ray, config_path),
+    model_name = require_string(
+        section.get("model_name"),
+        field="model.model_name",
+        config_path=config_path,
+    )
+    guide_name = require_string(
+        section.get("guide_name"),
+        field="model.guide_name",
+        config_path=config_path,
+    )
+    params = coerce_mapping(
+        section.get("params"),
+        field="model.params",
+        config_path=config_path,
+    )
+    guide_params = coerce_mapping(
+        section.get("guide_params"),
+        field="model.guide_params",
+        config_path=config_path,
+    )
+    prebuild = _build_model_prebuild(
+        section.get("prebuild"), config_path
+    )
+    return ModelConfig(
+        model_name=model_name,
+        guide_name=guide_name,
+        params=params,
+        guide_params=guide_params,
+        prebuild=prebuild,
     )
 
 
-def _build_tuning_space(
+def _build_model_prebuild(
     raw: object, config_path: Path
-) -> tuple[TuningParamSpec, ...]:
+) -> ModelPrebuildConfig | None:
     if raw is None:
-        return tuple()
-    if not isinstance(raw, list):
-        raise ConfigError(f"tuning.space must be a list in {config_path}")
-    specs: list[TuningParamSpec] = []
-    seen: set[str] = set()
-    for idx, item in enumerate(raw):
-        if not isinstance(item, Mapping):
-            raise ConfigError(
-                f"tuning.space[{idx}] must be a mapping in {config_path}"
-            )
-        spec = _build_tuning_param_spec(
-            item, config_path=config_path, index=idx
-        )
-        if spec.path in seen:
-            raise ConfigError(
-                f"Duplicate tuning.space path '{spec.path}' in {config_path}"
-            )
-        seen.add(spec.path)
-        specs.append(spec)
-    return tuple(specs)
-
-
-def _build_tuning_param_spec(
-    raw: Mapping[str, Any],
-    *,
-    config_path: Path,
-    index: int,
-) -> TuningParamSpec:
-    path = _require_string(
-        raw.get("path"),
-        field=f"tuning.space[{index}].path",
-        config_path=config_path,
-    )
-    param_type = _normalize_param_type(
-        raw.get("type"),
-        field=f"tuning.space[{index}].type",
-    )
-    transform = _normalize_transform(
-        raw.get("transform"),
-        field=f"tuning.space[{index}].transform",
-        config_path=config_path,
-    )
-    when = _parse_when(
-        raw.get("when"),
-        field=f"tuning.space[{index}].when",
-        config_path=config_path,
-    )
-    bounds = raw.get("bounds")
-    values = raw.get("values")
-    if param_type in {"float", "int"}:
-        if values is not None:
-            raise ConfigError(
-                f"tuning.space[{index}].values is not allowed for {param_type} params in {config_path}"
-            )
-        bounds_tuple = _parse_bounds(
-            bounds,
-            field=f"tuning.space[{index}].bounds",
-            config_path=config_path,
-        )
-        _validate_continuous_transform(
-            transform=transform,
-            bounds=bounds_tuple,
-            field=f"tuning.space[{index}].transform",
-            config_path=config_path,
-        )
-        return TuningParamSpec(
-            path=path,
-            param_type=param_type,
-            bounds=bounds_tuple,
-            values=None,
-            transform=transform,
-            when=when,
-        )
-    values_tuple = _parse_values(
-        values,
-        field=f"tuning.space[{index}].values",
-        config_path=config_path,
-    )
-    if bounds is not None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"model.prebuild must be a mapping in {config_path}")
+    extra = set(raw) - {"name", "params", "enabled"}
+    if extra:
         raise ConfigError(
-            f"tuning.space[{index}].bounds is not allowed for {param_type} params in {config_path}"
+            f"model.prebuild contains unknown keys in {config_path}",
+            context={"keys": ", ".join(sorted(extra))},
         )
-    if transform != "none":
+    name = require_string(
+        raw.get("name"),
+        field="model.prebuild.name",
+        config_path=config_path,
+    )
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
         raise ConfigError(
-            f"tuning.space[{index}].transform must be 'none' for {param_type} params in {config_path}"
+            f"model.prebuild.enabled must be a boolean in {config_path}"
         )
-    if param_type == "bool" and not all(
-        isinstance(item, bool) for item in values_tuple
-    ):
-        raise ConfigError(
-            f"tuning.space[{index}].values must be booleans in {config_path}"
-        )
-    return TuningParamSpec(
-        path=path,
-        param_type=param_type,
-        bounds=None,
-        values=values_tuple,
-        transform=transform,
-        when=when,
+    params = coerce_mapping(
+        raw.get("params"),
+        field="model.prebuild.params",
+        config_path=config_path,
+    )
+    return ModelPrebuildConfig(
+        name=name,
+        params=params,
+        enabled=enabled,
     )
 
 
-def _parse_bounds(
-    raw: object, *, field: str, config_path: Path
-) -> tuple[float, float]:
-    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+def _build_training_config(
+    raw: Mapping[str, Any], config_path: Path
+) -> TrainingConfig:
+    section = raw.get("training")
+    if not isinstance(section, Mapping):
+        raise ConfigError(f"training must be a mapping in {config_path}")
+    extra_training = set(section) - {
+        "svi",
+        "target_normalization",
+        "log_prob_scaling",
+    }
+    if extra_training:
         raise ConfigError(
-            f"{field} must be a 2-item list in {config_path}"
+            f"training contains unknown keys in {config_path}",
+            context={"keys": ", ".join(sorted(extra_training))},
         )
+    raw_svi = section.get("svi")
+    if not isinstance(raw_svi, Mapping):
+        raise ConfigError(f"training.svi must be a mapping in {config_path}")
+    extra_svi = set(raw_svi) - {
+        "num_steps",
+        "learning_rate",
+        "tbptt_window_len",
+        "tbptt_burn_in_len",
+        "grad_accum_steps",
+        "num_elbo_particles",
+        "log_every",
+    }
+    if extra_svi:
+        raise ConfigError(
+            f"training.svi contains unknown keys in {config_path}",
+            context={"keys": ", ".join(sorted(extra_svi))},
+        )
+    target_norm = require_bool(
+        section.get("target_normalization"),
+        field="training.target_normalization",
+        config_path=config_path,
+    )
+    log_prob_scaling = require_bool(
+        section.get("log_prob_scaling"),
+        field="training.log_prob_scaling",
+        config_path=config_path,
+    )
     try:
-        min_value = float(raw[0])
-        max_value = float(raw[1])
+        svi = TrainingSVIConfig(
+            num_steps=int(raw_svi.get("num_steps", 2_000)),
+            learning_rate=float(raw_svi.get("learning_rate", 1e-3)),
+            tbptt_window_len=(
+                int(raw_svi["tbptt_window_len"])
+                if raw_svi.get("tbptt_window_len") is not None
+                else None
+            ),
+            tbptt_burn_in_len=int(raw_svi.get("tbptt_burn_in_len", 0)),
+            grad_accum_steps=int(raw_svi.get("grad_accum_steps", 1)),
+            num_elbo_particles=int(raw_svi.get("num_elbo_particles", 1)),
+            log_every=(
+                int(raw_svi["log_every"])
+                if raw_svi.get("log_every") is not None
+                else None
+            ),
+        )
     except (TypeError, ValueError) as exc:
-        raise ConfigError(f"{field} must be numeric in {config_path}") from exc
-    if min_value >= max_value:
         raise ConfigError(
-            f"{field} min must be less than max in {config_path}"
-        )
-    return min_value, max_value
-
-
-def _parse_values(
-    raw: object, *, field: str, config_path: Path
-) -> tuple[Any, ...]:
-    if not isinstance(raw, list) or not raw:
-        raise ConfigError(
-            f"{field} must be a non-empty list in {config_path}"
-        )
-    return tuple(raw)
-
-
-def _parse_when(
-    raw: object, *, field: str, config_path: Path
-) -> Mapping[str, tuple[Any, ...]]:
-    if raw is None:
-        return {}
-    if not isinstance(raw, Mapping):
-        raise ConfigError(f"{field} must be a mapping in {config_path}")
-    when: dict[str, tuple[Any, ...]] = {}
-    for key, value in raw.items():
-        name = _require_string(
-            key, field=f"{field} key", config_path=config_path
-        )
-        allowed = _normalize_when_values(
-            value, field=f"{field}.{name}", config_path=config_path
-        )
-        when[name] = allowed
-    return when
-
-
-def _normalize_when_values(
-    raw: object, *, field: str, config_path: Path
-) -> tuple[Any, ...]:
-    if isinstance(raw, (list, tuple)):
-        if not raw:
-            raise ConfigError(
-                f"{field} must not be empty in {config_path}"
-            )
-        return tuple(raw)
-    if raw is None:
-        raise ConfigError(f"{field} must not be null in {config_path}")
-    return (raw,)
-
-
-def _normalize_param_type(
-    value: object, *, field: str
-) -> TuningParamType:
-    raw = str(value).strip().lower()
-    if raw in {"float", "int", "categorical", "bool"}:
-        return cast(TuningParamType, raw)
-    raise ConfigError(f"{field} must be float, int, categorical, or bool")
-
-
-def _normalize_transform(
-    value: object, *, field: str, config_path: Path
-) -> TuningTransform:
-    if value is None:
-        raise ConfigError(f"{field} is required in {config_path}")
-    raw = str(value).strip().lower()
-    if raw in {"linear", "log", "log10", "none"}:
-        return cast(TuningTransform, raw)
-    raise ConfigError(
-        f"{field} must be linear, log, log10, or none in {config_path}"
+            f"Invalid training configuration in {config_path}",
+            context={"section": "training.svi"},
+        ) from exc
+    return TrainingConfig(
+        svi=svi,
+        target_normalization=target_norm,
+        log_prob_scaling=log_prob_scaling,
     )
-
-
-def _validate_continuous_transform(
-    *,
-    transform: str,
-    bounds: tuple[float, float],
-    field: str,
-    config_path: Path,
-) -> None:
-    if transform == "none":
-        raise ConfigError(
-            f"{field} must not be 'none' for continuous params in {config_path}"
-        )
-    if transform in {"log", "log10"} and bounds[0] <= 0:
-        raise ConfigError(
-            f"{field} requires positive bounds in {config_path}"
-        )
-
-
-def _build_tuning_aggregate_config(
-    raw: Mapping[str, Any], config_path: Path
-) -> TuningAggregateConfig:
-    if not isinstance(raw, Mapping):
-        raise ConfigError(
-            f"tuning.aggregate must be a mapping in {config_path}"
-        )
-    return TuningAggregateConfig(
-        method=raw.get("method", "mean"),
-        penalty=float(raw.get("penalty", 0.5)),
-    )
-
-
-def _normalize_aggregate_config(
-    aggregate: TuningAggregateConfig, config_path: Path
-) -> TuningAggregateConfig:
-    if aggregate.penalty < 0:
-        raise ConfigError(
-            f"tuning.aggregate.penalty must be >= 0 in {config_path}"
-        )
-    return replace(
-        aggregate,
-        method=_normalize_aggregate_method(aggregate.method),
-    )
-
-
-def _build_tuning_resources_config(
-    raw: Mapping[str, Any], config_path: Path
-) -> TuningResourcesConfig:
-    if not isinstance(raw, Mapping):
-        raise ConfigError(
-            f"tuning.resources must be a mapping in {config_path}"
-        )
-    cpu = raw.get("cpu")
-    gpu = raw.get("gpu")
-    return TuningResourcesConfig(
-        cpu=float(cpu) if cpu is not None else None,
-        gpu=float(gpu) if gpu is not None else None,
-    )
-
-
-def _normalize_tuning_resources_config(
-    resources: TuningResourcesConfig, config_path: Path
-) -> TuningResourcesConfig:
-    if resources.cpu is not None and resources.cpu <= 0:
-        raise ConfigError(
-            f"tuning.resources.cpu must be > 0 in {config_path}"
-        )
-    if resources.gpu is not None and resources.gpu < 0:
-        raise ConfigError(
-            f"tuning.resources.gpu must be >= 0 in {config_path}"
-        )
-    return resources
-
-
-def _build_tuning_ray_config(
-    raw: Mapping[str, Any],
-    resources: TuningResourcesConfig,
-    config_path: Path,
-) -> TuningRayConfig:
-    if not isinstance(raw, Mapping):
-        raise ConfigError(f"tuning.ray must be a mapping in {config_path}")
-    raw_resources = raw.get("resources")
-    if raw_resources is not None:
-        if not isinstance(raw_resources, Mapping):
-            raise ConfigError(
-                f"tuning.ray.resources must be a mapping in {config_path}"
-            )
-        resources = _build_tuning_resources_config(
-            raw_resources, config_path
-        )
-    address = raw.get("address")
-    if address is not None:
-        address = str(address).strip()
-    return TuningRayConfig(address=address or None, resources=resources)
-
-
-def _normalize_tuning_ray_config(
-    ray: TuningRayConfig,
-    config_path: Path,
-) -> TuningRayConfig:
-    resources = _normalize_tuning_resources_config(
-        ray.resources, config_path
-    )
-    if ray.address is None:
-        return replace(ray, resources=resources)
-    normalized = ray.address.strip()
-    if not normalized:
-        return TuningRayConfig(address=None, resources=resources)
-    return TuningRayConfig(address=normalized, resources=resources)
-
-
-def _normalize_tuning_engine(value: object) -> TuningEngine:
-    raw = str(value).strip().lower()
-    if raw == "local":
-        return "local"
-    if raw == "ray":
-        return "ray"
-    raise ConfigError("tuning.engine must be local or ray")
-
-
-def _normalize_aggregate_method(value: object) -> AggregateMethod:
-    raw = str(value).strip().lower()
-    if raw == "mean":
-        return "mean"
-    if raw == "median":
-        return "median"
-    if raw in {"mean_minus_std", "mean-std", "mean_std"}:
-        return "mean_minus_std"
-    raise ConfigError(
-        "tuning.aggregate must be mean, median, or mean_minus_std"
-    )
-
-
-def _require_string(
-    value: object, *, field: str, config_path: Path
-) -> str:
-    if value is None:
-        raise ConfigError(f"{field} is required in {config_path}")
-    raw = str(value).strip()
-    if not raw:
-        raise ConfigError(f"{field} must be non-empty in {config_path}")
-    return raw
 
 
 def _build_evaluation_spec(
@@ -891,13 +659,35 @@ def _build_preprocess_spec(
                 else None
             ),
         )
-        scaling = ScalingSpec(
-            mad_eps=float(section.get("mad_eps", 0.0)),
+        guardrail = GuardrailSpec(
+            abs_eps=float(section.get("guard_abs_eps", 1.0e-6)),
+            rel_eps=float(section.get("guard_rel_eps", 1.0e-3)),
+            rel_offset=float(section.get("guard_rel_offset", 1.0e-8)),
+        )
+        clip = ClipSpec(
+            min_value=float(section.get("clip_min", -10.0)),
+            max_value=float(section.get("clip_max", 10.0)),
+            max_abs_fail=float(section.get("max_abs_fail", 50.0)),
+        )
+        winsor = WinsorSpec(
+            lower_q=float(section.get("winsor_low_q", 0.005)),
+            upper_q=float(section.get("winsor_high_q", 0.995)),
+        )
+        inputs = ScalingInputSpec(
             impute_missing_to_zero=bool(section.get("impute_missing_to_zero", True)),
             feature_names=section.get("feature_names"),
             append_mask_as_features=bool(
                 section.get("append_mask_as_features", False)
             ),
+        )
+        scaling = ScalingSpec(
+            mad_eps=float(section.get("mad_eps", 0.0)),
+            breakout_var_floor=float(section.get("breakout_var_floor", 1.0e-3)),
+            scale_floor=float(section.get("scale_floor", 1.0e-3)),
+            guardrail=guardrail,
+            clip=clip,
+            winsor=winsor,
+            inputs=inputs,
         )
     except (TypeError, ValueError) as exc:
         raise ConfigError(
@@ -966,6 +756,8 @@ def _build_data_config(
             f"Invalid data configuration in {config_path}",
             context={"section": "data"},
         ) from exc
+
+
 
 
 def _load_yaml_mapping(config_path: Path) -> Mapping[str, Any]:

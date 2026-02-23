@@ -1,4 +1,10 @@
 from .batch_utils import BatchShape, resolve_batch_shape
+from .prebuild import PrebuildContext, PrebuildResult
+from .prebuild_registry import (
+    PrebuildRegistry,
+    default_prebuild_registry,
+    register_prebuild,
+)
 from .protocols import ModelBatch, PyroGuide, PyroModel
 from .registry import (
     GuideRegistry,
@@ -13,11 +19,16 @@ __all__ = [
     "ModelRegistry",
     "BatchShape",
     "ModelBatch",
+    "PrebuildContext",
+    "PrebuildRegistry",
+    "PrebuildResult",
     "PyroGuide",
     "PyroModel",
     "default_guide_registry",
     "default_model_registry",
+    "default_prebuild_registry",
     "register_guide",
     "register_model",
+    "register_prebuild",
     "resolve_batch_shape",
 ]

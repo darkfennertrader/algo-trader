@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import pyro
 import torch
+from pyro import poutine
+from pyro.distributions.torch_distribution import TorchDistributionMixin
 
 from algo_trader.domain import ConfigError
 from .protocols import ModelBatch
@@ -28,3 +31,31 @@ def resolve_batch_shape(batch: ModelBatch) -> BatchShape:
         T, A = int(batch.X.shape[0]), int(batch.X.shape[1])
         return BatchShape(T, A, batch.X.device, batch.X.dtype, None)
     raise ConfigError("ModelBatch must provide X or y")
+
+
+def sample_observation(
+    *,
+    obs_dist: TorchDistributionMixin,
+    y_obs: torch.Tensor | None,
+    mask: torch.BoolTensor | None,
+    scale: float | None = None,
+) -> None:
+    if mask is None:
+        if scale is None:
+            pyro.sample("obs", obs_dist, obs=y_obs)
+            return
+        with poutine.scale(  # pylint: disable=not-context-manager
+            scale=scale
+        ):
+            pyro.sample("obs", obs_dist, obs=y_obs)
+        return
+    with poutine.mask(  # pylint: disable=not-context-manager
+        mask=mask
+    ):
+        if scale is None:
+            pyro.sample("obs", obs_dist, obs=y_obs)
+            return
+        with poutine.scale(  # pylint: disable=not-context-manager
+            scale=scale
+        ):
+            pyro.sample("obs", obs_dist, obs=y_obs)

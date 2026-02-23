@@ -60,20 +60,6 @@ class CleaningSpec:
 
 
 @dataclass(frozen=True)
-class ScalingSpec:
-    mad_eps: float
-    impute_missing_to_zero: bool
-    feature_names: list[str] | None = None
-    append_mask_as_features: bool = False
-
-
-@dataclass(frozen=True)
-class PreprocessSpec:
-    cleaning: CleaningSpec
-    scaling: ScalingSpec
-
-
-@dataclass(frozen=True)
 class OuterFold:
     k_test: int
     train_idx: np.ndarray
@@ -106,11 +92,82 @@ class FeatureCleaningState:
 
 
 @dataclass(frozen=True)
+class BreakoutScaleState:
+    positions: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=int)
+    )
+    p: torch.Tensor = field(default_factory=lambda: torch.zeros(0))
+    denom: torch.Tensor = field(default_factory=lambda: torch.zeros(0))
+    const: torch.Tensor = field(
+        default_factory=lambda: torch.zeros(0, dtype=torch.bool)
+    )
+    var_floor: float = 0.0
+
+
+@dataclass(frozen=True)
+class WinsorState:
+    positions: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=int)
+    )
+    lower: torch.Tensor = field(default_factory=lambda: torch.zeros(0))
+    upper: torch.Tensor = field(default_factory=lambda: torch.zeros(0))
+
+
+@dataclass(frozen=True)
 class RobustScalerState:
     feature_idx: np.ndarray
     shift: torch.Tensor
     scale: torch.Tensor
     mad_eps: float
+    breakout: BreakoutScaleState = field(default_factory=BreakoutScaleState)
+    winsor: WinsorState = field(default_factory=WinsorState)
+    near_constant_mask: torch.Tensor = field(
+        default_factory=lambda: torch.zeros((0, 0), dtype=torch.bool)
+    )
+
+
+@dataclass(frozen=True)
+class GuardrailSpec:
+    abs_eps: float = 1e-6
+    rel_eps: float = 1e-3
+    rel_offset: float = 1e-8
+
+
+@dataclass(frozen=True)
+class ClipSpec:
+    min_value: float = -10.0
+    max_value: float = 10.0
+    max_abs_fail: float = 50.0
+
+
+@dataclass(frozen=True)
+class WinsorSpec:
+    lower_q: float = 0.005
+    upper_q: float = 0.995
+
+
+@dataclass(frozen=True)
+class ScalingInputSpec:
+    impute_missing_to_zero: bool = True
+    feature_names: list[str] | None = None
+    append_mask_as_features: bool = False
+
+
+@dataclass(frozen=True)
+class ScalingSpec:
+    mad_eps: float
+    breakout_var_floor: float = 1e-3
+    scale_floor: float = 1e-3
+    guardrail: GuardrailSpec = field(default_factory=GuardrailSpec)
+    clip: ClipSpec = field(default_factory=ClipSpec)
+    winsor: WinsorSpec = field(default_factory=WinsorSpec)
+    inputs: ScalingInputSpec = field(default_factory=ScalingInputSpec)
+
+
+@dataclass(frozen=True)
+class PreprocessSpec:
+    cleaning: CleaningSpec
+    scaling: ScalingSpec
 
 
 @dataclass(frozen=True)
@@ -118,10 +175,22 @@ class ModelConfig:
     model_name: str
     guide_name: str
     params: Mapping[str, Any] = field(default_factory=dict)
+    guide_params: Mapping[str, Any] = field(default_factory=dict)
+    prebuild: "ModelPrebuildConfig | None" = None
 
 
 @dataclass(frozen=True)
-class TrainingConfig:
+class ModelPrebuildConfig:
+    name: str
+    params: Mapping[str, Any] = field(default_factory=dict)
+    enabled: bool = True
+
+
+LogProbScaleMode = Literal["none", "num_obs"]
+
+
+@dataclass(frozen=True)
+class TrainingSVIConfig:
     num_steps: int = 2_000
     learning_rate: float = 1e-3
     tbptt_window_len: int | None = None
@@ -129,6 +198,13 @@ class TrainingConfig:
     grad_accum_steps: int = 1
     num_elbo_particles: int = 1
     log_every: int | None = 100
+
+
+@dataclass(frozen=True)
+class TrainingConfig:
+    svi: TrainingSVIConfig = field(default_factory=TrainingSVIConfig)
+    target_normalization: bool = False
+    log_prob_scaling: bool = False
 
 
 TuningParamType = Literal["float", "int", "categorical", "bool"]

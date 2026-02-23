@@ -1,17 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
-
 from algo_trader.domain.simulation import (
     CPCVSplit,
     FeatureCleaningState,
     PreprocessSpec,
     RobustScalerState,
 )
+from .preprocessing_scaling import (
+    _apply_breakout_transform,
+    _apply_constant_guardrail,
+    _apply_winsorization_2d,
+    _apply_winsorization_3d,
+    _clip_scaled_features,
+    _compute_breakout_params,
+    _compute_near_constant_mask,
+    _compute_scale_params,
+    _compute_winsor_params,
+    _empty_breakout_state,
+    _empty_winsor_state,
+    _resolve_feature_names,
+    _validate_scaled_features,
+)
+from .preprocessing_stats import _nanmedian
 from .summary_utils import build_cleaning_thresholds
 
 
@@ -30,9 +45,6 @@ class CleaningDrops:
     duplicate_pairs: list[tuple[int, int, float]]
 
 
-def _nanmedian(x: torch.Tensor, dim: int) -> torch.Tensor:
-    return torch.nanmedian(x, dim=dim).values
-
 
 def _masked_variance_1d(x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
     n = m.sum(dim=0).clamp_min(0)
@@ -42,45 +54,6 @@ def _masked_variance_1d(x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
     denom = (n - 1).clamp_min(1)
     var = dev2 / denom
     return torch.where(n >= 2, var, torch.zeros_like(var))
-
-
-def _infer_scale_policy(
-    feature_names: Optional[List[str]], F: int
-) -> np.ndarray:
-    if feature_names is None:
-        return np.zeros(F, dtype=int)
-    if len(feature_names) != F:
-        raise ValueError("feature_names length must match F")
-    policy = np.zeros(F, dtype=int)
-    for i, name in enumerate(feature_names):
-        if name.startswith("brk_") or name.startswith("cs_rank_"):
-            policy[i] = 1
-    return policy
-
-
-def _compute_scale_params(
-    *,
-    Xtr: torch.Tensor,
-    Mtr: torch.Tensor,
-    feature_idx: np.ndarray,
-    spec: PreprocessSpec,
-    total_features: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    X_nan = Xtr.masked_fill(~Mtr, float("nan"))
-    med = _nanmedian(X_nan, dim=0)
-    mad = _nanmedian(torch.abs(X_nan - med), dim=0)
-
-    policy_all = _infer_scale_policy(spec.scaling.feature_names, F=total_features)
-    policy_clean = torch.as_tensor(
-        policy_all[feature_idx], dtype=torch.long, device=Xtr.device
-    )
-
-    shift = torch.where(policy_clean == 0, med, torch.zeros_like(med))
-    scale = torch.where(
-        policy_clean == 0, mad + spec.scaling.mad_eps, torch.ones_like(mad)
-    )
-
-    return shift, scale.clamp_min(spec.scaling.mad_eps)
 
 
 def _flatten_training_slice(
@@ -112,8 +85,13 @@ def _validate_inputs(X: torch.Tensor, M: torch.Tensor) -> None:
         raise ValueError("M must be boolean")
 
 
-def _observed_mask(missing_mask: torch.Tensor) -> torch.Tensor:
-    return ~missing_mask
+def _observed_mask(
+    missing_mask: torch.Tensor, values: torch.Tensor | None = None
+) -> torch.Tensor:
+    observed = ~missing_mask
+    if values is None:
+        return observed
+    return observed & torch.isfinite(values)
 
 
 @dataclass(frozen=True)
@@ -375,7 +353,7 @@ def fit_feature_cleaning(
 ) -> FeatureCleaningState:
     _validate_inputs(X, M)
 
-    observed = _observed_mask(M)
+    observed = _observed_mask(M, X)
     X2, M2 = _flatten_training_slice(X, observed, train_idx)
     usable_ratio, variance = _compute_basic_stats(X2, M2)
 
@@ -481,22 +459,19 @@ def fit_robust_scaler(
     device = X.device
     fidx_np = cleaning.feature_idx
     if fidx_np.size == 0:
-        return RobustScalerState(
-            feature_idx=fidx_np,
-            shift=torch.zeros(0, device=device),
-            scale=torch.ones(0, device=device),
-            mad_eps=spec.scaling.mad_eps,
-        )
+        return _empty_robust_scaler(fidx_np, device, spec)
 
-    observed = _observed_mask(M)
-    fidx = torch.as_tensor(fidx_np, dtype=torch.long, device=device)
-    tidx = torch.as_tensor(train_idx, dtype=torch.long, device=device)
-
-    Xtr = X.index_select(dim=0, index=tidx).reshape(-1, X.shape[-1])[:, fidx]
-    Mtr = (
-        observed.index_select(dim=0, index=tidx)
-        .reshape(-1, X.shape[-1])[:, fidx]
+    observed = _observed_mask(M, X)
+    Xtr, Mtr = _select_training_matrix(
+        X=X, observed=observed, train_idx=train_idx, feature_idx=fidx_np
     )
+    winsor = _compute_winsor_params(
+        Xtr=Xtr,
+        Mtr=Mtr,
+        feature_idx=fidx_np,
+        spec=spec,
+    )
+    Xtr = _apply_winsorization_2d(Xtr=Xtr, Mtr=Mtr, winsor=winsor)
 
     shift, scale = _compute_scale_params(
         Xtr=Xtr,
@@ -505,13 +480,62 @@ def fit_robust_scaler(
         spec=spec,
         total_features=X.shape[-1],
     )
+    breakout = _compute_breakout_params(
+        X=X,
+        observed=observed,
+        train_idx=train_idx,
+        feature_idx=fidx_np,
+        spec=spec,
+    )
+    near_constant_mask = _compute_near_constant_mask(
+        X=X,
+        observed=observed,
+        train_idx=train_idx,
+        feature_idx=fidx_np,
+        spec=spec,
+    )
 
     return RobustScalerState(
         feature_idx=fidx_np,
         shift=shift,
         scale=scale,
         mad_eps=spec.scaling.mad_eps,
+        breakout=breakout,
+        winsor=winsor,
+        near_constant_mask=near_constant_mask,
     )
+
+
+def _empty_robust_scaler(
+    feature_idx: np.ndarray, device: torch.device, spec: PreprocessSpec
+) -> RobustScalerState:
+    return RobustScalerState(
+        feature_idx=feature_idx,
+        shift=torch.zeros(0, device=device),
+        scale=torch.ones(0, device=device),
+        mad_eps=spec.scaling.mad_eps,
+        breakout=_empty_breakout_state(device, spec.scaling.breakout_var_floor),
+        winsor=_empty_winsor_state(device),
+        near_constant_mask=torch.zeros((0, 0), dtype=torch.bool, device=device),
+    )
+
+
+def _select_training_matrix(
+    *,
+    X: torch.Tensor,
+    observed: torch.Tensor,
+    train_idx: np.ndarray,
+    feature_idx: np.ndarray,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    device = X.device
+    fidx = torch.as_tensor(feature_idx, dtype=torch.long, device=device)
+    tidx = torch.as_tensor(train_idx, dtype=torch.long, device=device)
+    Xtr = X.index_select(dim=0, index=tidx).reshape(-1, X.shape[-1])[:, fidx]
+    Mtr = (
+        observed.index_select(dim=0, index=tidx)
+        .reshape(-1, X.shape[-1])[:, fidx]
+    )
+    return Xtr, Mtr
 
 
 def transform_X(
@@ -519,6 +543,7 @@ def transform_X(
     M: torch.Tensor,
     idx: np.ndarray,
     state: TransformState,
+    validate: bool = False,
 ) -> torch.Tensor:
     device = X.device
     fidx_np = state.cleaning.feature_idx
@@ -527,22 +552,55 @@ def transform_X(
         A = X.shape[1]
         return torch.zeros((n, A, 0), device=device, dtype=X.dtype)
 
-    observed = _observed_mask(M)
-    fidx = torch.as_tensor(fidx_np, dtype=torch.long, device=device)
-    iidx = torch.as_tensor(idx, dtype=torch.long, device=device)
+    observed = _observed_mask(M, X)
+    X_sel, M_sel = _select_transform_tensors(
+        X=X, observed=observed, idx=idx, feature_idx=fidx_np
+    )
+    X_sel = _apply_winsorization_3d(
+        X_sel=X_sel, M_sel=M_sel, winsor=state.scaler.winsor
+    )
 
+    X_scaled = (X_sel - state.scaler.shift) / state.scaler.scale
+    X_scaled = _apply_breakout_transform(
+        X_scaled=X_scaled, X_sel=X_sel, breakout=state.scaler.breakout
+    )
+    X_scaled = _apply_constant_guardrail(
+        X_scaled=X_scaled, mask=state.scaler.near_constant_mask
+    )
+    if validate:
+        feature_names = _resolve_feature_names(
+            state.spec.scaling.inputs.feature_names, fidx_np
+        )
+        _validate_scaled_features(
+            X_scaled=X_scaled,
+            observed=M_sel,
+            feature_names=feature_names,
+            max_abs_fail=state.spec.scaling.clip.max_abs_fail,
+        )
+    X_scaled = _clip_scaled_features(X_scaled, state.spec)
+    if state.spec.scaling.inputs.impute_missing_to_zero:
+        X_scaled = torch.where(M_sel, X_scaled, torch.zeros_like(X_scaled))
+
+    if state.spec.scaling.inputs.append_mask_as_features:
+        mask_f = M_sel.to(dtype=X_scaled.dtype)
+        X_scaled = torch.cat([X_scaled, mask_f], dim=-1)
+
+    return X_scaled
+
+
+def _select_transform_tensors(
+    *,
+    X: torch.Tensor,
+    observed: torch.Tensor,
+    idx: np.ndarray,
+    feature_idx: np.ndarray,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    device = X.device
+    fidx = torch.as_tensor(feature_idx, dtype=torch.long, device=device)
+    iidx = torch.as_tensor(idx, dtype=torch.long, device=device)
     X_sel = X.index_select(dim=0, index=iidx).index_select(dim=2, index=fidx)
     M_sel = (
         observed.index_select(dim=0, index=iidx)
         .index_select(dim=2, index=fidx)
     )
-
-    X_scaled = (X_sel - state.scaler.shift) / state.scaler.scale
-    if state.spec.scaling.impute_missing_to_zero:
-        X_scaled = torch.where(M_sel, X_scaled, torch.zeros_like(X_scaled))
-
-    if state.spec.scaling.append_mask_as_features:
-        mask_f = M_sel.to(dtype=X_scaled.dtype)
-        X_scaled = torch.cat([X_scaled, mask_f], dim=-1)
-
-    return X_scaled
+    return X_sel, M_sel

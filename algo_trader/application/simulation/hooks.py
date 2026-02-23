@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import time
-from typing import Any, Mapping, cast
+from typing import Any, Callable, Mapping, cast
 
 import pyro
 import torch
@@ -20,8 +20,11 @@ from algo_trader.domain.simulation import (
 )
 from algo_trader.pipeline.stages import modeling
 from .metrics import build_metric_scorer
+from .config_utils import require_bool
 
 logger = logging.getLogger(__name__)
+
+_TARGET_NORM_EPS = 1e-6
 
 @dataclass(frozen=True)
 class SimulationHooks:
@@ -53,18 +56,93 @@ def stub_hooks() -> SimulationHooks:
 
 
 @dataclass(frozen=True)
-class _TrainingParams:
+class _SVIParams:
     steps: int
     learning_rate: float
     num_elbo_particles: int
     log_every: int | None
-    tbptt_window_len: int | None
-    tbptt_burn_in_len: int
     grad_accum_steps: int
+
+
+@dataclass(frozen=True)
+class _TBPTTParams:
+    window_len: int | None
+    burn_in_len: int
+
+
+@dataclass(frozen=True)
+class _TrainingParams:
+    svi: _SVIParams
+    tbptt: _TBPTTParams
+    log_prob_scaling: bool
+    target_normalization: bool
+
+
+@dataclass(frozen=True)
+class _TargetNormState:
+    center: torch.Tensor
+    scale: torch.Tensor
 
 
 _MODEL_REGISTRY = modeling.default_model_registry()
 _GUIDE_REGISTRY = modeling.default_guide_registry()
+
+
+def _log_missing_targets(y_train: torch.Tensor) -> None:
+    if torch.isfinite(y_train).all():
+        return
+    missing = int((~torch.isfinite(y_train)).sum().item())
+    total = int(y_train.numel())
+    logger.warning(
+        "Training targets contain missing values; missing=%s total=%s",
+        missing,
+        total,
+    )
+
+
+def _resolve_model_and_guide(
+    config: Mapping[str, Any],
+) -> tuple[str, str, modeling.PyroModel, modeling.PyroGuide]:
+    model_name, guide_name, model_params, guide_params = _resolve_model_config(
+        config
+    )
+    model = _MODEL_REGISTRY.get(model_name, model_params)
+    guide = _GUIDE_REGISTRY.get(guide_name, guide_params)
+    return model_name, guide_name, model, guide
+
+
+def _prepare_training_batches(
+    X_train: torch.Tensor,
+    y_train: torch.Tensor,
+    params: _TrainingParams,
+) -> tuple[list[modeling.ModelBatch], _TargetNormState | None]:
+    y_train_norm, norm_state = _maybe_normalize_targets(
+        y_train, params.target_normalization
+    )
+    batches = _build_tbptt_batches(X_train, y_train_norm, params)
+    if not batches:
+        raise SimulationError("No valid targets for training")
+    return batches, norm_state
+
+
+def _build_training_state(
+    model_name: str,
+    guide_name: str,
+    norm_state: _TargetNormState | None,
+    posterior_summary: Mapping[str, Any] | None,
+) -> Mapping[str, Any]:
+    state: dict[str, Any] = {
+        "model_name": model_name,
+        "guide_name": guide_name,
+    }
+    if norm_state is not None:
+        state["target_norm"] = {
+            "center": norm_state.center,
+            "scale": norm_state.scale,
+        }
+    if posterior_summary:
+        state["posterior_summary"] = dict(posterior_summary)
+    return state
 
 
 def _fit_pyro_svi(
@@ -74,13 +152,12 @@ def _fit_pyro_svi(
     init_state: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
     _ = init_state
-    model_name, guide_name = _resolve_model_guide_names(config)
-    model = _MODEL_REGISTRY.get(model_name)
-    guide = _GUIDE_REGISTRY.get(guide_name)
+    _log_missing_targets(y_train)
+    model_name, guide_name, model, guide = _resolve_model_and_guide(config)
     params = _training_params(config)
-    batches = _build_tbptt_batches(X_train, y_train, params)
-    if not batches:
-        raise SimulationError("No valid targets for training")
+    batches, norm_state = _prepare_training_batches(
+        X_train, y_train, params
+    )
     pyro.clear_param_store()
     svi = _build_svi(model=model, guide=guide, params=params)
     _run_svi_steps(
@@ -89,7 +166,85 @@ def _fit_pyro_svi(
         params=params,
         context=_run_context(config),
     )
-    return {"model_name": model_name, "guide_name": guide_name}
+    posterior_summary = _summarize_posterior_params()
+    return _build_training_state(
+        model_name,
+        guide_name,
+        norm_state,
+        posterior_summary,
+    )
+
+
+def _summarize_posterior_params() -> Mapping[str, Any]:
+    store = pyro.get_param_store()
+    summary: dict[str, Any] = {}
+
+    nu_raw_loc = _get_param(store, "nu_raw_loc")
+    nu_raw_scale = _get_param(store, "nu_raw_scale")
+    nu_raw_mean = _lognormal_mean(nu_raw_loc, nu_raw_scale)
+    if nu_raw_mean is not None:
+        summary["nu_raw"] = _summarize_tensor(nu_raw_mean)
+
+    sigma_loc = _get_param(store, "sigma_loc")
+    sigma_scale = _get_param(store, "sigma_scale")
+    sigma_mean = _lognormal_mean(sigma_loc, sigma_scale)
+    if sigma_mean is not None:
+        summary["sigma"] = _summarize_tensor(sigma_mean)
+
+    w_loc = _get_param(store, "w_loc")
+    w_scale = _get_param(store, "w_scale")
+    if isinstance(w_loc, torch.Tensor):
+        summary["w"] = {
+            "abs_mean": _safe_stat(torch.mean, w_loc.abs()),
+            "abs_max": _safe_stat(torch.max, w_loc.abs()),
+        }
+        if isinstance(w_scale, torch.Tensor):
+            summary["w"]["scale_mean"] = _safe_stat(
+                torch.mean, w_scale
+            )
+            summary["w"]["scale_max"] = _safe_stat(torch.max, w_scale)
+
+    return summary
+
+
+def _get_param(store: Any, name: str) -> torch.Tensor | None:
+    if name not in store:
+        return None
+    value = store.get_param(name)
+    if not isinstance(value, torch.Tensor):
+        return None
+    return value
+
+
+def _lognormal_mean(
+    loc: torch.Tensor | None, scale: torch.Tensor | None
+) -> torch.Tensor | None:
+    if not isinstance(loc, torch.Tensor) or not isinstance(
+        scale, torch.Tensor
+    ):
+        return None
+    return torch.exp(loc + 0.5 * scale.pow(2))
+
+
+def _summarize_tensor(values: torch.Tensor) -> Mapping[str, float]:
+    flat = values.detach().reshape(-1)
+    if flat.numel() == 0:
+        return {}
+    return {
+        "mean": _safe_stat(torch.mean, flat),
+        "median": _safe_stat(torch.median, flat),
+        "min": _safe_stat(torch.min, flat),
+        "max": _safe_stat(torch.max, flat),
+    }
+
+
+def _safe_stat(
+    fn: Callable[[torch.Tensor], torch.Tensor], values: torch.Tensor
+) -> float:
+    finite = values[torch.isfinite(values)]
+    if finite.numel() == 0:
+        return float("nan")
+    return float(fn(finite).item())
 
 
 def _predict_pyro(
@@ -98,10 +253,7 @@ def _predict_pyro(
     config: Mapping[str, Any],
     num_samples: int,
 ) -> Mapping[str, Any]:
-    _ = state
-    model_name, guide_name = _resolve_model_guide_names(config)
-    model = _MODEL_REGISTRY.get(model_name)
-    guide = _GUIDE_REGISTRY.get(guide_name)
+    _, _, model, guide = _resolve_model_and_guide(config)
     num_samples = max(int(num_samples), 1)
     batch = _build_prediction_batch(X_pred)
     unconditioned = poutine.uncondition(model)
@@ -113,6 +265,7 @@ def _predict_pyro(
     )
     samples = predictive(batch)["obs"]
     mean = samples.mean(dim=0)
+    mean, samples = _apply_target_denorm(mean, samples, state)
     return {"samples": samples, "mean": mean}
 
 
@@ -125,29 +278,58 @@ def _score_metrics(
     return float(scorer(y_true, pred, score_spec))
 
 
-def _resolve_model_guide_names(config: Mapping[str, Any]) -> tuple[str, str]:
-    model_name = str(config.get("model_name", "")).strip().lower()
-    guide_name = str(config.get("guide_name", "")).strip().lower()
+def _resolve_model_config(
+    config: Mapping[str, Any],
+) -> tuple[str, str, Mapping[str, Any], Mapping[str, Any]]:
+    model = config.get("model")
+    if not isinstance(model, Mapping):
+        raise ConfigError("model config missing for simulation hooks")
+    model_name = str(model.get("model_name", "")).strip().lower()
+    guide_name = str(model.get("guide_name", "")).strip().lower()
     if not model_name:
-        raise ConfigError("model_name must be set for simulation hooks")
+        raise ConfigError("model.model_name must be set for simulation hooks")
     if not guide_name:
-        raise ConfigError("guide_name must be set for simulation hooks")
-    return model_name, guide_name
+        raise ConfigError("model.guide_name must be set for simulation hooks")
+    model_params = _coerce_mapping(
+        model.get("params", {}),
+        label="model.params",
+    )
+    guide_params = _coerce_mapping(
+        model.get("guide_params", {}),
+        label="model.guide_params",
+    )
+    return model_name, guide_name, model_params, guide_params
+
+
+def _coerce_mapping(value: object, *, label: str) -> Mapping[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ConfigError(f"{label} must be a mapping for simulation hooks")
+    return dict(value)
 
 
 def _training_params(config: Mapping[str, Any]) -> _TrainingParams:
     training = config.get("training")
     if not isinstance(training, Mapping):
         raise ConfigError("training config missing for simulation hooks")
-    raw_log_every = training.get("log_every", None)
+    raw_svi = training.get("svi")
+    if not isinstance(raw_svi, Mapping):
+        raise ConfigError("training.svi config missing for simulation hooks")
+    target_norm = require_bool(
+        training.get("target_normalization"),
+        field="training.target_normalization",
+        config_path=None,
+    )
+    raw_log_every = raw_svi.get("log_every", None)
     log_every: int | None
     if raw_log_every is None:
         log_every = None
     else:
         log_every = int(raw_log_every)
         if log_every <= 0:
-            raise ConfigError("training.log_every must be >= 1 or null")
-    raw_window_len = training.get("tbptt_window_len", None)
+            raise ConfigError("training.svi.log_every must be >= 1 or null")
+    raw_window_len = raw_svi.get("tbptt_window_len", None)
     tbptt_window_len: int | None
     if raw_window_len is None:
         tbptt_window_len = None
@@ -155,32 +337,88 @@ def _training_params(config: Mapping[str, Any]) -> _TrainingParams:
         tbptt_window_len = int(raw_window_len)
         if tbptt_window_len <= 0:
             raise ConfigError(
-                "training.tbptt_window_len must be positive or null"
+                "training.svi.tbptt_window_len must be positive or null"
             )
-    tbptt_burn_in_len = int(training.get("tbptt_burn_in_len", 0))
+    tbptt_burn_in_len = int(raw_svi.get("tbptt_burn_in_len", 0))
     if tbptt_burn_in_len < 0:
         raise ConfigError(
-            "training.tbptt_burn_in_len must be >= 0"
+            "training.svi.tbptt_burn_in_len must be >= 0"
         )
     if (
         tbptt_window_len is not None
         and tbptt_burn_in_len >= tbptt_window_len
     ):
         raise ConfigError(
-            "training.tbptt_burn_in_len must be < training.tbptt_window_len"
+            "training.svi.tbptt_burn_in_len must be < "
+            "training.svi.tbptt_window_len"
         )
-    grad_accum_steps = int(training.get("grad_accum_steps", 1))
+    grad_accum_steps = int(raw_svi.get("grad_accum_steps", 1))
     if grad_accum_steps <= 0:
-        raise ConfigError("training.grad_accum_steps must be >= 1")
-    return _TrainingParams(
-        steps=int(training.get("num_steps", 0)),
-        learning_rate=float(training.get("learning_rate", 1e-3)),
-        num_elbo_particles=int(training.get("num_elbo_particles", 1)),
-        log_every=log_every,
-        tbptt_window_len=tbptt_window_len,
-        tbptt_burn_in_len=tbptt_burn_in_len,
-        grad_accum_steps=grad_accum_steps,
+        raise ConfigError("training.svi.grad_accum_steps must be >= 1")
+    log_prob_scaling = require_bool(
+        training.get("log_prob_scaling"),
+        field="training.log_prob_scaling",
+        config_path=None,
     )
+    return _TrainingParams(
+        svi=_SVIParams(
+            steps=int(raw_svi.get("num_steps", 0)),
+            learning_rate=float(raw_svi.get("learning_rate", 1e-3)),
+            num_elbo_particles=int(raw_svi.get("num_elbo_particles", 1)),
+            log_every=log_every,
+            grad_accum_steps=grad_accum_steps,
+        ),
+        tbptt=_TBPTTParams(
+            window_len=tbptt_window_len,
+            burn_in_len=tbptt_burn_in_len,
+        ),
+        log_prob_scaling=log_prob_scaling,
+        target_normalization=target_norm,
+    )
+
+
+def _maybe_normalize_targets(
+    y_train: torch.Tensor, enabled: bool
+) -> tuple[torch.Tensor, _TargetNormState | None]:
+    if not enabled:
+        return y_train, None
+    finite_mask = torch.isfinite(y_train)
+    if not finite_mask.any():
+        raise SimulationError("Target normalization requires finite targets")
+    values = y_train[finite_mask]
+    center = values.median()
+    mad = (values - center).abs().median()
+    scale = mad + _TARGET_NORM_EPS
+    if not torch.isfinite(scale):
+        raise SimulationError("Target normalization scale is not finite")
+    y_norm = (y_train - center) / scale
+    return y_norm, _TargetNormState(center=center, scale=scale)
+
+
+def _coerce_target_norm_state(
+    state: Mapping[str, Any]
+) -> _TargetNormState | None:
+    raw = state.get("target_norm")
+    if not isinstance(raw, Mapping):
+        return None
+    center = raw.get("center")
+    scale = raw.get("scale")
+    if isinstance(center, torch.Tensor) and isinstance(scale, torch.Tensor):
+        return _TargetNormState(center=center, scale=scale)
+    return None
+
+
+def _apply_target_denorm(
+    mean: torch.Tensor,
+    samples: torch.Tensor,
+    state: Mapping[str, Any],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    norm_state = _coerce_target_norm_state(state)
+    if norm_state is None:
+        return mean, samples
+    mean = mean * norm_state.scale + norm_state.center
+    samples = samples * norm_state.scale + norm_state.center
+    return mean, samples
 
 
 def _run_context(config: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -212,10 +450,10 @@ def _build_svi(
     params: _TrainingParams,
 ) -> pyro.infer.SVI:  # type: ignore[name-defined]
     optimizer = pyro.optim.Adam(  # type: ignore  # pylint: disable=no-member
-        {"lr": params.learning_rate}
+        {"lr": params.svi.learning_rate}
     )
     loss = pyro.infer.Trace_ELBO(  # type: ignore  # pylint: disable=no-member
-        num_particles=params.num_elbo_particles
+        num_particles=params.svi.num_elbo_particles
     )
     return pyro.infer.SVI(  # type: ignore  # pylint: disable=no-member
         model, guide, optimizer, loss=loss
@@ -232,8 +470,8 @@ def _run_svi_steps(
     start = time.perf_counter()
     if not batches:
         raise SimulationError("No training batches available for SVI")
-    grad_accum_steps = params.grad_accum_steps
-    for step in range(params.steps):
+    grad_accum_steps = params.svi.grad_accum_steps
+    for step in range(params.svi.steps):
         total_loss, params_in_step = _accumulate_svi_grads(
             svi=svi,
             batches=batches,
@@ -243,7 +481,7 @@ def _run_svi_steps(
         if params_in_step:
             svi.optim(params_in_step)
             infer_util.zero_grads(params_in_step)
-        if params.log_every and (step + 1) % params.log_every == 0:
+        if params.svi.log_every and (step + 1) % params.svi.log_every == 0:
             _log_svi_progress(
                 step=step + 1,
                 loss=total_loss / float(grad_accum_steps),
@@ -320,7 +558,7 @@ def _build_tbptt_batches(
         y_obs=y_obs,
         valid_mask=valid_mask,
         window_len=window_len,
-        burn_in_len=params.tbptt_burn_in_len,
+        params=params,
     )
 
 
@@ -341,7 +579,7 @@ def _resolve_window_len(
     y_train: torch.Tensor, params: _TrainingParams
 ) -> int:
     total_steps = int(y_train.shape[0])
-    window_len = params.tbptt_window_len or total_steps
+    window_len = params.tbptt.window_len or total_steps
     if window_len <= 0:
         raise SimulationError("TBPTT window length must be positive")
     return window_len
@@ -350,7 +588,7 @@ def _resolve_window_len(
 def _prepare_training_observations(
     X_train: torch.Tensor, y_train: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.BoolTensor]:
-    valid_mask = cast(torch.BoolTensor, torch.isfinite(y_train).all(dim=1))
+    valid_mask = cast(torch.BoolTensor, torch.isfinite(y_train))
     X_obs = X_train.to(dtype=torch.float32)
     y_obs = torch.nan_to_num(
         y_train, nan=0.0, posinf=0.0, neginf=0.0
@@ -364,32 +602,45 @@ def _slice_tbptt_windows(
     y_obs: torch.Tensor,
     valid_mask: torch.BoolTensor,
     window_len: int,
-    burn_in_len: int,
+    params: _TrainingParams,
 ) -> list[modeling.ModelBatch]:
     total_steps = int(y_obs.shape[0])
     batches: list[modeling.ModelBatch] = []
     for start in range(0, total_steps, window_len):
         end = min(total_steps, start + window_len)
         mask = cast(torch.BoolTensor, valid_mask[start:end].clone())
-        if burn_in_len > 0:
-            burn = min(burn_in_len, end - start)
-            mask[:burn] = False
+        if params.tbptt.burn_in_len > 0:
+            burn = min(params.tbptt.burn_in_len, end - start)
+            mask[:burn, :] = False
         if not mask.any():
             continue
+        obs_scale = _resolve_obs_scale(mask, params.log_prob_scaling)
         batches.append(
             modeling.ModelBatch(
                 X=X_obs[start:end],
                 y=y_obs[start:end],
                 M=mask,
+                obs_scale=obs_scale,
             )
         )
     return batches
 
 
+def _resolve_obs_scale(
+    mask: torch.BoolTensor, log_prob_scaling: bool
+) -> float | None:
+    if not log_prob_scaling:
+        return None
+    num_valid = int(mask.sum().item())
+    if num_valid <= 0:
+        return None
+    return 1.0 / float(num_valid)
+
+
 def _build_prediction_batch(X_pred: torch.Tensor) -> modeling.ModelBatch:
     if X_pred.ndim != 3:
         raise SimulationError("X_pred must be [T, A, F]")
-    return modeling.ModelBatch(X=X_pred, y=None, M=None)
+    return modeling.ModelBatch(X=X_pred, y=None, M=None, obs_scale=None)
 
 
 def _fit_bayes_svi_stub(

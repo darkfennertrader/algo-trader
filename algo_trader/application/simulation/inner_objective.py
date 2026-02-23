@@ -189,6 +189,12 @@ def _evaluate_split(context: SplitContext) -> SplitResult | None:
         y_train=batches.y_train,
         y_test=batches.y_test,
     )
+    _maybe_write_postprocess_diagnostics(
+        context=context,
+        pred=pred,
+        y_test=batches.y_test,
+        model_state=model_state,
+    )
     score = float(
         context.resources.hooks.score(
             y_true=batches.y_test,
@@ -235,6 +241,7 @@ def _prepare_split_batches(
         context.data.M,
         context.split.train_idx,
         state,
+        validate=True,
     )
     X_test = transform_X(
         context.data.X,
@@ -349,6 +356,33 @@ def _maybe_write_postprocess_inputs(
     )
 
 
+def _maybe_write_postprocess_diagnostics(
+    *,
+    context: SplitContext,
+    pred: Mapping[str, Any],
+    y_test: torch.Tensor,
+    model_state: Mapping[str, Any],
+) -> None:
+    if not context.resources.model_selection.enable:
+        return
+    if context.candidate_id < 0:
+        raise SimulationError(
+            "Diagnostics require candidate_id in run_context"
+        )
+    payload = _build_diagnostics_payload(
+        context=context,
+        pred=pred,
+        y_true=y_test,
+        model_state=model_state,
+    )
+    context.resources.artifacts.write_postprocess_diagnostics(
+        outer_k=context.params.outer_k,
+        candidate_id=context.candidate_id,
+        split_id=context.split_id,
+        payload=payload,
+    )
+
+
 def _require_samples_tensor(pred: Mapping[str, Any]) -> torch.Tensor:
     samples = pred.get("samples")
     if not isinstance(samples, torch.Tensor):
@@ -358,6 +392,93 @@ def _require_samples_tensor(pred: Mapping[str, Any]) -> torch.Tensor:
     if samples.ndim != 3:
         raise SimulationError("Postprocess samples must be [S, T, A]")
     return samples
+
+
+def _build_diagnostics_payload(
+    *,
+    context: SplitContext,
+    pred: Mapping[str, Any],
+    y_true: torch.Tensor,
+    model_state: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    samples = _require_samples_tensor(pred)
+    payload: dict[str, Any] = {
+        "outer_k": context.params.outer_k,
+        "candidate_id": context.candidate_id,
+        "split_id": context.split_id,
+        "posterior": _posterior_summary_payload(model_state),
+        "predictive": {
+            "samples": _sample_stats(samples),
+            "y_true": _value_stats(y_true),
+        },
+    }
+    return payload
+
+
+def _posterior_summary_payload(
+    model_state: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    summary = model_state.get("posterior_summary")
+    if isinstance(summary, Mapping):
+        return dict(summary)
+    return {}
+
+
+def _sample_stats(samples: torch.Tensor) -> Mapping[str, float]:
+    flattened = samples.detach().reshape(-1)
+    return _value_stats(
+        flattened,
+        quantiles=(0.01, 0.05, 0.50, 0.95, 0.99),
+    )
+
+
+def _value_stats(
+    values: torch.Tensor,
+    *,
+    quantiles: Sequence[float] | None = None,
+) -> Mapping[str, float]:
+    finite = values[torch.isfinite(values)]
+    if finite.numel() == 0:
+        return _nan_stats(quantiles)
+    mean = float(finite.mean().item())
+    std = float(finite.std(unbiased=False).item())
+    min_val = float(finite.min().item())
+    max_val = float(finite.max().item())
+    stats: dict[str, float] = {
+        "mean": mean,
+        "std": std,
+        "min": min_val,
+        "max": max_val,
+    }
+    if quantiles:
+        stats.update(_quantile_stats(finite, quantiles))
+    return stats
+
+
+def _nan_stats(
+    quantiles: Sequence[float] | None,
+) -> Mapping[str, float]:
+    stats: dict[str, float] = {
+        "mean": float("nan"),
+        "std": float("nan"),
+        "min": float("nan"),
+        "max": float("nan"),
+    }
+    if quantiles:
+        stats.update({f"q{int(q * 100):02d}": float("nan") for q in quantiles})
+    return stats
+
+
+def _quantile_stats(
+    values: torch.Tensor, quantiles: Sequence[float]
+) -> Mapping[str, float]:
+    sorted_q = sorted(float(q) for q in quantiles)
+    data = values.detach().cpu().numpy()
+    result = np.quantile(data, sorted_q)
+    return {
+        f"q{int(q * 100):02d}": float(value)
+        for q, value in zip(sorted_q, result)
+    }
 
 
 def _resolve_energy_score_transform(
@@ -398,6 +519,15 @@ def _build_energy_score_transform(
     shrinkage = _energy_score_shrinkage(n_eff)
     diag = torch.diag(torch.diag(cov))
     cov_shrunk = (1.0 - shrinkage) * cov + shrinkage * diag
+    var_floor = float(score_spec.get("var_floor", 0.0))
+    if var_floor < 0.0:
+        raise SimulationError("Energy score var_floor must be >= 0")
+    if var_floor > 0.0:
+        cov_shrunk = cov_shrunk + var_floor * torch.eye(
+            cov_shrunk.shape[0],
+            device=cov_shrunk.device,
+            dtype=cov_shrunk.dtype,
+        )
     eps = float(score_spec.get("eps", 1e-5))
     cov_shrunk = cov_shrunk + eps * torch.eye(
         cov_shrunk.shape[0],

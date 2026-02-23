@@ -69,7 +69,7 @@ def _build_config(
     modeling = _build_modeling_spec(raw, config_path)
     evaluation = _build_evaluation_spec(raw, config_path)
     outer = _build_outer_config(raw, config_path)
-    flags = _build_flags(raw)
+    flags = _build_flags(raw, config_path)
 
     return SimulationConfig(
         data=data,
@@ -82,16 +82,52 @@ def _build_config(
     )
 
 
-def _build_flags(raw: Mapping[str, Any]) -> SimulationFlags:
+def _build_flags(
+    raw: Mapping[str, Any], config_path: Path
+) -> SimulationFlags:
     mode = raw.get("simulation_mode", "full")
     stop_after = raw.get("stop_after")
+    smoke_enabled, debug_enabled = _read_smoke_test_flags(
+        raw, config_path
+    )
     return SimulationFlags(
         use_feature_names_for_scaling=bool(
             raw.get("use_feature_names_for_scaling", True)
         ),
         use_gpu=bool(raw.get("use_gpu", False)),
+        smoke_test_enabled=smoke_enabled,
+        smoke_test_debug=debug_enabled,
         simulation_mode=_normalize_simulation_mode(mode),
         stop_after=_normalize_stop_after(stop_after),
+    )
+
+
+def _read_smoke_test_flags(
+    raw: Mapping[str, Any], config_path: Path
+) -> tuple[bool, bool]:
+    section = raw.get("smoke_test", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, Mapping):
+        raise ConfigError(
+            f"smoke_test must be a mapping in {config_path}"
+        )
+    extra = set(section) - {"enabled", "debug"}
+    if extra:
+        raise ConfigError(
+            f"smoke_test contains unknown keys in {config_path}",
+            context={"keys": ", ".join(sorted(extra))},
+        )
+    enabled = require_bool(
+        section.get("enabled"),
+        field="smoke_test.enabled",
+        config_path=config_path,
+    )
+    debug_raw = section.get("debug")
+    if debug_raw is None:
+        return enabled, False
+    return enabled, require_bool(
+        debug_raw, field="smoke_test.debug", config_path=config_path
     )
 
 

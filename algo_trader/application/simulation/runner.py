@@ -71,6 +71,11 @@ from .runner_helpers import (
     with_fold_seed,
     with_run_meta,
 )
+from .smoke_test import (
+    apply_smoke_test_overrides,
+    build_smoke_test_dataset,
+    is_smoke_test_enabled,
+)
 from .diagnostics import FanChartDiagnosticsContext, run_fan_chart_diagnostics
 from .model_selection import (
     GlobalSelectionContext,
@@ -105,7 +110,7 @@ def _run_context(config_path: Path | None) -> Mapping[str, str]:
 
 @log_boundary("simulation.run", context=_run_context)
 def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
-    config = load_config(config_path)
+    config = apply_smoke_test_overrides(load_config(config_path))
     device = _resolve_device(config.flags.use_gpu)
     setup = _prepare_run_state(config=config, device=device)
     if setup.early_results is not None:
@@ -261,8 +266,14 @@ def _prepare_candidates(
     candidates = _write_candidate_artifacts(
         config=config, artifacts=artifacts
     )
+    debug_output_dir = _debug_output_dir(
+        artifacts=artifacts, flags=config.flags
+    )
     base_config = build_base_config(
-        config.modeling.model, config.modeling.training
+        config.modeling.model,
+        config.modeling.training,
+        config.flags,
+        debug_output_dir,
     )
     if prebuild is not None:
         base_config = apply_prebuild(base_config, prebuild)
@@ -308,6 +319,14 @@ def _resolve_preprocess_spec(
         ),
     )
 
+
+def _debug_output_dir(
+    *, artifacts: SimulationArtifacts, flags: SimulationFlags
+) -> str | None:
+    if not flags.smoke_test_debug:
+        return None
+    return str(artifacts.base_dir / "smoke_test")
+
 def _load_dataset(config: SimulationConfig, device: str) -> PanelDataset:
     registries = default_registries()
     return registries.datasets.build(
@@ -323,6 +342,9 @@ def _load_dataset_for_run(
     base_dir: Path,
     device: str,
 ) -> tuple[PanelDataset, bool]:
+    if is_smoke_test_enabled(config):
+        dataset = build_smoke_test_dataset(device)
+        return dataset, False
     if base_dir.exists():
         if not base_dir.is_dir():
             raise SimulationError(

@@ -18,7 +18,11 @@ from .tensors import (
     timestamps_to_epoch_hours,
     write_tensor_bundle,
 )
-from .panel_tensor_dataset import PanelTensorDataset, load_panel_tensor_dataset
+from .panel_tensor_dataset import (
+    PanelTensorDataset,
+    build_synthetic_panel_dataset,
+    load_panel_tensor_dataset,
+)
 from .feature_store_panel_dataset import load_feature_store_panel_dataset
 
 __all__ = [
@@ -36,6 +40,7 @@ __all__ = [
     "timestamps_to_epoch_hours",
     "write_tensor_bundle",
     "PanelTensorDataset",
+    "build_synthetic_panel_dataset",
     "load_panel_tensor_dataset",
     "load_feature_store_panel_dataset",
 ]

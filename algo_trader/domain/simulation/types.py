@@ -379,6 +379,8 @@ class OuterConfig:
 class SimulationFlags:
     use_feature_names_for_scaling: bool = True
     use_gpu: bool = False
+    smoke_test_enabled: bool = False
+    smoke_test_debug: bool = False
     simulation_mode: Literal["dry_run", "stub", "full"] = "full"
     stop_after: (
         Literal["inputs", "cv", "inner", "outer", "results"] | None

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+import inspect
 import logging
 import time
 from typing import Any, Callable, Mapping, cast
@@ -71,6 +73,14 @@ class _TBPTTParams:
 
 
 @dataclass(frozen=True)
+class _TBPTTInputs:
+    X_obs: torch.Tensor
+    y_obs: torch.Tensor
+    valid_mask: torch.BoolTensor
+    window_len: int
+
+
+@dataclass(frozen=True)
 class _TrainingParams:
     svi: _SVIParams
     tbptt: _TBPTTParams
@@ -82,6 +92,12 @@ class _TrainingParams:
 class _TargetNormState:
     center: torch.Tensor
     scale: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _DebugConfig:
+    enabled: bool
+    output_dir: str | None
 
 
 _MODEL_REGISTRY = modeling.default_model_registry()
@@ -115,11 +131,14 @@ def _prepare_training_batches(
     X_train: torch.Tensor,
     y_train: torch.Tensor,
     params: _TrainingParams,
+    debug_log_shapes: bool,
 ) -> tuple[list[modeling.ModelBatch], _TargetNormState | None]:
     y_train_norm, norm_state = _maybe_normalize_targets(
         y_train, params.target_normalization
     )
-    batches = _build_tbptt_batches(X_train, y_train_norm, params)
+    batches = _build_tbptt_batches(
+        X_train, y_train_norm, params, debug_log_shapes
+    )
     if not batches:
         raise SimulationError("No valid targets for training")
     return batches, norm_state
@@ -154,9 +173,18 @@ def _fit_pyro_svi(
     _ = init_state
     _log_missing_targets(y_train)
     model_name, guide_name, model, guide = _resolve_model_and_guide(config)
+    debug_config = _debug_config(config)
+    _configure_debug_sink(
+        debug_config=debug_config,
+        model_name=model_name,
+        guide_name=guide_name,
+        model=model,
+        guide=guide,
+    )
     params = _training_params(config)
+    debug_log_shapes = debug_config.enabled
     batches, norm_state = _prepare_training_batches(
-        X_train, y_train, params
+        X_train, y_train, params, debug_log_shapes
     )
     pyro.clear_param_store()
     svi = _build_svi(model=model, guide=guide, params=params)
@@ -545,20 +573,16 @@ def _build_tbptt_batches(
     X_train: torch.Tensor,
     y_train: torch.Tensor,
     params: _TrainingParams,
+    debug_log_shapes: bool = False,
 ) -> list[modeling.ModelBatch]:
     _validate_training_inputs(X_train, y_train)
-    window_len = _resolve_window_len(y_train, params)
-    X_obs, y_obs, valid_mask = _prepare_training_observations(
-        X_train, y_train
-    )
-    if not valid_mask.any():
+    inputs = _prepare_training_observations(X_train, y_train, params)
+    if not inputs.valid_mask.any():
         return []
     return _slice_tbptt_windows(
-        X_obs=X_obs,
-        y_obs=y_obs,
-        valid_mask=valid_mask,
-        window_len=window_len,
+        inputs=inputs,
         params=params,
+        debug_log_shapes=debug_log_shapes,
     )
 
 
@@ -586,29 +610,35 @@ def _resolve_window_len(
 
 
 def _prepare_training_observations(
-    X_train: torch.Tensor, y_train: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.BoolTensor]:
+    X_train: torch.Tensor, y_train: torch.Tensor, params: _TrainingParams
+) -> _TBPTTInputs:
     valid_mask = cast(torch.BoolTensor, torch.isfinite(y_train))
     X_obs = X_train.to(dtype=torch.float32)
     y_obs = torch.nan_to_num(
         y_train, nan=0.0, posinf=0.0, neginf=0.0
     ).to(dtype=torch.float32)
-    return X_obs, y_obs, valid_mask
+    window_len = _resolve_window_len(y_train, params)
+    return _TBPTTInputs(
+        X_obs=X_obs,
+        y_obs=y_obs,
+        valid_mask=valid_mask,
+        window_len=window_len,
+    )
 
 
 def _slice_tbptt_windows(
     *,
-    X_obs: torch.Tensor,
-    y_obs: torch.Tensor,
-    valid_mask: torch.BoolTensor,
-    window_len: int,
+    inputs: _TBPTTInputs,
     params: _TrainingParams,
+    debug_log_shapes: bool,
 ) -> list[modeling.ModelBatch]:
-    total_steps = int(y_obs.shape[0])
+    total_steps = int(inputs.y_obs.shape[0])
     batches: list[modeling.ModelBatch] = []
-    for start in range(0, total_steps, window_len):
-        end = min(total_steps, start + window_len)
-        mask = cast(torch.BoolTensor, valid_mask[start:end].clone())
+    for start in range(0, total_steps, inputs.window_len):
+        end = min(total_steps, start + inputs.window_len)
+        mask = cast(
+            torch.BoolTensor, inputs.valid_mask[start:end].clone()
+        )
         if params.tbptt.burn_in_len > 0:
             burn = min(params.tbptt.burn_in_len, end - start)
             mask[:burn, :] = False
@@ -617,13 +647,57 @@ def _slice_tbptt_windows(
         obs_scale = _resolve_obs_scale(mask, params.log_prob_scaling)
         batches.append(
             modeling.ModelBatch(
-                X=X_obs[start:end],
-                y=y_obs[start:end],
+                X=inputs.X_obs[start:end],
+                y=inputs.y_obs[start:end],
                 M=mask,
                 obs_scale=obs_scale,
+                debug=debug_log_shapes,
             )
         )
     return batches
+
+
+def _debug_config(config: Mapping[str, Any]) -> _DebugConfig:
+    section = config.get("debug")
+    if not isinstance(section, Mapping):
+        return _DebugConfig(enabled=False, output_dir=None)
+    enabled = bool(section.get("enabled", False))
+    output_dir = section.get("output_dir")
+    if output_dir is None:
+        return _DebugConfig(enabled=enabled, output_dir=None)
+    return _DebugConfig(enabled=enabled, output_dir=str(output_dir))
+
+
+def _configure_debug_sink(
+    *,
+    debug_config: _DebugConfig,
+    model_name: str,
+    guide_name: str,
+    model: modeling.PyroModel,
+    guide: modeling.PyroGuide,
+) -> None:
+    if not debug_config.enabled or debug_config.output_dir is None:
+        return
+    run_timestamp = datetime.now().astimezone().strftime(
+        "%Y-%m-%d %H:%M:%S %Z"
+    )
+    modeling.configure_debug_sink(
+        output_dir=debug_config.output_dir,
+        metadata=modeling.DebugMetadata(
+            run_timestamp=run_timestamp,
+            model_name=model_name,
+            guide_name=guide_name,
+            model_file=_source_path(model),
+            guide_file=_source_path(guide),
+        ),
+    )
+
+
+def _source_path(obj: object) -> str | None:
+    try:
+        return inspect.getsourcefile(obj.__class__)
+    except TypeError:
+        return None
 
 
 def _resolve_obs_scale(

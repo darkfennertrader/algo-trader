@@ -71,6 +71,8 @@ def resolve_outer_test_group_ids(
 def build_base_config(
     model: ModelConfig,
     training: TrainingConfig,
+    flags: SimulationFlags,
+    debug_output_dir: str | None,
 ) -> dict[str, Any]:
     return {
         "model": {
@@ -78,6 +80,10 @@ def build_base_config(
             "guide_name": model.guide_name,
             "params": dict(model.params),
             "guide_params": dict(model.guide_params),
+        },
+        "debug": {
+            "enabled": flags.smoke_test_debug,
+            "output_dir": debug_output_dir,
         },
         "training": {
             "target_normalization": training.target_normalization,

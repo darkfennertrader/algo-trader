@@ -55,6 +55,7 @@ Masking:
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import logging
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -62,9 +63,12 @@ import pyro
 import pyro.distributions as dist
 import torch
 from algo_trader.domain import ConfigError
+from ..debug_utils import debug_log_shapes
 from ..batch_utils import resolve_batch_shape, sample_observation
 from ..protocols import ModelBatch, PyroModel
 from ..registry_core import register_model
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -153,6 +157,8 @@ class FactorModelV1(PyroModel):
           - y_obs: torch.Tensor | None, observed returns [T, A]
         """
         context = _build_context(batch)
+        debug_log_shapes(batch.debug, ("X shape:", batch.X))
+
         # 1) Tail thickness for Student-t likelihood.
         nu = _sample_nu(self.priors.dof, context)
         # 2) Global and feature-level shrinkage scales.
@@ -164,8 +170,18 @@ class FactorModelV1(PyroModel):
             context,
             scales,
         )
+        # Debug logging (controlled by smoke_test.debug).
+        # Use debug_log/debug_log_shapes anywhere in this model to log
+        # without repeating "if batch.debug" checks.
+        #
+        # Example:
+        #   debug_log(batch.debug, "mu=%s", mu)
+        #   debug_log_shapes(batch.debug, ("X", batch.X))
+        #   debug_log_shapes(batch.debug, {"w": w, "alpha": alpha})
+        #
         # 4) Build likelihood and condition on observed targets.
         obs_dist = _build_likelihood(context, alpha, sigma, w, nu)
+
         with pyro.plate("time", context.T, dim=-2):
             with pyro.plate("asset_obs", context.A, dim=-1):
                 sample_observation(

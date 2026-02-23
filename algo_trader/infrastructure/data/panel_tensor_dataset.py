@@ -145,6 +145,37 @@ def load_panel_tensor_dataset(
     )
 
 
+def build_synthetic_panel_dataset(
+    *,
+    T: int,
+    A: int,
+    F: int,
+    seed: int,
+    device: str,
+) -> PanelTensorDataset:
+    if T <= 0 or A <= 0 or F <= 0:
+        raise ConfigError(
+            "Synthetic tensor sizes must be positive",
+            context={"T": str(T), "A": str(A), "F": str(F)},
+        )
+    gen = torch.Generator().manual_seed(seed)
+    data = torch.randn((T, A, F), generator=gen, dtype=torch.float32)
+    targets = torch.randn((T, A), generator=gen, dtype=torch.float32)
+    missing_mask = torch.zeros((T, A, F), dtype=torch.bool)
+    dates = list(range(T))
+    assets = [f"Asset{i}" for i in range(A)]
+    features = [f"Feature{i}" for i in range(F)]
+    return PanelTensorDataset(
+        data=data.to(device),
+        targets=targets.to(device),
+        missing_mask=missing_mask.to(device),
+        dates=dates,
+        assets=assets,
+        features=features,
+        device=device,
+    )
+
+
 def _load_targets(
     path: Path | None,
     *,

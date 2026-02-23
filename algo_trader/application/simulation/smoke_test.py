@@ -98,6 +98,10 @@ def apply_smoke_test_overrides(
         evaluation=evaluation,
         cv=cv,
         outer=outer,
+        data=replace(
+            config.data,
+            simulation_output_path="smoke_test",
+        ),
     )
 
 

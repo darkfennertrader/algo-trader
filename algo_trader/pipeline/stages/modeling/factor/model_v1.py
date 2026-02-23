@@ -63,7 +63,7 @@ import pyro
 import pyro.distributions as dist
 import torch
 from algo_trader.domain import ConfigError
-from ..debug_utils import debug_log_shapes
+from ..debug_utils import debug_log
 from ..batch_utils import resolve_batch_shape, sample_observation
 from ..protocols import ModelBatch, PyroModel
 from ..registry_core import register_model
@@ -156,13 +156,48 @@ class FactorModelV1(PyroModel):
           - dtype: torch.dtype for tensors
           - y_obs: torch.Tensor | None, observed returns [T, A]
         """
-        context = _build_context(batch)
-        debug_log_shapes(batch.debug, ("X shape:", batch.X))
 
+        # Debug logging (controlled by smoke_test.debug).
+        # Use debug_log anywhere in this model to log
+        # without repeating "if batch.debug" checks.
+        #
+        # Example:
+        #   debug_log(batch.debug, f"mu={mu}")
+        #   debug_log(batch.debug, f"X shape: {context.X.shape}")
+        #
+
+        context = _build_context(batch)
+        ########################################################
+        debug_log(batch.debug, "Inputs:")
+        debug_log(batch.debug, f"X shape: {context.X.shape}")
+        debug_log(batch.debug, f"time steps - T: {context.T}")
+        debug_log(batch.debug, f"assets - A: {context.A}")
+        debug_log(batch.debug, f"features - F: {context.F}")
+        y_obs = context.y_obs
+        y_obs_shape = y_obs.shape if y_obs is not None else None
+        debug_log(batch.debug, f"features: {y_obs_shape}")
+        debug_log(batch.debug, "")
+        ########################################################
         # 1) Tail thickness for Student-t likelihood.
         nu = _sample_nu(self.priors.dof, context)
+        #######################################################################
+        debug_log(batch.debug, f"Tail thickness for Student-t likelihood: {nu}")
         # 2) Global and feature-level shrinkage scales.
         scales = _sample_horseshoe(self.priors.horseshoe, context)
+        debug_log(
+            batch.debug,
+            f"global horseshoe shrinkage scale - tau0: {scales.tau0.shape}",
+        )
+        debug_log(
+            batch.debug,
+            f"feature‑level horseshoe shrinkage - lambda: {scales.lam.shape}",
+        )
+        debug_log(
+            batch.debug,
+            f"Global slab scale - c: {scales.c.shape if scales.c is not None else None}",
+        )
+        debug_log(batch.debug, "")
+        ##############################################################
         # 3) Asset-level intercepts, residual scales, and feature weights.
         alpha, sigma, w = _sample_asset_params(
             self.priors.likelihood,
@@ -170,18 +205,23 @@ class FactorModelV1(PyroModel):
             context,
             scales,
         )
-        # Debug logging (controlled by smoke_test.debug).
-        # Use debug_log/debug_log_shapes anywhere in this model to log
-        # without repeating "if batch.debug" checks.
-        #
-        # Example:
-        #   debug_log(batch.debug, "mu=%s", mu)
-        #   debug_log_shapes(batch.debug, ("X", batch.X))
-        #   debug_log_shapes(batch.debug, {"w": w, "alpha": alpha})
-        #
+        debug_log(batch.debug, f"per‑asset intercept alpha: {alpha.shape}")
+        debug_log(batch.debug, f"per‑asset residual scale sigma: {sigma.shape}")
+        debug_log(
+            batch.debug,
+            f"per‑asset, per-feature weight matrix w: {w.shape}",
+        )
+        debug_log(batch.debug, "")
+        ##############################################################
         # 4) Build likelihood and condition on observed targets.
         obs_dist = _build_likelihood(context, alpha, sigma, w, nu)
-
+        debug_log(batch.debug, f"observ. studT df: {obs_dist.df.shape}")
+        debug_log(batch.debug, f"observ. studT center: {obs_dist.loc.shape}")
+        debug_log(
+            batch.debug,
+            f"observ. studT dispersion: {obs_dist.scale.shape}",
+        )
+        debug_log(batch.debug, "")
         with pyro.plate("time", context.T, dim=-2):
             with pyro.plate("asset_obs", context.A, dim=-1):
                 sample_observation(
@@ -429,6 +469,7 @@ def _sample_asset_params(
                     w_scale,
                 ),
             )
+
     return alpha, sigma, w
 
 

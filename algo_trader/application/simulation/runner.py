@@ -325,6 +325,8 @@ def _debug_output_dir(
 ) -> str | None:
     if not flags.smoke_test_debug:
         return None
+    if flags.smoke_test_enabled:
+        return str(artifacts.base_dir)
     return str(artifacts.base_dir / "smoke_test")
 
 def _load_dataset(config: SimulationConfig, device: str) -> PanelDataset:

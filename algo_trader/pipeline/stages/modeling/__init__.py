@@ -10,8 +10,6 @@ from .debug_utils import (
     DebugMetadata,
     configure_debug_sink,
     debug_log,
-    debug_log_shapes,
-    shape_str,
 )
 from .registry import (
     GuideRegistry,
@@ -34,8 +32,6 @@ __all__ = [
     "DebugMetadata",
     "configure_debug_sink",
     "debug_log",
-    "debug_log_shapes",
-    "shape_str",
     "default_guide_registry",
     "default_model_registry",
     "default_prebuild_registry",

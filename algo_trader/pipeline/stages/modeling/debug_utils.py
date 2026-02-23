@@ -1,16 +1,10 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
-
-import torch
-
-
-def shape_str(value: torch.Tensor | None) -> str | None:
-    if value is None:
-        return None
-    return str(tuple(value.shape))
+from types import FrameType
+from typing import Iterable, Sequence
 
 
 @dataclass(frozen=True)
@@ -48,26 +42,11 @@ def debug_log(debug: bool, message: str, *args: object) -> None:
     state = _require_state(debug)
     if state is None:
         return
-    key = f"log:{message}"
+    key = _callsite_key()
     if not _mark_first_seen(state, key):
         return
     text = _render_message(message, args)
     _write_lines(state, [text])
-
-
-def debug_log_shapes(
-    debug: bool,
-    values: Mapping[str, torch.Tensor | None]
-    | tuple[str, torch.Tensor | None],
-) -> None:
-    state = _require_state(debug)
-    if state is None:
-        return
-    payload = _normalize_shapes(values)
-    key = f"shapes:{','.join(sorted(payload))}"
-    if not _mark_first_seen(state, key):
-        return
-    _write_lines(state, _format_shape_lines(payload))
 
 
 def _set_debug_state(state: _DebugState) -> None:
@@ -79,18 +58,6 @@ def _require_state(debug: bool) -> _DebugState | None:
     if not debug:
         return None
     return _DEBUG_STATE
-
-
-def _normalize_shapes(
-    values: Mapping[str, torch.Tensor | None]
-    | tuple[str, torch.Tensor | None],
-) -> dict[str, str | None]:
-    if isinstance(values, tuple):
-        name, value = values
-        return {name: shape_str(value)}
-    return {
-        name: shape_str(value) for name, value in values.items()
-    }
 
 
 def _mark_first_seen(state: _DebugState, key: str) -> bool:
@@ -121,17 +88,23 @@ def _render_message(message: str, args: Sequence[object]) -> str:
         return f"{message} {args!r}"
 
 
-def _format_shape_lines(
-    payload: Mapping[str, str | None]
-) -> list[str]:
-    return [_format_shape_line(name, shape) for name, shape in payload.items()]
+def _callsite_key() -> str:
+    frame = inspect.currentframe()
+    if frame is None or frame.f_back is None:
+        return "log:unknown"
+    try:
+        caller = _caller_frame(frame)
+        if caller is None:
+            return "log:unknown"
+        code = caller.f_code
+        return f"log:{code.co_filename}:{caller.f_lineno}"
+    finally:
+        del frame
 
 
-def _format_shape_line(name: str, shape: str | None) -> str:
-    label = name
-    if label.endswith(":"):
-        return f"{label} {shape}"
-    return f"{label}: {shape}"
+def _caller_frame(frame: FrameType) -> FrameType | None:
+    # debug_log -> _callsite_key -> caller
+    return frame.f_back.f_back if frame.f_back is not None else None
 
 
 def _write_lines(

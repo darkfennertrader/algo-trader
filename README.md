@@ -889,6 +889,24 @@ trainable; candidates from `tuning.space` are evaluated via
 If `tuning.engine` is `local`, the same objective runs sequentially without
 Ray. When `tuning.engine: ray`, `ray[tune]` must be installed.
 
+### Resume + Checkpointing
+
+Ray Tune resumes **only** from trial checkpoints. In this codebase, each trial
+checkpoints after every inner CPCV split, so an interrupted run can pick up
+from the last completed split.
+
+To enable resume:
+- Set `RAY_TUNE_STORAGE_PATH` in `.env` (required when `tuning.engine: ray`).
+- Re‑run with `algotrader simulation --resume`.
+- The runner restores the **latest** experiment in `RAY_TUNE_STORAGE_PATH` and
+  resumes unfinished/errored trials. If the latest experiment is complete or
+  no experiment exists, the run fails fast with “No interrupted Ray Tune
+  experiment to resume”.
+
+Notes:
+- Resume only works when `tuning.engine: ray`.
+- The Ray Tune search space (`tuning.space`) must match the original run.
+
 ---
 
 ## 10) Post-Tune Model Selection

@@ -13,16 +13,13 @@ from algo_trader.domain import ConfigError, SimulationError
 from algo_trader.domain.simulation import (
     CandidateSpec,
     CPCVSplit,
-    CVParams,
     DataPaths,
     FeatureCleaningState,
-    ModelSelectionConfig,
     OuterFold,
     PanelDataset,
     PreprocessSpec,
     SimulationConfig,
     SimulationFlags,
-    TrainingConfig,
     TuningConfig,
 )
 from algo_trader.infrastructure import log_boundary
@@ -50,18 +47,8 @@ from .artifacts import (
 )
 from .preprocessing import InnerCleaningSummaryContext, summarize_inner_cleaning
 from .registry import default_registries
-from .tuning import (
-    apply_param_updates,
-    assign_candidate_ids,
-    build_candidates,
-    with_candidate_context,
-)
-from .tune_runner import (
-    RayTuneContext,
-    init_ray_for_tuning,
-    select_best_with_ray,
-    shutdown_ray_for_tuning,
-)
+from .tuning import assign_candidate_ids, build_candidates
+from .tune_runner import init_ray_for_tuning, shutdown_ray_for_tuning
 from .runner_helpers import (
     build_base_config,
     build_group_by_index,
@@ -76,12 +63,12 @@ from .smoke_test import (
     build_smoke_test_dataset,
     is_smoke_test_enabled,
 )
-from .diagnostics import FanChartDiagnosticsContext, run_fan_chart_diagnostics
-from .model_selection import (
-    GlobalSelectionContext,
-    PostTuneSelectionContext,
-    select_best_candidate_global,
-    select_best_candidate_post_tune,
+from .selection import (
+    BestConfigContext,
+    BestConfigResources,
+    run_global_diagnostics,
+    select_best_config,
+    select_global_best_config,
 )
 from .prebuild import PrebuildInputs, apply_prebuild, maybe_run_prebuild
 
@@ -105,16 +92,22 @@ class SimulationContext:
     feature_names: Sequence[str]
     assets: Sequence[str]
 
-def _run_context(config_path: Path | None) -> Mapping[str, str]:
-    return {"config": str(config_path or DEFAULT_CONFIG_PATH)}
+def _run_context(config_path: Path | None, resume: bool) -> Mapping[str, str]:
+    return {
+        "config": str(config_path or DEFAULT_CONFIG_PATH),
+        "resume": str(resume),
+    }
 
 @log_boundary("simulation.run", context=_run_context)
-def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
+def run(
+    *, config_path: Path | None = None, resume: bool = False
+) -> Mapping[str, Any]:
     config = apply_smoke_test_overrides(load_config(config_path))
     device = _resolve_device(config.flags.use_gpu)
     setup = _prepare_run_state(config=config, device=device)
     if setup.early_results is not None:
         return setup.early_results
+    resume_state = ResumeState(enabled=resume)
     use_ray = config.modeling.tuning.engine == "ray"
     ray_address = config.modeling.tuning.ray.address
     if use_ray:
@@ -123,6 +116,7 @@ def run(*, config_path: Path | None = None) -> Mapping[str, Any]:
         chosen_configs, outer_results = _evaluate_outer_folds(
             outer_context=setup.outer_context,
             candidates=setup.candidates,
+            resume_state=resume_state,
         )
     finally:
         if use_ray and ray_address is None:
@@ -421,26 +415,51 @@ class OuterFoldContext:
     artifacts: SimulationArtifacts
     flags: SimulationFlags
 
+
+@dataclass
+class ResumeState:
+    enabled: bool
+
+    def consume(self) -> bool:
+        if not self.enabled:
+            return False
+        self.enabled = False
+        return True
+
+
+def _resolve_resume_requested(
+    *, tuning: TuningConfig, resume_state: ResumeState
+) -> bool:
+    if tuning.engine == "ray":
+        return resume_state.consume()
+    if resume_state.enabled:
+        raise ConfigError("resume requires tuning.engine=ray")
+    return False
+
 def _evaluate_outer_folds(
     *,
     outer_context: OuterFoldContext,
     candidates: Sequence[CandidateSpec],
+    resume_state: ResumeState,
 ) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
     selection = outer_context.config.evaluation.model_selection
     if selection.enable:
         return _evaluate_outer_folds_global(
             outer_context=outer_context,
             candidates=candidates,
+            resume_state=resume_state,
         )
     return _evaluate_outer_folds_per_outer(
         outer_context=outer_context,
         candidates=candidates,
+        resume_state=resume_state,
     )
 
 def _evaluate_outer_folds_per_outer(
     *,
     outer_context: OuterFoldContext,
     candidates: Sequence[CandidateSpec],
+    resume_state: ResumeState,
 ) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
     chosen_configs: dict[int, Mapping[str, Any]] = {}
     outer_results: list[Mapping[str, Any]] = []
@@ -449,6 +468,7 @@ def _evaluate_outer_folds_per_outer(
             outer_context=outer_context,
             outer_fold=outer_fold,
             candidates=candidates,
+            resume_state=resume_state,
         )
         chosen_configs[outer_fold.k_test] = fold_result.best_config
         if fold_result.outer_result is not None:
@@ -459,6 +479,7 @@ def _evaluate_outer_folds_global(
     *,
     outer_context: OuterFoldContext,
     candidates: Sequence[CandidateSpec],
+    resume_state: ResumeState,
 ) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
     chosen_configs: dict[int, Mapping[str, Any]] = {}
     outer_results: list[Mapping[str, Any]] = []
@@ -467,14 +488,23 @@ def _evaluate_outer_folds_global(
             outer_context=outer_context,
             outer_fold=outer_fold,
             candidates=candidates,
+            resume_state=resume_state,
         )
-    global_best = _select_global_best_config(
-        outer_context=outer_context,
+    global_best = select_global_best_config(
+        artifacts=outer_context.artifacts,
+        outer_ids=outer_context.context.cv.outer_ids,
         candidates=candidates,
+        model_selection=outer_context.config.evaluation.model_selection,
+        base_config=outer_context.base_config,
     )
-    _run_global_diagnostics(
-        outer_context=outer_context,
-        global_best=global_best,
+    run_global_diagnostics(
+        base_dir=outer_context.artifacts.base_dir,
+        outer_ids=outer_context.context.cv.outer_ids,
+        candidate_id=global_best.candidate_id,
+        diagnostics=outer_context.config.evaluation.diagnostics,
+        model_selection_enabled=(
+            outer_context.config.evaluation.model_selection.enable
+        ),
     )
     for outer_fold in outer_context.context.cv.outer_folds:
         chosen_configs[outer_fold.k_test] = global_best.best_config
@@ -502,51 +532,46 @@ class OuterFoldRunResult:
     best_config: Mapping[str, Any]
     outer_result: Mapping[str, Any] | None
 
-@dataclass(frozen=True)
-class GlobalBestConfig:
-    best_config: Mapping[str, Any]
-    candidate_id: int
 
 @dataclass(frozen=True)
-class BestConfigContext:
+class InnerObjectiveBundle:
     objective: Any
-    base_config: Mapping[str, Any]
-    candidates: Sequence[CandidateSpec]
-    resources: "BestConfigResources"
-
-@dataclass(frozen=True)
-class BestConfigResources:
-    tuning: TuningConfig
-    use_gpu: bool
-    model_selection: ModelSelectionConfig
-    artifacts: SimulationArtifacts
-    outer_k: int
+    context: InnerObjectiveContext
+    hooks: SimulationHooks
 
 def _run_outer_fold(
     *,
     outer_context: OuterFoldContext,
     outer_fold: OuterFold,
     candidates: Sequence[CandidateSpec],
+    resume_state: ResumeState,
 ) -> OuterFoldRunResult:
     started = time.perf_counter()
     inner_splits = _build_inner_splits(
         outer_context=outer_context,
         outer_fold=outer_fold,
     )
-    objective = _build_inner_objective(
+    inner_bundle = _build_inner_objective(
         outer_context=outer_context,
         outer_fold=outer_fold,
         inner_splits=inner_splits,
     )
+    objective = inner_bundle.objective
     _write_postprocess_metadata(
         outer_context=outer_context,
         outer_fold=outer_fold,
         inner_splits=inner_splits,
         candidates=candidates,
     )
-    best_config = _select_best_config(
+    resume_requested = _resolve_resume_requested(
+        tuning=outer_context.config.modeling.tuning,
+        resume_state=resume_state,
+    )
+    best_config = select_best_config(
         BestConfigContext(
             objective=objective,
+            inner_context=inner_bundle.context,
+            hooks=inner_bundle.hooks,
             base_config=outer_context.base_config,
             candidates=candidates,
             resources=BestConfigResources(
@@ -558,7 +583,8 @@ def _run_outer_fold(
                 artifacts=outer_context.artifacts,
                 outer_k=outer_fold.k_test,
             ),
-        )
+        ),
+        resume_requested=resume_requested,
     )
     _write_inner_outputs(
         outer_context=outer_context,
@@ -594,26 +620,34 @@ def _run_outer_fold_inner_only(
     outer_context: OuterFoldContext,
     outer_fold: OuterFold,
     candidates: Sequence[CandidateSpec],
+    resume_state: ResumeState,
 ) -> Mapping[str, Any]:
     started = time.perf_counter()
     inner_splits = _build_inner_splits(
         outer_context=outer_context,
         outer_fold=outer_fold,
     )
-    objective = _build_inner_objective(
+    inner_bundle = _build_inner_objective(
         outer_context=outer_context,
         outer_fold=outer_fold,
         inner_splits=inner_splits,
     )
+    objective = inner_bundle.objective
     _write_postprocess_metadata(
         outer_context=outer_context,
         outer_fold=outer_fold,
         inner_splits=inner_splits,
         candidates=candidates,
     )
-    best_config = _select_best_config(
+    resume_requested = _resolve_resume_requested(
+        tuning=outer_context.config.modeling.tuning,
+        resume_state=resume_state,
+    )
+    best_config = select_best_config(
         BestConfigContext(
             objective=objective,
+            inner_context=inner_bundle.context,
+            hooks=inner_bundle.hooks,
             base_config=outer_context.base_config,
             candidates=candidates,
             resources=BestConfigResources(
@@ -625,7 +659,8 @@ def _run_outer_fold_inner_only(
                 artifacts=outer_context.artifacts,
                 outer_k=outer_fold.k_test,
             ),
-        )
+        ),
+        resume_requested=resume_requested,
     )
     _write_inner_outputs(
         outer_context=outer_context,
@@ -668,30 +703,34 @@ def _build_inner_objective(
     outer_fold: OuterFold,
     inner_splits: list[CPCVSplit],
 ):
-    return make_inner_objective(
-        context=InnerObjectiveContext(
-            data=InnerObjectiveData(
-                X=outer_context.context.X,
-                M=outer_context.context.M,
-                y=outer_context.context.y,
-            ),
-            artifacts=outer_context.artifacts,
-            group_by_index=outer_context.context.cv.group_by_index,
-            inner_splits=inner_splits,
-            params=InnerObjectiveParams(
-                preprocess_spec=outer_context.context.preprocess_spec,
-                score_spec=outer_context.config.evaluation.scoring.spec,
-                num_pp_samples=(
-                    outer_context.config.evaluation.predictive.num_samples_inner
-                ),
-                outer_k=outer_fold.k_test,
-                aggregate=outer_context.config.modeling.tuning.aggregate.method,
-                aggregate_lambda=(
-                    outer_context.config.modeling.tuning.aggregate.penalty
-                ),
-            ),
-            model_selection=outer_context.config.evaluation.model_selection,
+    context = InnerObjectiveContext(
+        data=InnerObjectiveData(
+            X=outer_context.context.X,
+            M=outer_context.context.M,
+            y=outer_context.context.y,
         ),
+        artifacts=outer_context.artifacts,
+        group_by_index=outer_context.context.cv.group_by_index,
+        inner_splits=inner_splits,
+        params=InnerObjectiveParams(
+            preprocess_spec=outer_context.context.preprocess_spec,
+            score_spec=outer_context.config.evaluation.scoring.spec,
+            num_pp_samples=(
+                outer_context.config.evaluation.predictive.num_samples_inner
+            ),
+            outer_k=outer_fold.k_test,
+            aggregate=outer_context.config.modeling.tuning.aggregate.method,
+            aggregate_lambda=(
+                outer_context.config.modeling.tuning.aggregate.penalty
+            ),
+        ),
+        model_selection=outer_context.config.evaluation.model_selection,
+    )
+    return InnerObjectiveBundle(
+        objective=make_inner_objective(
+            context=context, hooks=outer_context.hooks
+        ),
+        context=context,
         hooks=outer_context.hooks,
     )
 
@@ -869,117 +908,3 @@ def _write_candidate_artifacts(
     candidate_specs = assign_candidate_ids(candidates)
     artifacts.write_candidates(candidates=candidate_specs)
     return candidate_specs
-
-def _select_best_config(
-    context: BestConfigContext,
-) -> Mapping[str, Any]:
-    resources = context.resources
-    if resources.tuning.engine == "ray":
-        best_config = select_best_with_ray(
-            RayTuneContext(
-                objective=context.objective,
-                base_config=context.base_config,
-                candidates=context.candidates,
-                resources=resources.tuning.ray.resources,
-                use_gpu=resources.use_gpu,
-                address=resources.tuning.ray.address,
-            )
-        )
-    else:
-        best_config = _select_best_config_local(
-            objective=context.objective,
-            base_config=context.base_config,
-            candidates=context.candidates,
-        )
-    if not resources.model_selection.enable:
-        return best_config
-    selection = select_best_candidate_post_tune(
-        PostTuneSelectionContext(
-            artifacts=resources.artifacts,
-            outer_k=resources.outer_k,
-            candidates=context.candidates,
-            model_selection=resources.model_selection,
-            use_gpu=resources.use_gpu,
-        )
-    )
-    params = _candidate_params_by_id(
-        candidates=context.candidates,
-        candidate_id=selection.best_candidate_id,
-    )
-    return apply_param_updates(context.base_config, params)
-
-def _select_best_config_local(
-    *,
-    objective,
-    base_config: Mapping[str, Any],
-    candidates: Sequence[CandidateSpec],
-) -> Mapping[str, Any]:
-    best_score = float("-inf")
-    best_config: Mapping[str, Any] = dict(base_config)
-
-    for candidate in candidates:
-        merged = apply_param_updates(base_config, candidate.params)
-        merged = with_candidate_context(merged, candidate.candidate_id)
-        score = float(objective(merged))
-        if score > best_score:
-            best_score = score
-            best_config = merged
-
-    return best_config
-
-def _candidate_params_by_id(
-    *, candidates: Sequence[CandidateSpec], candidate_id: int
-) -> Mapping[str, Any]:
-    for candidate in candidates:
-        if candidate.candidate_id == candidate_id:
-            return candidate.params
-    raise SimulationError(
-        "Post-tune selection returned unknown candidate id",
-        context={"candidate_id": str(candidate_id)},
-    )
-
-def _select_global_best_config(
-    *,
-    outer_context: OuterFoldContext,
-    candidates: Sequence[CandidateSpec],
-) -> GlobalBestConfig:
-    selection = select_best_candidate_global(
-        GlobalSelectionContext(
-            artifacts=outer_context.artifacts,
-            outer_ids=outer_context.context.cv.outer_ids,
-            candidates=candidates,
-            model_selection=(
-                outer_context.config.evaluation.model_selection
-            ),
-        )
-    )
-    params = _candidate_params_by_id(
-        candidates=candidates, candidate_id=selection.best_candidate_id
-    )
-    best_config = apply_param_updates(outer_context.base_config, params)
-    outer_context.artifacts.write_global_best_config(payload=best_config)
-    return GlobalBestConfig(
-        best_config=best_config,
-        candidate_id=int(selection.best_candidate_id),
-    )
-
-def _run_global_diagnostics(
-    *,
-    outer_context: OuterFoldContext,
-    global_best: GlobalBestConfig,
-) -> None:
-    diagnostics = outer_context.config.evaluation.diagnostics
-    if not diagnostics.fan_charts.enable:
-        return
-    if not outer_context.config.evaluation.model_selection.enable:
-        raise SimulationError(
-            "Diagnostics require model_selection.enable"
-        )
-    run_fan_chart_diagnostics(
-        FanChartDiagnosticsContext(
-            base_dir=outer_context.artifacts.base_dir,
-            outer_ids=outer_context.context.cv.outer_ids,
-            candidate_id=global_best.candidate_id,
-            config=diagnostics.fan_charts,
-        )
-    )

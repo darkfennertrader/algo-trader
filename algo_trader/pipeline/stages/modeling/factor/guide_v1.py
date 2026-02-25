@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -70,28 +71,36 @@ def _build_context(batch: ModelBatch) -> _GuideContext:
     )
 
 
+# Hard-set initial values (scalars)
+_INIT_LOGSCALE = 0.30  # for all LogNormal scale params
+_INIT_NU_RAW_LOC = 2.30  # log(10), matches Gamma mean shape/rate=10
+_INIT_TAU0_LOC = -4.76  # log(0.0086) from your F=45, T=308 heuristic
+_INIT_SIGMA_LOC = 0.18  # log(1.2)
+_INIT_W_SCALE = 0.02  # key: prevents huge Var(mu) at init
+
+
 def _sample_global_params(
     priors: FactorModelPriors, context: _GuideContext
 ) -> None:
     device, dtype = context.device, context.dtype
     nu_raw_loc = pyro.param(
         "nu_raw_loc",
-        torch.tensor(0.0, device=device, dtype=dtype),
+        torch.tensor(_INIT_NU_RAW_LOC, device=device, dtype=dtype),
     )
     nu_raw_scale = pyro.param(
         "nu_raw_scale",
-        torch.tensor(1.0, device=device, dtype=dtype),
+        torch.tensor(_INIT_LOGSCALE, device=device, dtype=dtype),
         constraint=constraints.positive,
     )
     pyro.sample("nu_raw", dist.LogNormal(nu_raw_loc, nu_raw_scale))
 
     tau0_loc = pyro.param(
         "tau0_loc",
-        torch.tensor(0.0, device=device, dtype=dtype),
+        torch.tensor(_INIT_TAU0_LOC, device=device, dtype=dtype),
     )
     tau0_scale = pyro.param(
         "tau0_scale",
-        torch.tensor(1.0, device=device, dtype=dtype),
+        torch.tensor(_INIT_LOGSCALE, device=device, dtype=dtype),
         constraint=constraints.positive,
     )
     pyro.sample("tau0", dist.LogNormal(tau0_loc, tau0_scale))
@@ -99,11 +108,11 @@ def _sample_global_params(
     if priors.horseshoe.use_regularized:
         c_loc = pyro.param(
             "c_loc",
-            torch.tensor(0.0, device=device, dtype=dtype),
+            torch.tensor(math.log(0.5), device=device, dtype=dtype),
         )
         c_scale = pyro.param(
             "c_scale",
-            torch.tensor(1.0, device=device, dtype=dtype),
+            torch.tensor(_INIT_LOGSCALE, device=device, dtype=dtype),
             constraint=constraints.positive,
         )
         pyro.sample("c", dist.LogNormal(c_loc, c_scale))
@@ -119,36 +128,40 @@ def _sample_lambda(context: _GuideContext) -> None:
         )
         lambda_scale = pyro.param(
             "lambda_scale",
-            torch.ones(F, device=device, dtype=dtype),
+            torch.full((F,), _INIT_LOGSCALE, device=device, dtype=dtype),
             constraint=constraints.positive,
         )
         pyro.sample("lambda", dist.LogNormal(lambda_loc, lambda_scale))
 
 
-def _sample_asset_params(context: _GuideContext) -> None:
+def _sample_asset_params(context) -> None:
     device, dtype = context.device, context.dtype
     A, F = context.A, context.F
     alpha_shape = (A, 1)
     sigma_shape = (A, 1)
+
     with pyro.plate("asset", A, dim=-2):
         alpha_loc = pyro.param(
             "alpha_loc",
             torch.zeros(alpha_shape, device=device, dtype=dtype),
         )
+        # Optional but recommended: don't start with alpha uncertainty = 1 in z-space
         alpha_scale = pyro.param(
             "alpha_scale",
-            torch.ones(alpha_shape, device=device, dtype=dtype),
+            torch.full(alpha_shape, 0.10, device=device, dtype=dtype),
             constraint=constraints.positive,
         )
         pyro.sample("alpha", dist.Normal(alpha_loc, alpha_scale))
 
         sigma_loc = pyro.param(
             "sigma_loc",
-            torch.zeros(sigma_shape, device=device, dtype=dtype),
+            torch.full(
+                sigma_shape, _INIT_SIGMA_LOC, device=device, dtype=dtype
+            ),
         )
         sigma_scale = pyro.param(
             "sigma_scale",
-            torch.ones(sigma_shape, device=device, dtype=dtype),
+            torch.full(sigma_shape, _INIT_LOGSCALE, device=device, dtype=dtype),
             constraint=constraints.positive,
         )
         pyro.sample("sigma", dist.LogNormal(sigma_loc, sigma_scale))
@@ -160,7 +173,7 @@ def _sample_asset_params(context: _GuideContext) -> None:
             )
             kappa_scale = pyro.param(
                 "kappa_scale",
-                torch.ones((A, F), device=device, dtype=dtype),
+                torch.full((A, F), _INIT_LOGSCALE, device=device, dtype=dtype),
                 constraint=constraints.positive,
             )
             pyro.sample("kappa", dist.LogNormal(kappa_loc, kappa_scale))
@@ -171,7 +184,7 @@ def _sample_asset_params(context: _GuideContext) -> None:
             )
             w_scale = pyro.param(
                 "w_scale",
-                torch.ones((A, F), device=device, dtype=dtype),
+                torch.full((A, F), _INIT_W_SCALE, device=device, dtype=dtype),
                 constraint=constraints.positive,
             )
             pyro.sample("w", dist.Normal(w_loc, w_scale))

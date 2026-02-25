@@ -62,32 +62,71 @@ def make_inner_objective(
     hooks: SimulationHooks,
 ) -> Callable[[Mapping[str, Any]], float]:
     def objective(config: Mapping[str, Any]) -> float:
-        fold_scores: list[float] = []
         candidate_id = _require_candidate_id(config)
-        for split_id, split in enumerate(context.inner_splits):
-            result = _evaluate_split(
-                SplitContext(
-                    data=context.data,
-                    params=context.params,
-                    split=split,
-                    split_id=split_id,
-                    config=config,
-                    candidate_id=candidate_id,
-                    resources=SplitResources(
-                        hooks=hooks,
-                        artifacts=context.artifacts,
-                        group_by_index=context.group_by_index,
-                        model_selection=context.model_selection,
-                    ),
-                )
+        fold_scores = evaluate_inner_splits(
+            SplitEvaluationRequest(
+                context=context,
+                hooks=hooks,
+                config=config,
+                candidate_id=candidate_id,
             )
-            if result is None:
-                continue
+        )
+        return aggregate_scores(
+            fold_scores,
+            method=context.params.aggregate,
+            penalty=context.params.aggregate_lambda,
+        )
+
+    return objective
+
+
+@dataclass(frozen=True)
+class SplitEvaluationRequest:
+    context: InnerObjectiveContext
+    hooks: SimulationHooks
+    config: Mapping[str, Any]
+    candidate_id: int
+
+
+@dataclass(frozen=True)
+class SplitEvaluationResume:
+    start_split_id: int = 0
+    prior_scores: Sequence[float] | None = None
+    on_split: Callable[[int, list[float]], None] | None = None
+
+
+def evaluate_inner_splits(
+    request: SplitEvaluationRequest,
+    *,
+    resume: SplitEvaluationResume | None = None,
+) -> list[float]:
+    effective_resume = resume or SplitEvaluationResume()
+    fold_scores = list(effective_resume.prior_scores or [])
+    for split_id, split in enumerate(request.context.inner_splits):
+        if split_id < effective_resume.start_split_id:
+            continue
+        result = _evaluate_split(
+            SplitContext(
+                data=request.context.data,
+                params=request.context.params,
+                split=split,
+                split_id=split_id,
+                config=request.config,
+                candidate_id=request.candidate_id,
+                resources=SplitResources(
+                    hooks=request.hooks,
+                    artifacts=request.context.artifacts,
+                    group_by_index=request.context.group_by_index,
+                    model_selection=request.context.model_selection,
+                ),
+            )
+        )
+        if result is not None:
             fold_scores.append(result.score)
             logger.info(
                 "event=complete boundary=simulation.inner_split context=%s",
                 {
-                    "outer_k": context.params.outer_k,
+                    "outer_k": request.context.params.outer_k,
                     "split_id": split_id,
                     "train_size": result.train_size,
                     "test_size": result.test_size,
@@ -96,16 +135,9 @@ def make_inner_objective(
                     "n_features_kept": result.n_features_kept,
                 },
             )
-
-        if not fold_scores:
-            return float("-inf")
-        return _aggregate_scores(
-            fold_scores,
-            method=context.params.aggregate,
-            penalty=context.params.aggregate_lambda,
-        )
-
-    return objective
+        if effective_resume.on_split:
+            effective_resume.on_split(split_id, fold_scores)
+    return fold_scores
 
 
 def _require_candidate_id(config: Mapping[str, Any]) -> int:
@@ -264,10 +296,12 @@ def _select_targets(y: torch.Tensor, indices: np.ndarray) -> torch.Tensor:
     ]
 
 
-def _aggregate_scores(
+def aggregate_scores(
     scores: Sequence[float], *, method: str, penalty: float
 ) -> float:
     values = np.asarray(scores, dtype=float)
+    if values.size == 0:
+        return float("-inf")
     if method == "mean":
         return float(values.mean())
     if method == "median":

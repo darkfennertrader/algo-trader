@@ -95,6 +95,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to simulation.yml (defaults to config/simulation.yml).",
     )
+    simulation_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume the latest interrupted Ray Tune experiment.",
+    )
 
     feature_parser = subparsers.add_parser(
         "feature_engineering",
@@ -183,8 +188,8 @@ def _run_feature_engineering(
     return 0
 
 
-def _run_simulation(*, config_path: Path | None) -> int:
-    simulation.run(config_path=config_path)
+def _run_simulation(*, config_path: Path | None, resume: bool) -> int:
+    simulation.run(config_path=config_path, resume=resume)
     return 0
 
 
@@ -221,6 +226,7 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
         "simulation": partial(
             _run_simulation,
             config_path=getattr(args, "simulation_config", None),
+            resume=bool(getattr(args, "resume", False)),
         ),
         "wizard": _run_wizard,
     }

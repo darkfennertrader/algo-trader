@@ -140,6 +140,13 @@ def _simulation_command() -> WizardCommand:
     )
     if config_path:
         args.extend(["--simulation-config", config_path])
+    resume = _prompt_choice(
+        "Resume latest interrupted Ray Tune experiment?",
+        ["no", "yes"],
+        default="no",
+    )
+    if resume == "yes":
+        args.append("--resume")
     return WizardCommand(commands=[args])
 
 

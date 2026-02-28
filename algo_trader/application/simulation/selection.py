@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from algo_trader.domain import ConfigError, SimulationError
@@ -21,6 +22,7 @@ from .model_selection import (
 from .tune_runner import (
     RayTuneContext,
     RayTuneInputs,
+    RayTuneRuntimeSpec,
     RayTuneSpec,
     select_best_with_ray,
 )
@@ -58,11 +60,18 @@ def select_best_config(
     context: BestConfigContext,
     *,
     resume_requested: bool,
+    ray_experiment_name: str | None = None,
+    ray_storage_path: Path | None = None,
+    ray_resume_experiment_dir: Path | None = None,
 ) -> Mapping[str, Any]:
     resources = context.resources
     if resume_requested and resources.tuning.engine != "ray":
         raise ConfigError("resume requires tuning.engine=ray")
     if resources.tuning.engine == "ray":
+        if ray_experiment_name is None:
+            raise ConfigError("Ray Tune experiment name is required")
+        if ray_storage_path is None:
+            raise ConfigError("Ray Tune storage path is required")
         best_config = select_best_with_ray(
             RayTuneContext(
                 inputs=RayTuneInputs(
@@ -75,8 +84,17 @@ def select_best_config(
                     candidates=context.candidates,
                     resources=resources.tuning.ray.resources,
                     use_gpu=resources.use_gpu,
-                    address=resources.tuning.ray.address,
-                    resume=resume_requested,
+                    runtime=RayTuneRuntimeSpec(
+                        storage_path=ray_storage_path,
+                        experiment_name=ray_experiment_name,
+                        address=resources.tuning.ray.address,
+                        resume_experiment_dir=(
+                            ray_resume_experiment_dir
+                            if resume_requested
+                            else None
+                        ),
+                        logs_enabled=resources.tuning.ray.logs_enabled,
+                    ),
                 ),
             )
         )

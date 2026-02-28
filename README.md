@@ -898,14 +898,19 @@ from the last completed split.
 To enable resume:
 - Set `RAY_TUNE_STORAGE_PATH` in `.env` (required when `tuning.engine: ray`).
 - Re‑run with `algotrader simulation --resume`.
-- The runner restores the **latest** experiment in `RAY_TUNE_STORAGE_PATH` and
-  resumes unfinished/errored trials. If the latest experiment is complete or
-  no experiment exists, the run fails fast with “No interrupted Ray Tune
-  experiment to resume”.
+- The simulation restores from its persisted resume manifest at:
+  `SIMULATION_SOURCE/<label>/artifacts/resume/ray_tune_resume_manifest.json`.
+- It resumes the first unfinished outer fold via `Tuner.restore(...)`, skips
+  already completed outer folds, and then continues remaining folds to the end.
+- If no interrupted run exists (or the run is already complete), it fails fast
+  with “No interrupted Ray Tune experiment to resume”.
 
 Notes:
 - Resume only works when `tuning.engine: ray`.
 - The Ray Tune search space (`tuning.space`) must match the original run.
+- Resume targets deterministic per‑fold experiment directories under
+  `RAY_TUNE_STORAGE_PATH` (one Ray experiment per outer fold for the same
+  simulation run).
 
 ---
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 from pathlib import Path
 import tempfile
 from typing import Any, Mapping, Sequence
@@ -21,6 +22,9 @@ from .inner_objective import (
 )
 from .tuning import apply_param_updates, with_candidate_context
 
+_BOOTSTRAP_SCORE_SENTINEL = -1e30
+_EXPERIMENT_ANALYSIS_METRICS_WARNING = "Failed to fetch metrics for"
+
 
 @dataclass(frozen=True)
 class RayTuneInputs:
@@ -35,8 +39,16 @@ class RayTuneSpec:
     candidates: Sequence[CandidateSpec]
     resources: TuningResourcesConfig
     use_gpu: bool
+    runtime: "RayTuneRuntimeSpec"
+
+
+@dataclass(frozen=True)
+class RayTuneRuntimeSpec:
+    storage_path: Path
+    experiment_name: str
     address: str | None
-    resume: bool
+    resume_experiment_dir: Path | None
+    logs_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -56,25 +68,33 @@ class TrialCheckpointState:
 def select_best_with_ray(context: RayTuneContext) -> Mapping[str, Any]:
     if not context.spec.candidates:
         raise ConfigError("No candidates available for Ray Tune")
-    storage_path = _resolve_storage_path()
+    _configure_ray_tune_restore_warnings(
+        logs_enabled=context.spec.runtime.logs_enabled
+    )
     _, tune = _import_tune()
     trainable = _build_trainable(context, tune)
-    if context.spec.resume:
-        tuner = _restore_latest_tuner(
+    if context.spec.runtime.resume_experiment_dir is not None:
+        tuner = _restore_tuner(
             trainable=trainable,
             candidates=context.spec.candidates,
             tune=tune,
-            storage_path=storage_path,
+            experiment_dir=context.spec.runtime.resume_experiment_dir,
         )
     else:
         tuner = _build_tuner(
-            trainable, context.spec.candidates, tune, storage_path
+            trainable=trainable,
+            candidates=context.spec.candidates,
+            tune=tune,
+            runtime=context.spec.runtime,
         )
     best_candidate = _extract_best_candidate(tuner.fit())
     return apply_param_updates(context.spec.base_config, best_candidate)
 
 
-def init_ray_for_tuning(address: str | None) -> None:
+def init_ray_for_tuning(
+    address: str | None, *, logs_enabled: bool
+) -> None:
+    _configure_ray_tune_restore_warnings(logs_enabled=logs_enabled)
     ray, _ = _import_tune()
     _init_ray(address, ray)
 
@@ -109,7 +129,7 @@ def _init_ray(address: str | None, ray: Any) -> None:
         ray.init(ignore_reinit_error=True, include_dashboard=False)
 
 
-def _resolve_storage_path() -> Path:
+def resolve_ray_tune_storage_path() -> Path:
     raw = require_env("RAY_TUNE_STORAGE_PATH")
     path = Path(raw).expanduser()
     if path.exists() and not path.is_dir():
@@ -147,6 +167,28 @@ def _resolve_prior_scores(
     if state is None:
         return []
     return [float(value) for value in state.split_scores]
+
+
+def _maybe_report_bootstrap_checkpoint(
+    *,
+    tune: Any,
+    state: TrialCheckpointState | None,
+    candidate_id: int,
+    fingerprint: str,
+) -> None:
+    if state is not None:
+        return
+    bootstrap_state = TrialCheckpointState(
+        candidate_id=candidate_id,
+        candidate_fingerprint=fingerprint,
+        last_completed_split_id=-1,
+        split_scores=tuple(),
+    )
+    # TensorBoardX logs noisy warnings when metrics are NaN/Inf.
+    # Use a finite sentinel while keeping bootstrap trial ranking effectively minimal.
+    _write_checkpoint_state(
+        tune, bootstrap_state, _BOOTSTRAP_SCORE_SENTINEL
+    )
 
 
 def _load_checkpoint_state(
@@ -268,6 +310,12 @@ def _build_trainable(context: RayTuneContext, tune: Any):
         )
         start_split_id = _resolve_start_split_id(checkpoint_state)
         prior_scores = _resolve_prior_scores(checkpoint_state)
+        _maybe_report_bootstrap_checkpoint(
+            tune=tune,
+            state=checkpoint_state,
+            candidate_id=candidate_id,
+            fingerprint=fingerprint,
+        )
 
         def on_split(split_id: int, scores: list[float]) -> None:
             aggregate = _aggregate_for_context(
@@ -307,30 +355,32 @@ def _build_trainable(context: RayTuneContext, tune: Any):
 
 
 def _build_tuner(
+    *,
     trainable,
     candidates: Sequence[CandidateSpec],
     tune: Any,
-    storage_path: Path,
+    runtime: RayTuneRuntimeSpec,
 ):
     return tune.Tuner(
         trainable,
         param_space=_build_param_space(candidates, tune),
         tune_config=tune.TuneConfig(metric="score", mode="max"),
-        run_config=tune.RunConfig(storage_path=str(storage_path)),
+        run_config=tune.RunConfig(
+            name=runtime.experiment_name,
+            storage_path=str(runtime.storage_path),
+            verbose=1 if runtime.logs_enabled else 0,
+        ),
     )
 
 
-def _restore_latest_tuner(
+def _restore_tuner(
     *,
     trainable,
     candidates: Sequence[CandidateSpec],
     tune: Any,
-    storage_path: Path,
+    experiment_dir: Path,
 ):
-    experiment_dir = _latest_experiment_dir(storage_path)
-    if experiment_dir is None:
-        raise ConfigError("No Ray Tune experiment to resume")
-    if not _is_interrupted_experiment(experiment_dir):
+    if not tune.Tuner.can_restore(str(experiment_dir)):
         raise ConfigError("No interrupted Ray Tune experiment to resume")
     return tune.Tuner.restore(
         str(experiment_dir),
@@ -347,69 +397,6 @@ def _build_param_space(
     return {
         "candidate": tune.grid_search(_candidate_payloads(candidates))
     }
-
-
-def _latest_experiment_dir(storage_path: Path) -> Path | None:
-    if not storage_path.exists():
-        return None
-    candidates = [path for path in storage_path.iterdir() if path.is_dir()]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda path: path.stat().st_mtime)
-
-
-def _is_interrupted_experiment(experiment_dir: Path) -> bool:
-    state = _load_experiment_state(experiment_dir)
-    if state is None:
-        return False
-    statuses = _extract_trial_statuses(state)
-    if not statuses:
-        return False
-    terminal = {"TERMINATED", "COMPLETED"}
-    return any(status not in terminal for status in statuses)
-
-
-def _load_experiment_state(
-    experiment_dir: Path,
-) -> Mapping[str, Any] | None:
-    state_path = experiment_dir / "experiment_state.json"
-    if not state_path.exists():
-        return None
-    try:
-        payload = json.loads(state_path.read_text())
-    except json.JSONDecodeError as exc:
-        raise ConfigError("Ray Tune experiment_state.json is invalid") from exc
-    if not isinstance(payload, Mapping):
-        raise ConfigError("Ray Tune experiment_state.json must be a mapping")
-    return payload
-
-
-def _extract_trial_statuses(
-    payload: Mapping[str, Any],
-) -> list[str]:
-    statuses: list[str] = []
-    for key in ("trials", "trial_data", "trial_states"):
-        statuses.extend(_extract_statuses(payload.get(key)))
-    return [status.upper() for status in statuses if status]
-
-
-def _extract_statuses(value: Any) -> list[str]:
-    if isinstance(value, Mapping):
-        items = value.values()
-    elif isinstance(value, list):
-        items = value
-    else:
-        return []
-    statuses: list[str] = []
-    for item in items:
-        if not isinstance(item, Mapping):
-            continue
-        status = item.get("status") or item.get("trial_state") or item.get(
-            "state"
-        )
-        if isinstance(status, str):
-            statuses.append(status)
-    return statuses
 
 
 def _extract_best_candidate(results) -> Mapping[str, Any]:
@@ -468,3 +455,23 @@ def _with_resources(
     if not resource_spec:
         return trainable
     return tune.with_resources(trainable, resource_spec)
+
+
+def _configure_ray_tune_restore_warnings(*, logs_enabled: bool) -> None:
+    logger = logging.getLogger("ray.tune.analysis.experiment_analysis")
+    _ensure_experiment_analysis_filter(logger)
+    level = logging.WARNING if logs_enabled else logging.ERROR
+    logger.setLevel(level)
+
+
+class _ExperimentAnalysisFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return _EXPERIMENT_ANALYSIS_METRICS_WARNING not in message
+
+
+def _ensure_experiment_analysis_filter(logger: logging.Logger) -> None:
+    for existing_filter in logger.filters:
+        if isinstance(existing_filter, _ExperimentAnalysisFilter):
+            return
+    logger.addFilter(_ExperimentAnalysisFilter())

@@ -236,6 +236,7 @@ class TuningResourcesConfig:
 @dataclass(frozen=True)
 class TuningRayConfig:
     address: str | None = None
+    logs_enabled: bool = True
     resources: TuningResourcesConfig = field(
         default_factory=TuningResourcesConfig
     )

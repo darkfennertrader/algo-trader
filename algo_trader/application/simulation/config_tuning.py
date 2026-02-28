@@ -358,7 +358,14 @@ def _build_tuning_ray_config(
     address = raw.get("address")
     if address is not None:
         address = str(address).strip()
-    return TuningRayConfig(address=address or None, resources=resources)
+    logs_enabled = _parse_logs_enabled(
+        raw.get("logs_enabled", True), config_path
+    )
+    return TuningRayConfig(
+        address=address or None,
+        logs_enabled=logs_enabled,
+        resources=resources,
+    )
 
 
 def _normalize_tuning_ray_config(
@@ -372,8 +379,24 @@ def _normalize_tuning_ray_config(
         return replace(ray, resources=resources)
     normalized = ray.address.strip()
     if not normalized:
-        return TuningRayConfig(address=None, resources=resources)
-    return TuningRayConfig(address=normalized, resources=resources)
+        return TuningRayConfig(
+            address=None,
+            logs_enabled=ray.logs_enabled,
+            resources=resources,
+        )
+    return TuningRayConfig(
+        address=normalized,
+        logs_enabled=ray.logs_enabled,
+        resources=resources,
+    )
+
+
+def _parse_logs_enabled(value: object, config_path: Path) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ConfigError(
+        f"tuning.ray.logs_enabled must be a boolean in {config_path}"
+    )
 
 
 def _normalize_tuning_engine(value: object) -> TuningEngine:

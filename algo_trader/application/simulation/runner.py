@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines
 from __future__ import annotations
 
 import logging
@@ -20,7 +21,6 @@ from algo_trader.domain.simulation import (
     PreprocessSpec,
     SimulationConfig,
     SimulationFlags,
-    TuningConfig,
 )
 from algo_trader.infrastructure import log_boundary
 from algo_trader.infrastructure.data import load_panel_tensor_dataset
@@ -49,6 +49,19 @@ from .preprocessing import InnerCleaningSummaryContext, summarize_inner_cleaning
 from .registry import default_registries
 from .tuning import assign_candidate_ids, build_candidates
 from .tune_runner import init_ray_for_tuning, shutdown_ray_for_tuning
+from .resume_manifest import SimulationResumeTracker
+from .resume_flow import (
+    RaySelectionContext,
+    ResumeState,
+    build_resume_tracker,
+    load_best_config,
+    load_completed_outer_fold,
+    load_outer_result,
+    mark_outer_complete_for_all,
+    resolve_ray_selection_plan,
+    resolve_ray_storage_path,
+    validate_resume_request,
+)
 from .runner_helpers import (
     build_base_config,
     build_group_by_index,
@@ -103,6 +116,7 @@ def run(
     *, config_path: Path | None = None, resume: bool = False
 ) -> Mapping[str, Any]:
     config = apply_smoke_test_overrides(load_config(config_path))
+    validate_resume_request(config=config, resume=resume)
     device = _resolve_device(config.flags.use_gpu)
     setup = _prepare_run_state(config=config, device=device)
     if setup.early_results is not None:
@@ -110,14 +124,27 @@ def run(
     resume_state = ResumeState(enabled=resume)
     use_ray = config.modeling.tuning.engine == "ray"
     ray_address = config.modeling.tuning.ray.address
+    ray_logs_enabled = config.modeling.tuning.ray.logs_enabled
+    resume_tracker = build_resume_tracker(
+        base_dir=setup.outer_context.artifacts.base_dir,
+        outer_ids=setup.outer_context.context.cv.outer_ids,
+        model_selection_enabled=(
+            setup.outer_context.config.evaluation.model_selection.enable
+        ),
+        tuning_engine=setup.outer_context.config.modeling.tuning.engine,
+        resume=resume,
+    )
     if use_ray:
-        init_ray_for_tuning(ray_address)
+        init_ray_for_tuning(ray_address, logs_enabled=ray_logs_enabled)
     try:
         chosen_configs, outer_results = _evaluate_outer_folds(
             outer_context=setup.outer_context,
             candidates=setup.candidates,
             resume_state=resume_state,
+            resume_tracker=resume_tracker,
         )
+        if resume_tracker is not None:
+            resume_tracker.mark_run_completed()
     finally:
         if use_ray and ray_address is None:
             shutdown_ray_for_tuning()
@@ -141,6 +168,9 @@ class RunSetup:
 def _prepare_run_state(
     *, config: SimulationConfig, device: str
 ) -> RunSetup:
+    ray_storage_path = resolve_ray_storage_path(
+        config.modeling.tuning.engine
+    )
     base_dir, dataset, reused_inputs = _resolve_run_inputs(
         config=config, device=device
     )
@@ -165,6 +195,7 @@ def _prepare_run_state(
                 hooks=stub_hooks(),
                 artifacts=artifacts,
                 flags=config.flags,
+                ray_storage_path=ray_storage_path,
             ),
             candidates=(),
             early_results=early_results,
@@ -191,12 +222,14 @@ def _prepare_run_state(
         ),
         artifacts=artifacts,
         flags=config.flags,
+        ray_storage_path=ray_storage_path,
     )
     return RunSetup(
         outer_context=outer_context,
         candidates=candidates,
         early_results=early_results,
     )
+
 
 def _resolve_run_inputs(
     *, config: SimulationConfig, device: str
@@ -414,33 +447,14 @@ class OuterFoldContext:
     hooks: SimulationHooks
     artifacts: SimulationArtifacts
     flags: SimulationFlags
-
-
-@dataclass
-class ResumeState:
-    enabled: bool
-
-    def consume(self) -> bool:
-        if not self.enabled:
-            return False
-        self.enabled = False
-        return True
-
-
-def _resolve_resume_requested(
-    *, tuning: TuningConfig, resume_state: ResumeState
-) -> bool:
-    if tuning.engine == "ray":
-        return resume_state.consume()
-    if resume_state.enabled:
-        raise ConfigError("resume requires tuning.engine=ray")
-    return False
+    ray_storage_path: Path | None
 
 def _evaluate_outer_folds(
     *,
     outer_context: OuterFoldContext,
     candidates: Sequence[CandidateSpec],
     resume_state: ResumeState,
+    resume_tracker: SimulationResumeTracker | None,
 ) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
     selection = outer_context.config.evaluation.model_selection
     if selection.enable:
@@ -448,11 +462,13 @@ def _evaluate_outer_folds(
             outer_context=outer_context,
             candidates=candidates,
             resume_state=resume_state,
+            resume_tracker=resume_tracker,
         )
     return _evaluate_outer_folds_per_outer(
         outer_context=outer_context,
         candidates=candidates,
         resume_state=resume_state,
+        resume_tracker=resume_tracker,
     )
 
 def _evaluate_outer_folds_per_outer(
@@ -460,15 +476,49 @@ def _evaluate_outer_folds_per_outer(
     outer_context: OuterFoldContext,
     candidates: Sequence[CandidateSpec],
     resume_state: ResumeState,
+    resume_tracker: SimulationResumeTracker | None,
 ) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
     chosen_configs: dict[int, Mapping[str, Any]] = {}
     outer_results: list[Mapping[str, Any]] = []
+    inner_only = should_stop_after("inner", outer_context.flags)
     for outer_fold in outer_context.context.cv.outer_folds:
+        if (
+            resume_tracker is not None
+            and resume_tracker.is_outer_completed(outer_fold.k_test)
+        ):
+            skipped = load_completed_outer_fold(
+                base_dir=outer_context.artifacts.base_dir,
+                outer_k=outer_fold.k_test,
+                inner_only=inner_only,
+            )
+            chosen_configs[outer_fold.k_test] = skipped.best_config
+            if skipped.outer_result is not None:
+                outer_results.append(skipped.outer_result)
+            continue
+        if (
+            resume_tracker is not None
+            and not inner_only
+            and resume_tracker.is_inner_completed(outer_fold.k_test)
+        ):
+            resumed = _run_outer_from_saved_inner(
+                outer_context=outer_context,
+                outer_fold=outer_fold,
+                resume_tracker=resume_tracker,
+            )
+            chosen_configs[outer_fold.k_test] = resumed.best_config
+            if resumed.outer_result is None:
+                raise SimulationError(
+                    "Outer result missing for resumed outer evaluation",
+                    context={"outer_k": str(outer_fold.k_test)},
+                )
+            outer_results.append(resumed.outer_result)
+            continue
         fold_result = _run_outer_fold(
             outer_context=outer_context,
             outer_fold=outer_fold,
             candidates=candidates,
             resume_state=resume_state,
+            resume_tracker=resume_tracker,
         )
         chosen_configs[outer_fold.k_test] = fold_result.best_config
         if fold_result.outer_result is not None:
@@ -480,15 +530,22 @@ def _evaluate_outer_folds_global(
     outer_context: OuterFoldContext,
     candidates: Sequence[CandidateSpec],
     resume_state: ResumeState,
+    resume_tracker: SimulationResumeTracker | None,
 ) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
     chosen_configs: dict[int, Mapping[str, Any]] = {}
     outer_results: list[Mapping[str, Any]] = []
     for outer_fold in outer_context.context.cv.outer_folds:
+        if (
+            resume_tracker is not None
+            and resume_tracker.is_inner_completed(outer_fold.k_test)
+        ):
+            continue
         _run_outer_fold_inner_only(
             outer_context=outer_context,
             outer_fold=outer_fold,
             candidates=candidates,
             resume_state=resume_state,
+            resume_tracker=resume_tracker,
         )
     global_best = select_global_best_config(
         artifacts=outer_context.artifacts,
@@ -509,14 +566,34 @@ def _evaluate_outer_folds_global(
     for outer_fold in outer_context.context.cv.outer_folds:
         chosen_configs[outer_fold.k_test] = global_best.best_config
     if should_stop_after("inner", outer_context.flags):
+        if resume_tracker is not None:
+            mark_outer_complete_for_all(
+                resume_tracker=resume_tracker,
+                outer_ids=outer_context.context.cv.outer_ids,
+            )
         return chosen_configs, outer_results
     for outer_fold in outer_context.context.cv.outer_folds:
+        if (
+            resume_tracker is not None
+            and resume_tracker.is_outer_completed(outer_fold.k_test)
+        ):
+            outer_results.append(
+                load_outer_result(
+                    base_dir=outer_context.artifacts.base_dir,
+                    outer_k=outer_fold.k_test,
+                )
+            )
+            continue
+        if resume_tracker is not None:
+            resume_tracker.mark_outer_started(outer_fold.k_test)
         started = time.perf_counter()
         result, cleaning_outer = _run_outer_evaluation(
             outer_context=outer_context,
             outer_fold=outer_fold,
             best_config=global_best.best_config,
         )
+        if resume_tracker is not None:
+            resume_tracker.mark_outer_completed(outer_fold.k_test)
         _log_outer_complete(
             outer_k=outer_fold.k_test,
             started=started,
@@ -545,6 +622,7 @@ def _run_outer_fold(
     outer_fold: OuterFold,
     candidates: Sequence[CandidateSpec],
     resume_state: ResumeState,
+    resume_tracker: SimulationResumeTracker | None,
 ) -> OuterFoldRunResult:
     started = time.perf_counter()
     inner_splits = _build_inner_splits(
@@ -563,8 +641,16 @@ def _run_outer_fold(
         inner_splits=inner_splits,
         candidates=candidates,
     )
-    resume_requested = _resolve_resume_requested(
-        tuning=outer_context.config.modeling.tuning,
+    if resume_tracker is not None:
+        resume_tracker.mark_inner_started(outer_fold.k_test)
+    ray_plan = resolve_ray_selection_plan(
+        context=RaySelectionContext(
+            tuning=outer_context.config.modeling.tuning,
+            tuning_engine=outer_context.config.modeling.tuning.engine,
+            ray_storage_path=outer_context.ray_storage_path,
+            outer_k=outer_fold.k_test,
+            resume_tracker=resume_tracker,
+        ),
         resume_state=resume_state,
     )
     best_config = select_best_config(
@@ -584,7 +670,10 @@ def _run_outer_fold(
                 outer_k=outer_fold.k_test,
             ),
         ),
-        resume_requested=resume_requested,
+        resume_requested=ray_plan.resume_requested,
+        ray_experiment_name=ray_plan.experiment_name,
+        ray_storage_path=outer_context.ray_storage_path,
+        ray_resume_experiment_dir=ray_plan.resume_experiment_dir,
     )
     _write_inner_outputs(
         outer_context=outer_context,
@@ -592,7 +681,11 @@ def _run_outer_fold(
         inner_splits=inner_splits,
         best_config=best_config,
     )
+    if resume_tracker is not None:
+        resume_tracker.mark_inner_completed(outer_fold.k_test)
     if should_stop_after("inner", outer_context.flags):
+        if resume_tracker is not None:
+            resume_tracker.mark_outer_completed(outer_fold.k_test)
         _log_outer_complete(
             outer_k=outer_fold.k_test,
             started=started,
@@ -601,11 +694,15 @@ def _run_outer_fold(
             cleaning=None,
         )
         return OuterFoldRunResult(best_config=best_config, outer_result=None)
+    if resume_tracker is not None:
+        resume_tracker.mark_outer_started(outer_fold.k_test)
     result, cleaning_outer = _run_outer_evaluation(
         outer_context=outer_context,
         outer_fold=outer_fold,
         best_config=best_config,
     )
+    if resume_tracker is not None:
+        resume_tracker.mark_outer_completed(outer_fold.k_test)
     _log_outer_complete(
         outer_k=outer_fold.k_test,
         started=started,
@@ -621,6 +718,7 @@ def _run_outer_fold_inner_only(
     outer_fold: OuterFold,
     candidates: Sequence[CandidateSpec],
     resume_state: ResumeState,
+    resume_tracker: SimulationResumeTracker | None,
 ) -> Mapping[str, Any]:
     started = time.perf_counter()
     inner_splits = _build_inner_splits(
@@ -639,8 +737,16 @@ def _run_outer_fold_inner_only(
         inner_splits=inner_splits,
         candidates=candidates,
     )
-    resume_requested = _resolve_resume_requested(
-        tuning=outer_context.config.modeling.tuning,
+    if resume_tracker is not None:
+        resume_tracker.mark_inner_started(outer_fold.k_test)
+    ray_plan = resolve_ray_selection_plan(
+        context=RaySelectionContext(
+            tuning=outer_context.config.modeling.tuning,
+            tuning_engine=outer_context.config.modeling.tuning.engine,
+            ray_storage_path=outer_context.ray_storage_path,
+            outer_k=outer_fold.k_test,
+            resume_tracker=resume_tracker,
+        ),
         resume_state=resume_state,
     )
     best_config = select_best_config(
@@ -660,7 +766,10 @@ def _run_outer_fold_inner_only(
                 outer_k=outer_fold.k_test,
             ),
         ),
-        resume_requested=resume_requested,
+        resume_requested=ray_plan.resume_requested,
+        ray_experiment_name=ray_plan.experiment_name,
+        ray_storage_path=outer_context.ray_storage_path,
+        ray_resume_experiment_dir=ray_plan.resume_experiment_dir,
     )
     _write_inner_outputs(
         outer_context=outer_context,
@@ -668,6 +777,8 @@ def _run_outer_fold_inner_only(
         inner_splits=inner_splits,
         best_config=best_config,
     )
+    if resume_tracker is not None:
+        resume_tracker.mark_inner_completed(outer_fold.k_test)
     _log_outer_complete(
         outer_k=outer_fold.k_test,
         started=started,
@@ -857,6 +968,34 @@ def _log_outer_complete(
         "event=complete boundary=simulation.outer context=%s",
         payload,
     )
+
+
+def _run_outer_from_saved_inner(
+    *,
+    outer_context: OuterFoldContext,
+    outer_fold: OuterFold,
+    resume_tracker: SimulationResumeTracker,
+) -> OuterFoldRunResult:
+    best_config = load_best_config(
+        base_dir=outer_context.artifacts.base_dir,
+        outer_k=outer_fold.k_test,
+    )
+    resume_tracker.mark_outer_started(outer_fold.k_test)
+    started = time.perf_counter()
+    result, cleaning_outer = _run_outer_evaluation(
+        outer_context=outer_context,
+        outer_fold=outer_fold,
+        best_config=best_config,
+    )
+    resume_tracker.mark_outer_completed(outer_fold.k_test)
+    _log_outer_complete(
+        outer_k=outer_fold.k_test,
+        started=started,
+        phase="outer",
+        result=result,
+        cleaning=cleaning_outer,
+    )
+    return OuterFoldRunResult(best_config=best_config, outer_result=result)
 
 def _build_artifacts(
     *,

@@ -11,7 +11,11 @@ from algo_trader.domain.simulation import (
     TuningConfig,
 )
 
-from .diagnostics import FanChartDiagnosticsContext, run_fan_chart_diagnostics
+from .diagnostics import (
+    FanChartDiagnosticsContext,
+    run_fan_chart_diagnostics,
+)
+from .svi_loss_diagnostics import run_svi_loss_diagnostics
 from .inner_objective import InnerObjectiveContext
 from .model_selection import (
     GlobalSelectionContext,
@@ -157,20 +161,25 @@ def run_global_diagnostics(
     diagnostics,
     model_selection_enabled: bool,
 ) -> None:
-    if not diagnostics.fan_charts.enable:
-        return
-    if not model_selection_enabled:
-        raise SimulationError(
-            "Diagnostics require model_selection.enable"
+    if diagnostics.svi_loss.enable:
+        if not model_selection_enabled:
+            raise SimulationError(
+                "SVI loss diagnostics require model_selection.enable"
+            )
+        run_svi_loss_diagnostics(base_dir=base_dir, outer_ids=outer_ids)
+    if diagnostics.fan_charts.enable:
+        if not model_selection_enabled:
+            raise SimulationError(
+                "Diagnostics require model_selection.enable"
+            )
+        run_fan_chart_diagnostics(
+            FanChartDiagnosticsContext(
+                base_dir=base_dir,
+                outer_ids=outer_ids,
+                candidate_id=candidate_id,
+                config=diagnostics.fan_charts,
+            )
         )
-    run_fan_chart_diagnostics(
-        FanChartDiagnosticsContext(
-            base_dir=base_dir,
-            outer_ids=outer_ids,
-            candidate_id=candidate_id,
-            config=diagnostics.fan_charts,
-        )
-    )
 
 
 def _select_best_config_local(

@@ -303,8 +303,14 @@ class FanChartsConfig:
 
 
 @dataclass(frozen=True)
+class SviLossConfig:
+    enable: bool = False
+
+
+@dataclass(frozen=True)
 class DiagnosticsConfig:
     fan_charts: FanChartsConfig = field(default_factory=FanChartsConfig)
+    svi_loss: SviLossConfig = field(default_factory=SviLossConfig)
 
 
 @dataclass(frozen=True)

@@ -243,6 +243,9 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
             else:
                 logger.error("Error: %s", exc)
         return 1
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+        return 130
 
 
 def main(argv: Sequence[str] | None = None) -> int:

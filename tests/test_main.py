@@ -49,3 +49,15 @@ def test_main_handles_domain_error(
 
     assert exit_code == 1
     assert "Bad config" in caplog.text
+
+
+def test_main_handles_keyboard_interrupt(monkeypatch: MonkeyPatch) -> None:
+    def fake_run(config_path: Path | None = None) -> None:
+        _ = config_path
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(main_module, "run", fake_run)
+
+    exit_code = main(["historical"])
+
+    assert exit_code == 130

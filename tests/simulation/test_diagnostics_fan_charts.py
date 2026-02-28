@@ -9,6 +9,10 @@ from algo_trader.application.simulation.diagnostics import (
     _coverage_series,
     _resolve_assets,
 )
+from algo_trader.application.simulation.svi_loss_diagnostics import (
+    _aggregate_svi_loss_curves,
+    _extract_svi_loss_curve,
+)
 
 
 def test_resolve_assets_raises_on_missing() -> None:
@@ -38,3 +42,20 @@ def test_coverage_series_computes_full_coverage() -> None:
     assert np.allclose(coverage, [1.0, 1.0], equal_nan=True)
     assert np.allclose(band[0], coverage, equal_nan=True)
     assert np.allclose(band[1], coverage, equal_nan=True)
+
+
+def test_extract_svi_loss_curve_handles_missing_payload() -> None:
+    assert _extract_svi_loss_curve({}) is None
+    assert _extract_svi_loss_curve({"training": {}}) is None
+
+
+def test_aggregate_svi_loss_curves_variable_lengths() -> None:
+    summary = _aggregate_svi_loss_curves(
+        [
+            np.asarray([10.0, 9.0, 8.0], dtype=float),
+            np.asarray([12.0, 10.0], dtype=float),
+        ]
+    )
+    assert summary.steps.tolist() == [1, 2, 3]
+    assert summary.counts.tolist() == [2, 2, 1]
+    assert np.allclose(summary.median, [11.0, 9.5, 8.0], equal_nan=True)

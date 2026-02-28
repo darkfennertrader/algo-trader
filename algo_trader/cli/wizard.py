@@ -1,10 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable, Iterable, Literal
+import copy
+from dataclasses import dataclass, replace
+from functools import lru_cache
+import random
+from typing import Callable, Iterable, Literal, Sequence, cast
+
+import numpy as np
+import pandas as pd
 
 from algo_trader.domain import ConfigError
 from algo_trader.pipeline.stages.features import default_registry as feature_registry
+from algo_trader.pipeline.stages.features.protocols import FeatureGroup, FeatureInputs
 from algo_trader.pipeline.stages.features.breakout import (
     SUPPORTED_FEATURES as BREAKOUT_FEATURES,
 )
@@ -40,6 +47,9 @@ class WizardCommand:
 
 
 PromptKind = Literal["optional", "choice"]
+FeatureSelectionMode = Literal["all", "manual", "random_count"]
+SelectedFeaturesByGroup = dict[str, Sequence[str] | None]
+_SAMPLE_ASSETS: tuple[str, ...] = ("SYN_A", "SYN_B", "SYN_C")
 
 
 @dataclass(frozen=True)
@@ -49,6 +59,13 @@ class PromptSpec:
     kind: PromptKind
     choices: tuple[str, ...] | None = None
     default: str | None = None
+
+
+@dataclass(frozen=True)
+class KeyFeatureOption:
+    group: str
+    feature_key: str
+    output_names: tuple[str, ...]
 
 
 def run() -> int:
@@ -114,22 +131,14 @@ def _data_processing_command() -> WizardCommand:
 
 def _feature_engineering_command() -> WizardCommand:
     groups = _prompt_feature_groups()
-    if not groups or groups == ["all"]:
+    mode = _prompt_feature_selection_mode(groups)
+    if mode == "all" and (not groups or groups == ["all"]):
         return WizardCommand(
             commands=[["algotrader", "feature_engineering", "--group", "all"]]
         )
-    commands: list[list[str]] = []
-    first_group = True
-    for group in groups:
-        if not first_group:
-            print()
-        first_group = False
-        features = _prompt_feature_keys(group)
-        args = ["algotrader", "feature_engineering"]
-        args.extend(["--group", group])
-        for feature in features:
-            args.extend(["--feature", feature])
-        commands.append(args)
+    selected_groups = _resolve_feature_groups(groups)
+    features_by_group = _select_features_by_group(selected_groups, mode)
+    commands = _build_feature_commands(selected_groups, features_by_group)
     return WizardCommand(commands=commands)
 
 
@@ -395,6 +404,404 @@ def _prompt_feature_keys(group: str) -> list[str]:
         if not unknown:
             return selected
         print(f"Invalid features: {', '.join(unknown)}")
+
+
+def _prompt_feature_selection_mode(groups: Sequence[str]) -> FeatureSelectionMode:
+    default = "all" if not groups or groups == ["all"] else "manual"
+    mode = _prompt_choice(
+        "feature selection mode",
+        ["all", "manual", "random_count"],
+        default=default,
+    )
+    return cast(FeatureSelectionMode, mode)
+
+
+def _resolve_feature_groups(groups: Sequence[str]) -> list[str]:
+    if not groups or groups == ["all"]:
+        return _feature_group_choices()
+    return list(groups)
+
+
+def _select_features_by_group(
+    groups: Sequence[str], mode: FeatureSelectionMode
+) -> SelectedFeaturesByGroup:
+    if mode == "all":
+        return {group: None for group in groups}
+    if mode == "manual":
+        return _select_features_manually(groups)
+    return _select_features_randomly(groups)
+
+
+def _select_features_manually(groups: Sequence[str]) -> SelectedFeaturesByGroup:
+    selections: SelectedFeaturesByGroup = {}
+    first_group = True
+    for group in groups:
+        if not first_group:
+            print()
+        first_group = False
+        selected = _prompt_feature_keys(group)
+        selections[group] = selected if selected else None
+    return selections
+
+
+def _select_features_randomly(groups: Sequence[str]) -> SelectedFeaturesByGroup:
+    options = _key_feature_pool(groups)
+    feasible_counts = sorted(_feasible_output_counts(options))
+    positive_counts = [value for value in feasible_counts if value > 0]
+    if not positive_counts:
+        raise ConfigError(
+            "No feasible random output-feature counts found",
+            context={"groups": ",".join(groups)},
+        )
+    count = _prompt_required_int(_random_count_prompt(positive_counts))
+    if count not in positive_counts:
+        raise ConfigError(
+            "Requested random output-feature count is not feasible",
+            context={
+                "count": str(count),
+                "allowed": _format_count_ranges(positive_counts),
+            },
+        )
+    seed = _prompt_optional_int("Random seed (blank for non-deterministic)")
+    selected_keys = _sample_feature_keys_exact_count(
+        options=options,
+        count=count,
+        seed=seed,
+    )
+    grouped = _group_selected_keys(
+        groups=groups, selected_keys=selected_keys
+    )
+    _print_random_selection(
+        selected_keys=selected_keys,
+        seed=seed,
+        target_count=count,
+    )
+    return grouped
+
+
+def _keys_for_group(group: str) -> list[str]:
+    by_group = _feature_keys_by_group()
+    supported = by_group.get(group)
+    if supported is None:
+        raise ConfigError(f"Unknown feature group '{group}'")
+    return supported
+
+
+def _key_feature_pool(groups: Sequence[str]) -> list[KeyFeatureOption]:
+    registry = feature_registry()
+    inputs = _sample_feature_inputs()
+    options: list[KeyFeatureOption] = []
+    seen_output_names: dict[str, str] = {}
+    for group in groups:
+        keys = _keys_for_group(group)
+        group_runner = registry.get(group)
+        for key in keys:
+            output_names = tuple(
+                _expanded_outputs_for_key(
+                    group_runner=group_runner,
+                    inputs=inputs,
+                    group=group,
+                    key=key,
+                )
+            )
+            output_names = tuple(sorted(set(output_names)))
+            option_id = f"{group}:{key}"
+            for output_name in output_names:
+                previous = seen_output_names.get(output_name)
+                if previous is not None:
+                    raise ConfigError(
+                        "Expanded output feature overlap detected for wizard",
+                        context={
+                            "output": output_name,
+                            "first": previous,
+                            "second": option_id,
+                        },
+                    )
+                seen_output_names[output_name] = option_id
+            options.append(
+                KeyFeatureOption(
+                    group=group,
+                    feature_key=key,
+                    output_names=output_names,
+                )
+            )
+    return options
+
+
+def _random_count_prompt(positive_counts: Sequence[int]) -> str:
+    minimum = positive_counts[0]
+    maximum = positive_counts[-1]
+    if _is_contiguous(positive_counts):
+        return f"Random output-feature count (exact, {minimum}..{maximum})"
+    allowed = _format_count_ranges(positive_counts)
+    return f"Random output-feature count (exact; allowed: {allowed})"
+
+
+def _is_contiguous(values: Sequence[int]) -> bool:
+    if not values:
+        return False
+    return values[-1] - values[0] + 1 == len(values)
+
+
+def _format_count_ranges(values: Sequence[int]) -> str:
+    if not values:
+        return ""
+    ranges: list[str] = []
+    start = values[0]
+    end = values[0]
+    for value in values[1:]:
+        if value == end + 1:
+            end = value
+            continue
+        ranges.append(_format_single_range(start, end))
+        start = value
+        end = value
+    ranges.append(_format_single_range(start, end))
+    return ",".join(ranges)
+
+
+def _format_single_range(start: int, end: int) -> str:
+    if start == end:
+        return str(start)
+    return f"{start}-{end}"
+
+
+def _feasible_output_counts(options: Sequence[KeyFeatureOption]) -> set[int]:
+    possible = {0}
+    for option in options:
+        weight = len(option.output_names)
+        additions = {weight + value for value in possible}
+        possible.update(additions)
+    return possible
+
+
+def _sample_feature_keys_exact_count(
+    *,
+    options: Sequence[KeyFeatureOption],
+    count: int,
+    seed: int | None,
+) -> list[KeyFeatureOption]:
+    if count <= 0:
+        raise ConfigError(
+            "random feature count must be positive",
+            context={"count": str(count)},
+        )
+    shuffled = list(options)
+    rng = random.Random(seed)
+    rng.shuffle(shuffled)
+    suffix_possible = _suffix_possible_counts(shuffled)
+    if count not in suffix_possible[0]:
+        raise ConfigError(
+            "Requested random output-feature count is not feasible",
+            context={
+                "count": str(count),
+                "allowed": _format_count_ranges(sorted(suffix_possible[0])),
+            },
+        )
+    remaining = count
+    selected: list[KeyFeatureOption] = []
+    for index, option in enumerate(shuffled):
+        weight = len(option.output_names)
+        include_is_possible = (
+            weight <= remaining and (remaining - weight) in suffix_possible[index + 1]
+        )
+        skip_is_possible = remaining in suffix_possible[index + 1]
+        include = False
+        if include_is_possible and skip_is_possible:
+            include = bool(rng.getrandbits(1))
+        elif include_is_possible:
+            include = True
+        if include:
+            selected.append(option)
+            remaining -= weight
+    if remaining != 0:
+        raise ConfigError(
+            "Failed to select an exact random output-feature count",
+            context={"remaining": str(remaining), "target": str(count)},
+        )
+    return selected
+
+
+def _suffix_possible_counts(options: Sequence[KeyFeatureOption]) -> list[set[int]]:
+    possible_by_index: list[set[int]] = [set() for _ in range(len(options) + 1)]
+    possible_by_index[len(options)] = {0}
+    for index in range(len(options) - 1, -1, -1):
+        tail = possible_by_index[index + 1]
+        weight = len(options[index].output_names)
+        combined = set(tail)
+        combined.update({weight + value for value in tail})
+        possible_by_index[index] = combined
+    return possible_by_index
+
+
+def _group_selected_keys(
+    *,
+    groups: Sequence[str],
+    selected_keys: Sequence[KeyFeatureOption],
+) -> SelectedFeaturesByGroup:
+    grouped: SelectedFeaturesByGroup = {}
+    for group in groups:
+        grouped[group] = []
+    for selected in selected_keys:
+        current = grouped.get(selected.group)
+        if current is None:
+            current = []
+        grouped[selected.group] = [*current, selected.feature_key]
+    for group in groups:
+        current = grouped[group]
+        if current is None:
+            continue
+        grouped[group] = sorted(set(current))
+    return grouped
+
+
+def _print_random_selection(
+    *,
+    selected_keys: Sequence[KeyFeatureOption],
+    seed: int | None,
+    target_count: int,
+) -> None:
+    selected_outputs: set[str] = set()
+    grouped_outputs: dict[str, list[str]] = {}
+    for selected in selected_keys:
+        outputs = grouped_outputs.setdefault(selected.group, [])
+        outputs.extend(selected.output_names)
+        selected_outputs.update(selected.output_names)
+    if len(selected_outputs) != target_count:
+        raise ConfigError(
+            "Random selection did not match requested output-feature count",
+            context={
+                "target": str(target_count),
+                "selected": str(len(selected_outputs)),
+            },
+        )
+    seed_text = "none" if seed is None else str(seed)
+    print(
+        f"\nRandom output-feature selection (seed={seed_text}, "
+        f"count={len(selected_outputs)}):"
+    )
+    for group in sorted(grouped_outputs):
+        unique_outputs = sorted(set(grouped_outputs[group]))
+        print(f"- {group}: {', '.join(unique_outputs)}")
+    print(
+        "Generated commands use the minimum feature keys that reproduce this "
+        "exact output-feature count."
+    )
+
+def _expanded_outputs_for_key(
+    *,
+    group_runner: object,
+    inputs: FeatureInputs,
+    group: str,
+    key: str,
+) -> list[str]:
+    selected_group = cast(FeatureGroup, _clone_group_with_feature(group_runner, key))
+    try:
+        output = selected_group.compute(inputs)
+    except Exception as exc:
+        raise ConfigError(
+            "Failed to resolve expanded output features for wizard",
+            context={"group": group, "feature": key},
+        ) from exc
+    feature_names = list(output.feature_names)
+    if not feature_names:
+        raise ConfigError(
+            "No expanded output features found for wizard",
+            context={"group": group, "feature": key},
+        )
+    return feature_names
+
+
+def _clone_group_with_feature(group_runner: object, key: str) -> FeatureGroup:
+    config = getattr(group_runner, "_config", None)
+    if config is None:
+        raise ConfigError(
+            "Feature group config unavailable for wizard",
+            context={"group_type": type(group_runner).__name__},
+        )
+    try:
+        selected_config = replace(config, features=[key])
+    except TypeError as exc:
+        raise ConfigError(
+            "Feature group config is not replaceable for wizard",
+            context={"group_type": type(group_runner).__name__},
+        ) from exc
+    selected_group = copy.copy(group_runner)
+    setattr(selected_group, "_config", selected_config)
+    return cast(FeatureGroup, selected_group)
+
+
+@lru_cache(maxsize=1)
+def _sample_feature_inputs() -> FeatureInputs:
+    return _build_sample_feature_inputs()
+
+
+def _build_sample_feature_inputs() -> FeatureInputs:
+    weekly_index = pd.date_range("2018-01-05", periods=260, freq="W-FRI")
+    daily_index = pd.bdate_range("2018-01-01", periods=1500)
+    weekly_ohlc = _build_sample_ohlc(weekly_index)
+    daily_ohlc = _build_sample_ohlc(daily_index)
+    return FeatureInputs(
+        frames={"weekly_ohlc": weekly_ohlc, "daily_ohlc": daily_ohlc},
+        frequency="weekly",
+    )
+
+
+def _build_sample_ohlc(index: pd.DatetimeIndex) -> pd.DataFrame:
+    columns = pd.MultiIndex.from_product(
+        [_SAMPLE_ASSETS, ("Open", "High", "Low", "Close")]
+    )
+    values = np.zeros((len(index), len(columns)), dtype=float)
+    base_line = np.linspace(0.0, 20.0, len(index))
+    cycle = np.sin(np.linspace(0.0, 18.0, len(index)))
+    for offset, _asset in enumerate(_SAMPLE_ASSETS):
+        close = 100.0 + (offset * 5.0) + base_line + (cycle * (1.0 + offset * 0.1))
+        open_price = close * 0.999
+        high = close * 1.005
+        low = close * 0.995
+        start = offset * 4
+        values[:, start : start + 4] = np.column_stack(
+            [open_price, high, low, close]
+        )
+    return pd.DataFrame(values, index=index, columns=columns)
+
+
+def _build_feature_commands(
+    groups: Sequence[str], features_by_group: SelectedFeaturesByGroup
+) -> list[list[str]]:
+    commands: list[list[str]] = []
+    for group in groups:
+        selected = features_by_group.get(group)
+        if selected is not None and len(selected) == 0:
+            continue
+        args = ["algotrader", "feature_engineering", "--group", group]
+        if selected:
+            for feature in selected:
+                args.extend(["--feature", feature])
+        commands.append(args)
+    if not commands:
+        raise ConfigError("No features selected")
+    return commands
+
+
+def _prompt_required_int(label: str) -> int:
+    raw = _prompt_optional(label)
+    if not raw:
+        raise ConfigError(f"{label} is required")
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{label} must be an integer") from exc
+
+
+def _prompt_optional_int(label: str) -> int | None:
+    raw = _prompt_optional(label)
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{label} must be an integer") from exc
 
 
 def _feature_keys_by_group() -> dict[str, list[str]]:

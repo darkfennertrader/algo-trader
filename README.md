@@ -227,6 +227,8 @@ Examples:
 
 ## CLI
 - Wizard (interactive command builder): `uv run algotrader wizard`
+  - Feature engineering wizard supports `all`, `manual`, or `random_count` feature selection.
+  - `random_count` selects an exact number of concrete output features (optional seed) based on current groups/horizons, then prints standard `feature_engineering --group ... --feature ...` commands.
 - Default pipeline (placeholder): `uv run algotrader`
 - Historical download: `uv run algotrader historical`
 - Data cleaning: `uv run algotrader data_cleaning --start YYYY-MM --end YYYY-MM --return-type simple --assets EUR.USD,IBUS30`
@@ -911,6 +913,12 @@ Notes:
 - Resume targets deterministic per‑fold experiment directories under
   `RAY_TUNE_STORAGE_PATH` (one Ray experiment per outer fold for the same
   simulation run).
+- `tuning.ray.logs_enabled` controls Ray Tune progress verbosity (`true` shows
+  trial/progress logs, `false` keeps output quieter).
+- Simulation performs automatic best-effort local cleanup both before start and
+  after exit (success, failure, or `Ctrl+C`): stale stopped simulation process
+  cleanup, Ray runtime shutdown, local Ray cluster stop (when `ray.address` is
+  null), and CUDA cache cleanup.
 
 ---
 
@@ -933,6 +941,7 @@ Global selection (when `model_selection.enable: true`):
 - `SIMULATION_SOURCE/<label>/outer/best_config.json`
 - Fan charts (when `diagnostics.fan_charts.enable: true`): `SIMULATION_SOURCE/<label>/outer/diagnostics/fan_charts/`
 - Calibration summaries (coverage fan plot + CSV) and calibration diagnostics (PIT histogram + coverage curve) live under: `SIMULATION_SOURCE/<label>/outer/diagnostics/calibration/`
+- Inner SVI loss diagnostics (when `diagnostics.svi_loss.enable: true`): `SIMULATION_SOURCE/<label>/outer/diagnostics/svi_loss/` (one PNG+CSV per outer fold).
 
 Selection flow:
 - ES band survivor set (using `es_band.c`, `min_keep`, `max_keep`)
@@ -944,7 +953,8 @@ Metric coverage note:
 - `metrics.json` will show `NaN` for CRPS/QL on non‑survivors, and global medians remain `NaN` if a candidate never survives ES in any outer fold.
 - Fan charts use z‑space (MAD‑scaled) predictive samples from inner splits for the global best candidate, rescaled to a shared median split scale per asset, and plot only test weeks.
 
-Diagnostics config (fan charts):
+Diagnostics config:
+- `diagnostics.svi_loss.enable`: write per-outer inner-loop SVI loss-vs-step diagnostics.
 - `diagnostics.fan_charts.enable`: turn diagnostics on/off.
 - `diagnostics.fan_charts.assets`: `all` or a list of asset names (missing assets raise an error).
 - `diagnostics.fan_charts.quantiles`: fan chart bands/median (must be in (0, 1)).

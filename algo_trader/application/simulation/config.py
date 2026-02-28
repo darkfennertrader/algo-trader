@@ -20,6 +20,7 @@ from algo_trader.domain.simulation import (
     EvaluationSpec,
     GuardrailSpec,
     FanChartsConfig,
+    SviLossConfig,
     ModelConfig,
     ModelingSpec,
     OuterConfig,
@@ -423,7 +424,35 @@ def _build_diagnostics_config(
             f"diagnostics must be a mapping in {config_path}"
         )
     fan_charts = _build_fan_charts_config(section, config_path)
-    return DiagnosticsConfig(fan_charts=fan_charts)
+    svi_loss = _build_svi_loss_config(section, config_path)
+    return DiagnosticsConfig(fan_charts=fan_charts, svi_loss=svi_loss)
+
+
+def _build_svi_loss_config(
+    section: Mapping[str, Any], config_path: Path
+) -> SviLossConfig:
+    raw_svi_loss = section.get("svi_loss", {})
+    if raw_svi_loss is None:
+        raw_svi_loss = {}
+    if isinstance(raw_svi_loss, bool):
+        return SviLossConfig(enable=raw_svi_loss)
+    if not isinstance(raw_svi_loss, Mapping):
+        raise ConfigError(
+            f"diagnostics.svi_loss must be a mapping or bool in {config_path}"
+        )
+    extra = set(raw_svi_loss) - {"enable"}
+    if extra:
+        raise ConfigError(
+            f"diagnostics.svi_loss contains unknown keys in {config_path}",
+            context={"keys": ", ".join(sorted(extra))},
+        )
+    return SviLossConfig(
+        enable=require_bool(
+            raw_svi_loss.get("enable"),
+            field="diagnostics.svi_loss.enable",
+            config_path=config_path,
+        )
+    )
 
 
 def _build_fan_charts_config(

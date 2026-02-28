@@ -441,6 +441,7 @@ def _build_diagnostics_payload(
         "candidate_id": context.candidate_id,
         "split_id": context.split_id,
         "posterior": _posterior_summary_payload(model_state),
+        "training": _training_diagnostics_payload(model_state),
         "predictive": {
             "samples": _sample_stats(samples),
             "y_true": _value_stats(y_true),
@@ -456,6 +457,26 @@ def _posterior_summary_payload(
     if isinstance(summary, Mapping):
         return dict(summary)
     return {}
+
+
+def _training_diagnostics_payload(
+    model_state: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    section = model_state.get("training_diagnostics")
+    if not isinstance(section, Mapping):
+        return {}
+    history = section.get("svi_loss_history")
+    if not isinstance(history, Sequence):
+        return {}
+    cleaned_history: list[float] = []
+    for value in history:
+        try:
+            cleaned_history.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if not cleaned_history:
+        return {}
+    return {"svi_loss_history": cleaned_history}
 
 
 def _sample_stats(samples: torch.Tensor) -> Mapping[str, float]:

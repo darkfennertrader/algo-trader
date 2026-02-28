@@ -5,7 +5,7 @@ from datetime import datetime
 import inspect
 import logging
 import time
-from typing import Any, Callable, Mapping, cast
+from typing import Any, Callable, Mapping, Sequence, cast
 
 import pyro
 import torch
@@ -149,6 +149,7 @@ def _build_training_state(
     guide_name: str,
     norm_state: _TargetNormState | None,
     posterior_summary: Mapping[str, Any] | None,
+    training_diagnostics: Mapping[str, Any] | None,
 ) -> Mapping[str, Any]:
     state: dict[str, Any] = {
         "model_name": model_name,
@@ -161,6 +162,8 @@ def _build_training_state(
         }
     if posterior_summary:
         state["posterior_summary"] = dict(posterior_summary)
+    if training_diagnostics:
+        state["training_diagnostics"] = dict(training_diagnostics)
     return state
 
 
@@ -182,25 +185,37 @@ def _fit_pyro_svi(
         guide=guide,
     )
     params = _training_params(config)
-    debug_log_shapes = debug_config.enabled
     batches, norm_state = _prepare_training_batches(
-        X_train, y_train, params, debug_log_shapes
+        X_train, y_train, params, debug_config.enabled
     )
     pyro.clear_param_store()
-    svi = _build_svi(model=model, guide=guide, params=params)
-    _run_svi_steps(
-        svi=svi,
+    svi_loss_history = _run_svi_steps(
+        svi=_build_svi(model=model, guide=guide, params=params),
         batches=batches,
         params=params,
         context=_run_context(config),
     )
-    posterior_summary = _summarize_posterior_params()
     return _build_training_state(
         model_name,
         guide_name,
         norm_state,
-        posterior_summary,
+        _summarize_posterior_params(),
+        _build_training_diagnostics(
+            svi_loss_history=svi_loss_history, params=params
+        ),
     )
+
+
+def _build_training_diagnostics(
+    *, svi_loss_history: Sequence[float], params: _TrainingParams
+) -> Mapping[str, Any]:
+    if not svi_loss_history:
+        return {}
+    return {
+        "svi_loss_history": [float(value) for value in svi_loss_history],
+        "num_steps": int(params.svi.steps),
+        "grad_accum_steps": int(params.svi.grad_accum_steps),
+    }
 
 
 def _summarize_posterior_params() -> Mapping[str, Any]:
@@ -494,10 +509,11 @@ def _run_svi_steps(
     batches: list[modeling.ModelBatch],
     params: _TrainingParams,
     context: Mapping[str, Any],
-) -> None:
+) -> list[float]:
     start = time.perf_counter()
     if not batches:
         raise SimulationError("No training batches available for SVI")
+    loss_history: list[float] = []
     grad_accum_steps = params.svi.grad_accum_steps
     for step in range(params.svi.steps):
         total_loss, params_in_step = _accumulate_svi_grads(
@@ -506,16 +522,19 @@ def _run_svi_steps(
             step_index=step,
             grad_accum_steps=grad_accum_steps,
         )
+        mean_loss = total_loss / float(grad_accum_steps)
+        loss_history.append(mean_loss)
         if params_in_step:
             svi.optim(params_in_step)
             infer_util.zero_grads(params_in_step)
         if params.svi.log_every and (step + 1) % params.svi.log_every == 0:
             _log_svi_progress(
                 step=step + 1,
-                loss=total_loss / float(grad_accum_steps),
+                loss=mean_loss,
                 context=context,
                 start=start,
             )
+    return loss_history
 
 
 def _loss_to_float(loss: object) -> float:

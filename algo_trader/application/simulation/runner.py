@@ -48,7 +48,11 @@ from .artifacts import (
 from .preprocessing import InnerCleaningSummaryContext, summarize_inner_cleaning
 from .registry import default_registries
 from .tuning import assign_candidate_ids, build_candidates
-from .tune_runner import init_ray_for_tuning, shutdown_ray_for_tuning
+from .tune_runner import init_ray_for_tuning
+from .interrupt_cleanup import (
+    cleanup_after_simulation_run,
+    cleanup_before_simulation_run,
+)
 from .resume_manifest import SimulationResumeTracker
 from .resume_flow import (
     RaySelectionContext,
@@ -125,6 +129,11 @@ def run(
     use_ray = config.modeling.tuning.engine == "ray"
     ray_address = config.modeling.tuning.ray.address
     ray_logs_enabled = config.modeling.tuning.ray.logs_enabled
+    cleanup_before_simulation_run(
+        use_ray=use_ray,
+        ray_address=ray_address,
+        use_gpu=config.flags.use_gpu,
+    )
     resume_tracker = build_resume_tracker(
         base_dir=setup.outer_context.artifacts.base_dir,
         outer_ids=setup.outer_context.context.cv.outer_ids,
@@ -136,6 +145,7 @@ def run(
     )
     if use_ray:
         init_ray_for_tuning(ray_address, logs_enabled=ray_logs_enabled)
+    interrupted = False
     try:
         chosen_configs, outer_results = _evaluate_outer_folds(
             outer_context=setup.outer_context,
@@ -145,9 +155,16 @@ def run(
         )
         if resume_tracker is not None:
             resume_tracker.mark_run_completed()
+    except KeyboardInterrupt:
+        interrupted = True
+        raise
     finally:
-        if use_ray and ray_address is None:
-            shutdown_ray_for_tuning()
+        cleanup_after_simulation_run(
+            use_ray=use_ray,
+            ray_address=ray_address,
+            use_gpu=config.flags.use_gpu,
+            interrupted=interrupted,
+        )
     results = _build_results(
         config,
         setup.outer_context.context,

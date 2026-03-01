@@ -290,6 +290,7 @@ class FanChartsConfig:
     enable: bool = False
     assets_mode: Literal["all", "list"] = "all"
     assets: tuple[str, ...] = field(default_factory=tuple)
+    rolling_mean: tuple[int, ...] = (13, 26)
     quantiles: tuple[float, ...] = (
         0.05,
         0.10,

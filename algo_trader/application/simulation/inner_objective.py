@@ -24,6 +24,7 @@ from .preprocessing import (
     fit_robust_scaler,
     transform_X,
 )
+from .target_space_transform import TargetSpaceTransform
 
 
 @dataclass(frozen=True)
@@ -220,6 +221,7 @@ def _evaluate_split(context: SplitContext) -> SplitResult | None:
         pred=pred,
         y_train=batches.y_train,
         y_test=batches.y_test,
+        model_state=model_state,
     )
     _maybe_write_postprocess_diagnostics(
         context=context,
@@ -352,6 +354,7 @@ def _maybe_write_postprocess_inputs(
     pred: Mapping[str, Any],
     y_train: torch.Tensor,
     y_test: torch.Tensor,
+    model_state: Mapping[str, Any],
 ) -> None:
     if not context.resources.model_selection.enable:
         return
@@ -371,6 +374,10 @@ def _maybe_write_postprocess_inputs(
         raise SimulationError("Postprocess samples and y_test must align on A")
     z_true = y_test / transform["scale"]
     z_samples = samples / transform["scale"]
+    target_transform = _resolve_target_space_transform(
+        model_state=model_state,
+        mad_scale=transform["scale"],
+    )
     test_groups = context.resources.group_by_index[context.split.test_idx]
     if np.any(test_groups < 0):
         raise SimulationError("Postprocess test groups contain invalid ids")
@@ -379,6 +386,7 @@ def _maybe_write_postprocess_inputs(
         "z_samples": z_samples.detach().cpu(),
         "scale": transform["scale"].detach().cpu(),
         "whitener": transform["whitener"].detach().cpu(),
+        "target_space_transform": target_transform.to_payload(),
         "test_idx": context.split.test_idx.tolist(),
         "test_groups": test_groups.tolist(),
     }
@@ -591,6 +599,31 @@ def _build_energy_score_transform(
     )
     whitener = _inverse_cholesky(cov_shrunk)
     return {"scale": scale, "whitener": whitener}
+
+
+def _resolve_target_space_transform(
+    *, model_state: Mapping[str, Any], mad_scale: torch.Tensor
+) -> TargetSpaceTransform:
+    target_norm = model_state.get("target_norm")
+    if not isinstance(target_norm, Mapping):
+        return TargetSpaceTransform(
+            model_center=torch.tensor(0.0, device=mad_scale.device, dtype=mad_scale.dtype),
+            model_scale=torch.tensor(1.0, device=mad_scale.device, dtype=mad_scale.dtype),
+            mad_scale=mad_scale.to(dtype=mad_scale.dtype),
+        )
+    center = target_norm.get("center")
+    scale = target_norm.get("scale")
+    if not isinstance(center, torch.Tensor) or not isinstance(scale, torch.Tensor):
+        return TargetSpaceTransform(
+            model_center=torch.tensor(0.0, device=mad_scale.device, dtype=mad_scale.dtype),
+            model_scale=torch.tensor(1.0, device=mad_scale.device, dtype=mad_scale.dtype),
+            mad_scale=mad_scale.to(dtype=mad_scale.dtype),
+        )
+    return TargetSpaceTransform(
+        model_center=center.to(device=mad_scale.device, dtype=mad_scale.dtype),
+        model_scale=scale.to(device=mad_scale.device, dtype=mad_scale.dtype),
+        mad_scale=mad_scale.to(device=mad_scale.device, dtype=mad_scale.dtype),
+    )
 
 
 def _mad_scale(

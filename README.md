@@ -940,7 +940,7 @@ Global selection (when `model_selection.enable: true`):
 - `SIMULATION_SOURCE/<label>/outer/selection.json`
 - `SIMULATION_SOURCE/<label>/outer/best_config.json`
 - Fan charts (when `diagnostics.fan_charts.enable: true`): `SIMULATION_SOURCE/<label>/outer/diagnostics/fan_charts/`
-- Calibration summaries (coverage fan plot + CSV) and calibration diagnostics (PIT histogram + coverage curve) live under: `SIMULATION_SOURCE/<label>/outer/diagnostics/calibration/`
+- Calibration diagnostics (per-level coverage fan PNG+CSV, PIT histogram, coverage curve, and `sigma_residual_dispersion.csv`) live under: `SIMULATION_SOURCE/<label>/outer/diagnostics/calibration_cpcv_ensemble/`
 - Inner SVI loss diagnostics (when `diagnostics.svi_loss.enable: true`): `SIMULATION_SOURCE/<label>/outer/diagnostics/svi_loss/` (one PNG+CSV per outer fold).
 
 Selection flow:
@@ -951,11 +951,12 @@ Selection flow:
 Metric coverage note:
 - CRPS/QL are computed only for ES survivors to reduce compute.
 - `metrics.json` will show `NaN` for CRPS/QL on non‑survivors, and global medians remain `NaN` if a candidate never survives ES in any outer fold.
-- Fan charts use z‑space (MAD‑scaled) predictive samples from inner splits for the global best candidate, rescaled to a shared median split scale per asset, and plot only test weeks.
+- Fan/calibration diagnostics use z‑space (MAD‑scaled) predictive samples from inner split payloads for the global best candidate and aggregate duplicate `(time, asset)` keys with equal split weighting (to avoid repeated-week overweighting).
 
 Diagnostics config:
 - `diagnostics.svi_loss.enable`: write per-outer inner-loop SVI loss-vs-step diagnostics.
 - `diagnostics.fan_charts.enable`: turn diagnostics on/off.
+- `diagnostics.fan_charts.rolling_mean`: trailing windows (weeks) for rolling means in per-level calibration fan charts; empty list disables rolling lines.
 - `diagnostics.fan_charts.assets`: `all` or a list of asset names (missing assets raise an error).
 - `diagnostics.fan_charts.quantiles`: fan chart bands/median (must be in (0, 1)).
 - `diagnostics.fan_charts.coverage_levels`: calibration coverage levels (must be in (0, 1)).
@@ -967,8 +968,10 @@ Fan chart per asset (z‑space):
 - Realized often outside bands → under‑dispersed (too narrow).
 - Realized always inside very wide bands → over‑dispersed (too wide).
 
-Calibration fan (coverage over time):
-- Line(s) show cross‑sectional coverage per week; dashed line(s) are nominal targets.
+Calibration fan (per nominal level):
+- One chart is written per configured `diagnostics.fan_charts.coverage_levels` value.
+- Lines show weekly cross‑sectional coverage, cumulative pooled coverage (over time and assets), and optional rolling means (`diagnostics.fan_charts.rolling_mean`).
+- Dashed line is the nominal target.
 - Above target → intervals too wide; below target → too narrow.
 - Highly volatile coverage → regime shifts / unstable calibration.
 
@@ -976,10 +979,12 @@ PIT histogram (pooled):
 - Flat around density = 1 → well‑calibrated.
 - U‑shape → under‑dispersed; hump‑shape → over‑dispersed.
 - Left/right skew → bias.
+- PIT is computed on de-duplicated unique `(time, asset)` keys after equal-weight pooling across duplicate splits.
 
 Coverage vs nominal curve:
 - Diagonal means calibrated.
 - Curve above diagonal → over‑dispersed; below → under‑dispersed.
+- Full computation details: `docs/simulation/diagnostics.md`.
 
 ---
 

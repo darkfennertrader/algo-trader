@@ -30,10 +30,14 @@ class FanChartData:
 
 
 @dataclass(frozen=True)
-class SplitPayload:
+class TimeSampleRecord:
+    source: str
     z_true: np.ndarray
     z_samples: np.ndarray
-    test_groups: np.ndarray
+
+
+TRUE_TOL_ABS = 1e-8
+TRUE_TOL_REL = 1e-6
 
 
 def run_fan_chart_diagnostics(
@@ -61,13 +65,6 @@ def run_fan_chart_diagnostics(
         asset_indices=asset_indices,
         global_scale=global_scale,
     )
-    split_payloads = _collect_split_payloads(
-        base_dir=context.base_dir,
-        outer_ids=context.outer_ids,
-        candidate_id=context.candidate_id,
-        asset_indices=asset_indices,
-        global_scale=global_scale,
-    )
     data = _build_fan_chart_data(
         samples=samples,
         timestamps=timestamps,
@@ -84,10 +81,13 @@ def run_fan_chart_diagnostics(
     _render_calibration_charts(
         data=data,
         coverage_levels=context.config.coverage_levels,
+        rolling_windows=context.config.rolling_mean,
         output_dir=calibration_dir,
     )
     _run_calibration_diagnostics(
-        split_payloads=split_payloads,
+        samples=samples,
+        asset_count=len(selected_assets),
+        fan_chart_data=data,
         coverage_levels=context.config.coverage_levels,
         output_dir=calibration_dir,
     )
@@ -160,8 +160,7 @@ def _merge_quantiles(
 
 @dataclass(frozen=True)
 class CandidateSamples:
-    samples_by_time: Mapping[int, list[np.ndarray]]
-    true_by_time: Mapping[int, np.ndarray]
+    records_by_time: Mapping[int, list[TimeSampleRecord]]
 
 
 def _collect_global_scale(
@@ -198,8 +197,7 @@ def _collect_candidate_samples(
     asset_indices: Sequence[int],
     global_scale: np.ndarray,
 ) -> CandidateSamples:
-    samples_by_time: dict[int, list[np.ndarray]] = {}
-    true_by_time: dict[int, np.ndarray] = {}
+    records_by_time: dict[int, list[TimeSampleRecord]] = {}
     total = 0
     for path in _iter_payload_paths(base_dir, outer_ids, candidate_id):
         payload = _load_payload(path)
@@ -207,8 +205,8 @@ def _collect_candidate_samples(
             payload=payload,
             asset_indices=asset_indices,
             global_scale=global_scale,
-            samples_by_time=samples_by_time,
-            true_by_time=true_by_time,
+            source=str(path),
+            records_by_time=records_by_time,
         )
         total += 1
     if total == 0:
@@ -217,35 +215,8 @@ def _collect_candidate_samples(
             context={"candidate_id": str(candidate_id)},
         )
     return CandidateSamples(
-        samples_by_time=samples_by_time,
-        true_by_time=true_by_time,
+        records_by_time=records_by_time,
     )
-
-
-def _collect_split_payloads(
-    *,
-    base_dir: Path,
-    outer_ids: Sequence[int],
-    candidate_id: int,
-    asset_indices: Sequence[int],
-    global_scale: np.ndarray,
-) -> list[SplitPayload]:
-    payloads: list[SplitPayload] = []
-    for path in _iter_payload_paths(base_dir, outer_ids, candidate_id):
-        raw = _load_payload(path)
-        payloads.append(
-            _build_split_payload(
-                raw=raw,
-                asset_indices=asset_indices,
-                global_scale=global_scale,
-            )
-        )
-    if not payloads:
-        raise SimulationError(
-            "No postprocess payloads found for diagnostics",
-            context={"candidate_id": str(candidate_id)},
-        )
-    return payloads
 
 
 def _load_payload(path: Path) -> Mapping[str, Any]:
@@ -263,52 +234,46 @@ def _append_payload(
     payload: Mapping[str, Any],
     asset_indices: Sequence[int],
     global_scale: np.ndarray,
-    samples_by_time: dict[int, list[np.ndarray]],
-    true_by_time: dict[int, np.ndarray],
+    source: str,
+    records_by_time: dict[int, list[TimeSampleRecord]],
 ) -> None:
+    z_true_np, z_samples_np, test_idx = _extract_scaled_payload_arrays(
+        payload=payload,
+        asset_indices=asset_indices,
+        global_scale=global_scale,
+    )
+    for pos, time_idx in enumerate(test_idx):
+        key = int(time_idx)
+        records = records_by_time.setdefault(key, [])
+        records.append(
+            TimeSampleRecord(
+                source=source,
+                z_true=z_true_np[pos],
+                z_samples=z_samples_np[:, pos, :],
+            )
+        )
+
+
+def _extract_scaled_payload_arrays(
+    *,
+    payload: Mapping[str, Any],
+    asset_indices: Sequence[int],
+    global_scale: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, Sequence[Any]]:
     z_true = _require_tensor(payload, "z_true")
     z_samples = _require_tensor(payload, "z_samples")
     scale = _require_tensor(payload, "scale")
     test_idx = payload.get("test_idx")
     if not isinstance(test_idx, Sequence):
         raise SimulationError("Postprocess payload missing test_idx")
-    scale_np = scale.detach().cpu().numpy()[asset_indices]
+    selected_scale = scale.detach().cpu().numpy()[asset_indices]
     z_true_np = z_true[:, asset_indices].detach().cpu().numpy()
     z_samples_np = z_samples[:, :, asset_indices].detach().cpu().numpy()
-    z_true_np = (z_true_np * scale_np) / global_scale
-    z_samples_np = (z_samples_np * scale_np) / global_scale
-    if z_true_np.shape[0] != len(test_idx):
+    z_true_scaled = (z_true_np * selected_scale) / global_scale
+    z_samples_scaled = (z_samples_np * selected_scale) / global_scale
+    if z_true_scaled.shape[0] != len(test_idx):
         raise SimulationError("Postprocess payload misaligned on T")
-    for pos, time_idx in enumerate(test_idx):
-        key = int(time_idx)
-        samples_by_time.setdefault(key, []).append(z_samples_np[:, pos, :])
-        if key not in true_by_time:
-            true_by_time[key] = z_true_np[pos]
-
-
-def _build_split_payload(
-    *,
-    raw: Mapping[str, Any],
-    asset_indices: Sequence[int],
-    global_scale: np.ndarray,
-) -> SplitPayload:
-    z_true = _require_tensor(raw, "z_true")
-    z_samples = _require_tensor(raw, "z_samples")
-    scale = _require_tensor(raw, "scale")
-    test_groups = raw.get("test_groups")
-    if not isinstance(test_groups, Sequence):
-        raise SimulationError("Postprocess payload missing test_groups")
-    scale_np = scale.detach().cpu().numpy()[asset_indices]
-    z_true_np = z_true[:, asset_indices].detach().cpu().numpy()
-    z_samples_np = z_samples[:, :, asset_indices].detach().cpu().numpy()
-    z_true_np = (z_true_np * scale_np) / global_scale
-    z_samples_np = (z_samples_np * scale_np) / global_scale
-    groups_np = np.asarray(test_groups, dtype=int)
-    return SplitPayload(
-        z_true=z_true_np,
-        z_samples=z_samples_np,
-        test_groups=groups_np,
-    )
+    return z_true_scaled, z_samples_scaled, test_idx
 
 
 def _iter_payload_paths(
@@ -344,17 +309,17 @@ def _build_fan_chart_data(
     asset_names: Sequence[str],
     quantiles: Sequence[float],
 ) -> FanChartData:
-    time_indices = sorted(samples.samples_by_time.keys())
+    time_indices = sorted(samples.records_by_time.keys())
     if not time_indices:
         raise SimulationError("No test weeks available for diagnostics")
     z_true = _build_true_matrix(
         time_indices=time_indices,
-        true_by_time=samples.true_by_time,
+        records_by_time=samples.records_by_time,
         asset_count=len(asset_names),
     )
     quantiles_map = _build_quantiles_matrix(
         time_indices=time_indices,
-        samples_by_time=samples.samples_by_time,
+        records_by_time=samples.records_by_time,
         quantiles=quantiles,
         asset_count=len(asset_names),
     )
@@ -370,23 +335,29 @@ def _build_fan_chart_data(
 def _build_true_matrix(
     *,
     time_indices: Sequence[int],
-    true_by_time: Mapping[int, np.ndarray],
+    records_by_time: Mapping[int, Sequence[TimeSampleRecord]],
     asset_count: int,
 ) -> np.ndarray:
     rows: list[np.ndarray] = []
     for time_idx in time_indices:
-        row = true_by_time.get(time_idx)
-        if row is None:
+        records = records_by_time.get(time_idx, [])
+        if not records:
             rows.append(np.full(asset_count, np.nan))
         else:
-            rows.append(row)
+            rows.append(
+                _resolve_true_row(
+                    records=records,
+                    time_idx=int(time_idx),
+                    asset_count=asset_count,
+                )
+            )
     return np.vstack(rows)
 
 
 def _build_quantiles_matrix(
     *,
     time_indices: Sequence[int],
-    samples_by_time: Mapping[int, list[np.ndarray]],
+    records_by_time: Mapping[int, Sequence[TimeSampleRecord]],
     quantiles: Sequence[float],
     asset_count: int,
 ) -> dict[float, np.ndarray]:
@@ -395,15 +366,108 @@ def _build_quantiles_matrix(
         for q in quantiles
     }
     for row, time_idx in enumerate(time_indices):
-        samples_list = samples_by_time.get(time_idx, [])
-        if not samples_list:
+        records = records_by_time.get(time_idx, [])
+        if not records:
             continue
-        samples = np.concatenate(samples_list, axis=0)
-        for q in quantiles:
-            quantile_map[q][row] = np.nanquantile(
-                samples, float(q), axis=0
+        for asset_idx in range(asset_count):
+            pooled = _pool_equal_split_samples(
+                records=records,
+                asset_idx=asset_idx,
             )
+            if pooled.size == 0:
+                continue
+            for q in quantiles:
+                quantile_map[q][row, asset_idx] = float(
+                    np.nanquantile(pooled, float(q))
+                )
     return quantile_map
+
+
+def _resolve_true_row(
+    *,
+    records: Sequence[TimeSampleRecord],
+    time_idx: int,
+    asset_count: int,
+) -> np.ndarray:
+    resolved = [
+        _resolve_true_value(
+            values=np.asarray(
+                [
+                    float(np.take(record.z_true, asset_idx))
+                    for record in records
+                ],
+                dtype=float,
+            ),
+            records=records,
+            time_idx=time_idx,
+            asset_idx=asset_idx,
+        )
+        for asset_idx in range(asset_count)
+    ]
+    return np.asarray(resolved, dtype=float)
+
+
+def _resolve_true_value(
+    *,
+    values: np.ndarray,
+    records: Sequence[TimeSampleRecord],
+    time_idx: int,
+    asset_idx: int,
+) -> float:
+    finite_mask = np.isfinite(values)
+    if not np.any(finite_mask):
+        return float("nan")
+    finite_values = values[finite_mask]
+    z_ref = float(np.median(finite_values))
+    max_abs_diff = float(np.max(np.abs(finite_values - z_ref)))
+    tolerance = TRUE_TOL_ABS + TRUE_TOL_REL * max(1.0, abs(z_ref))
+    if max_abs_diff > tolerance:
+        sources = [
+            record.source
+            for row_idx, record in enumerate(records)
+            if bool(finite_mask[row_idx])
+        ]
+        raise SimulationError(
+            "Inconsistent z_true across duplicated diagnostics keys",
+            context={
+                "time_idx": str(time_idx),
+                "asset_idx": str(asset_idx),
+                "z_ref": str(z_ref),
+                "max_abs_diff": str(max_abs_diff),
+                "tolerance": str(tolerance),
+                "sources": ";".join(sources),
+                "values": ",".join(f"{val:.12g}" for val in finite_values),
+            },
+        )
+    return z_ref
+
+
+def _pool_equal_split_samples(
+    *, records: Sequence[TimeSampleRecord], asset_idx: int
+) -> np.ndarray:
+    split_samples: list[np.ndarray] = []
+    for record in records:
+        values = record.z_samples[:, asset_idx]
+        finite = values[np.isfinite(values)]
+        if finite.size:
+            split_samples.append(finite)
+    if not split_samples:
+        return np.asarray([], dtype=float)
+    target = min(int(values.size) for values in split_samples)
+    pooled = [
+        _deterministic_subsample(values=values, target=target)
+        for values in split_samples
+    ]
+    return np.concatenate(pooled)
+
+
+def _deterministic_subsample(*, values: np.ndarray, target: int) -> np.ndarray:
+    if target <= 0:
+        return np.asarray([], dtype=float)
+    if target >= values.size:
+        return values
+    indices = (np.arange(target, dtype=int) * values.size) // target
+    return values[indices]
 
 
 def _resolve_timestamps(
@@ -434,7 +498,7 @@ def _ensure_output_dir(base_dir: Path) -> Path:
 
 
 def _ensure_calibration_output_dir(base_dir: Path) -> Path:
-    target_dir = base_dir / "outer" / "diagnostics" / "calibration"
+    target_dir = base_dir / "outer" / "diagnostics" / "calibration_cpcv_ensemble"
     ensure_directory(
         target_dir,
         error_type=SimulationError,
@@ -465,6 +529,7 @@ def _render_asset_fan_charts(
                     data.quantiles[high][:, idx],
                     alpha=alpha,
                     color=color,
+                    label=_fan_band_label(low, high),
                 )
         if median is not None and median in data.quantiles:
             sns.lineplot(
@@ -499,121 +564,241 @@ def _render_calibration_charts(
     *,
     data: FanChartData,
     coverage_levels: Sequence[float],
+    rolling_windows: Sequence[int],
+    output_dir: Path,
+) -> None:
+    series = _collect_calibration_level_series(
+        data=data,
+        coverage_levels=coverage_levels,
+        rolling_windows=rolling_windows,
+    )
+    _cleanup_legacy_calibration_outputs(output_dir)
+    for item in series:
+        _write_calibration_level_csv(
+            data=data,
+            series=item,
+            output_dir=output_dir,
+        )
+        _plot_calibration_level(
+            series=item,
+            timestamps=data.timestamps,
+            output_dir=output_dir,
+        )
+
+
+def _run_calibration_diagnostics(
+    *,
+    samples: CandidateSamples,
+    asset_count: int,
+    fan_chart_data: FanChartData,
+    coverage_levels: Sequence[float],
+    output_dir: Path,
+) -> None:
+    if not samples.records_by_time:
+        return
+    pit_values = _pool_raw_pit_values(
+        records_by_time=samples.records_by_time,
+        asset_count=asset_count,
+    )
+    _plot_pit_histogram(pit_values, output_dir)
+    curve = _coverage_curve_from_raw(
+        data=fan_chart_data,
+        coverage_levels=coverage_levels,
+    )
+    _plot_coverage_curve(curve, output_dir)
+
+
+@dataclass(frozen=True)
+class CalibrationLevelSeries:
+    level: float
+    weekly_coverage: np.ndarray
+    weekly_band: tuple[np.ndarray, np.ndarray]
+    cumulative_coverage: np.ndarray
+    rolling_coverage: Mapping[int, np.ndarray]
+
+
+def _collect_calibration_level_series(
+    *,
+    data: FanChartData,
+    coverage_levels: Sequence[float],
+    rolling_windows: Sequence[int],
+) -> list[CalibrationLevelSeries]:
+    series: list[CalibrationLevelSeries] = []
+    for level in coverage_levels:
+        item = _build_calibration_level_series(
+            data=data,
+            level=float(level),
+            rolling_windows=rolling_windows,
+        )
+        series.append(item)
+    return series
+
+
+def _build_calibration_level_series(
+    *,
+    data: FanChartData,
+    level: float,
+    rolling_windows: Sequence[int],
+) -> CalibrationLevelSeries:
+    q_lo, q_hi = _coverage_quantile_bounds(data, level)
+    indicator, mask = _compute_coverage_indicator_matrix(
+        data=data, q_lo=q_lo, q_hi=q_hi
+    )
+    weekly_coverage, counts = _coverage_from_indicator(indicator, mask)
+    weekly_band = _compute_coverage_band(weekly_coverage, counts)
+    cumulative_coverage = _cumulative_coverage_from_indicator(indicator, mask)
+    rolling_coverage = _rolling_coverage(
+        coverage=weekly_coverage, windows=rolling_windows
+    )
+    return CalibrationLevelSeries(
+        level=level,
+        weekly_coverage=weekly_coverage,
+        weekly_band=weekly_band,
+        cumulative_coverage=cumulative_coverage,
+        rolling_coverage=rolling_coverage,
+    )
+
+
+def _rolling_coverage(
+    *, coverage: np.ndarray, windows: Sequence[int]
+) -> dict[int, np.ndarray]:
+    series = pd.Series(coverage, dtype=float)
+    rolling: dict[int, np.ndarray] = {}
+    for window in windows:
+        values = series.rolling(
+            window=int(window), min_periods=int(window)
+        ).mean()
+        rolling[int(window)] = values.to_numpy(dtype=float)
+    return rolling
+
+
+def _coverage_from_indicator(
+    indicator: np.ndarray, mask: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    covered_counts = np.nansum(indicator, axis=1)
+    counts = mask.sum(axis=1)
+    coverage = np.divide(
+        covered_counts,
+        counts,
+        out=np.full(counts.shape, np.nan, dtype=float),
+        where=counts > 0,
+    )
+    return coverage, counts
+
+
+def _cumulative_coverage_from_indicator(
+    indicator: np.ndarray, mask: np.ndarray
+) -> np.ndarray:
+    covered_counts = np.nansum(indicator, axis=1)
+    counts = mask.sum(axis=1).astype(float)
+    cumulative_hits = np.cumsum(covered_counts)
+    cumulative_counts = np.cumsum(counts)
+    return np.divide(
+        cumulative_hits,
+        cumulative_counts,
+        out=np.full(cumulative_counts.shape, np.nan, dtype=float),
+        where=cumulative_counts > 0,
+    )
+
+
+def _write_calibration_level_csv(
+    *,
+    data: FanChartData,
+    series: CalibrationLevelSeries,
+    output_dir: Path,
+) -> None:
+    frame = _build_calibration_level_frame(data, series)
+    frame.to_csv(
+        output_dir / f"calibration_fan_{_coverage_level_tag(series.level)}.csv",
+        index=False,
+    )
+
+
+def _build_calibration_level_frame(
+    data: FanChartData, series: CalibrationLevelSeries
+) -> pd.DataFrame:
+    rows: dict[str, list[float] | list[str]] = {
+        "timestamp": [
+            stamp.strftime("%Y-%m-%d %H:%M:%S UTC")
+            for stamp in data.timestamps
+        ],
+        "nominal_level": [series.level] * len(data.timestamps),
+        "weekly_coverage": list(series.weekly_coverage),
+        "weekly_band_low": list(series.weekly_band[0]),
+        "weekly_band_high": list(series.weekly_band[1]),
+        "cumulative_coverage": list(series.cumulative_coverage),
+    }
+    for window, values in series.rolling_coverage.items():
+        rows[f"rolling_mean_{int(window)}w"] = list(values)
+    return pd.DataFrame(rows)
+
+
+def _plot_calibration_level(
+    *,
+    series: CalibrationLevelSeries,
+    timestamps: Sequence[pd.Timestamp],
     output_dir: Path,
 ) -> None:
     plt, sns = _require_plotting()
     sns.set_theme(style="whitegrid")
-    series = _collect_coverage_series(data, coverage_levels)
-    _write_calibration_csv(
-        data=data,
-        series=series,
-        output_dir=output_dir,
-    )
     fig, ax = plt.subplots(figsize=(10, 4))
-    for item in series:
+    sns.lineplot(
+        x=timestamps,
+        y=series.weekly_coverage,
+        ax=ax,
+        label="weekly coverage",
+    )
+    ax.fill_between(
+        timestamps,
+        series.weekly_band[0],
+        series.weekly_band[1],
+        alpha=0.1,
+    )
+    sns.lineplot(
+        x=timestamps,
+        y=series.cumulative_coverage,
+        ax=ax,
+        label="cumulative coverage",
+        color="tab:orange",
+    )
+    for window, values in series.rolling_coverage.items():
         sns.lineplot(
-            x=data.timestamps,
-            y=item.coverage,
+            x=timestamps,
+            y=values,
             ax=ax,
-            label=f"coverage {item.level:.2f}",
+            label=f"rolling mean {int(window)}w",
         )
-        ax.fill_between(
-            data.timestamps,
-            item.band[0],
-            item.band[1],
-            alpha=0.1,
-        )
-        ax.axhline(
-            item.level, color="black", linestyle="--", linewidth=1
-        )
-    ax.set_title("Calibration coverage")
+    ax.axhline(series.level, color="black", linestyle="--", linewidth=1)
+    ax.set_title(
+        f"Calibration coverage ({_coverage_level_tag(series.level)})"
+    )
     ax.set_xlabel("test week")
     ax.set_ylabel("coverage")
     ax.set_ylim(0.0, 1.0)
     fig.autofmt_xdate()
     fig.tight_layout()
     fig.savefig(
-        output_dir / "calibration_fan.png",
+        output_dir / f"calibration_fan_{_coverage_level_tag(series.level)}.png",
         dpi=150,
         bbox_inches="tight",
     )
     plt.close(fig)
 
 
-def _run_calibration_diagnostics(
-    *,
-    split_payloads: Sequence[SplitPayload],
-    coverage_levels: Sequence[float],
-    output_dir: Path,
-) -> None:
-    if not split_payloads:
-        return
-    group_count = _infer_group_count(split_payloads)
-    asset_count = split_payloads[0].z_true.shape[1]
-    pit_group = _aggregate_pit_groups(
-        split_payloads=split_payloads,
-        group_count=group_count,
-        asset_count=asset_count,
-    )
-    _plot_pit_histogram(pit_group, output_dir)
-    coverage_groups = _aggregate_coverage_groups(
-        split_payloads=split_payloads,
-        group_count=group_count,
-        asset_count=asset_count,
-        coverage_levels=coverage_levels,
-    )
-    curve = _coverage_curve_from_groups(coverage_groups)
-    _plot_coverage_curve(curve, output_dir)
+def _cleanup_legacy_calibration_outputs(output_dir: Path) -> None:
+    for name in ("calibration_fan.png", "calibration_fan.csv"):
+        legacy = output_dir / name
+        if legacy.exists():
+            legacy.unlink()
 
 
-@dataclass(frozen=True)
-class CoverageSeries:
-    level: float
-    coverage: np.ndarray
-    band: tuple[np.ndarray, np.ndarray]
-
-
-def _collect_coverage_series(
-    data: FanChartData, coverage_levels: Sequence[float]
-) -> list[CoverageSeries]:
-    series: list[CoverageSeries] = []
-    for level in coverage_levels:
-        coverage, band = _coverage_series(data, float(level))
-        series.append(
-            CoverageSeries(
-                level=float(level),
-                coverage=coverage,
-                band=band,
-            )
-        )
-    return series
-
-
-def _write_calibration_csv(
-    *,
-    data: FanChartData,
-    series: Sequence[CoverageSeries],
-    output_dir: Path,
-) -> None:
-    frame = _build_calibration_frame(data, series)
-    frame.to_csv(output_dir / "calibration_fan.csv", index=False)
-
-
-def _build_calibration_frame(
-    data: FanChartData, series: Sequence[CoverageSeries]
-) -> pd.DataFrame:
-    rows: dict[str, list[float] | list[str]] = {
-        "timestamp": [
-            stamp.strftime("%Y-%m-%d %H:%M:%S UTC")
-            for stamp in data.timestamps
-        ]
-    }
-    for item in series:
-        label = f"p{int(round(item.level * 100)):02d}"
-        rows[f"coverage_{label}"] = list(item.coverage)
-        rows[f"band_low_{label}"] = list(item.band[0])
-        rows[f"band_high_{label}"] = list(item.band[1])
-    return pd.DataFrame(rows)
+def _coverage_level_tag(level: float) -> str:
+    pct = float(level) * 100.0
+    rounded = round(pct)
+    if abs(pct - rounded) <= 1e-6:
+        return f"p{int(rounded):02d}"
+    as_text = f"{pct:.3f}".rstrip("0").rstrip(".").replace(".", "_")
+    return f"p{as_text}"
 
 
 def _fan_bands(quantiles: Sequence[float]) -> list[tuple[float, float, float, str]]:
@@ -626,9 +811,21 @@ def _fan_bands(quantiles: Sequence[float]) -> list[tuple[float, float, float, st
     return [band for band in bands if band[0] in available and band[1] in available]
 
 
-def _coverage_series(
+def _fan_band_label(low: float, high: float) -> str:
+    return f"q{_quantile_percent_label(low)}-q{_quantile_percent_label(high)}"
+
+
+def _quantile_percent_label(level: float) -> str:
+    pct = float(level) * 100.0
+    rounded = round(pct)
+    if abs(pct - rounded) <= 1e-6:
+        return f"{int(rounded):02d}"
+    return f"{pct:.3f}".rstrip("0").rstrip(".")
+
+
+def _coverage_quantile_bounds(
     data: FanChartData, level: float
-) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray]]:
+) -> tuple[np.ndarray, np.ndarray]:
     lo = (1.0 - level) / 2.0
     hi = 1.0 - lo
     lo_key = _match_quantile_key(data.quantiles, lo)
@@ -638,30 +835,17 @@ def _coverage_series(
             "Coverage quantiles missing",
             context={"level": str(level)},
         )
-    coverage, counts = _compute_coverage(
-        data=data,
-        q_lo=data.quantiles[lo_key],
-        q_hi=data.quantiles[hi_key],
-    )
-    band = _compute_coverage_band(coverage, counts)
-    return coverage, band
+    return data.quantiles[lo_key], data.quantiles[hi_key]
 
 
-def _compute_coverage(
+def _compute_coverage_indicator_matrix(
     *, data: FanChartData, q_lo: np.ndarray, q_hi: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     z_true = data.z_true
-    mask = np.isfinite(z_true) & np.isfinite(q_lo) & np.isfinite(q_hi)
-    covered = (z_true >= q_lo) & (z_true <= q_hi) & mask
-    counts = mask.sum(axis=1)
-    covered_counts = covered.sum(axis=1)
-    coverage = np.divide(
-        covered_counts,
-        counts,
-        out=np.full(counts.shape, np.nan, dtype=float),
-        where=counts > 0,
-    )
-    return coverage, counts
+    valid_mask = np.isfinite(z_true) & np.isfinite(q_lo) & np.isfinite(q_hi)
+    covered_mask = (z_true >= q_lo) & (z_true <= q_hi) & valid_mask
+    indicator = np.where(valid_mask, covered_mask.astype(float), np.nan)
+    return indicator, valid_mask
 
 
 def _compute_coverage_band(
@@ -705,68 +889,31 @@ def _match_quantile_key(
     return None
 
 
-def _infer_group_count(split_payloads: Sequence[SplitPayload]) -> int:
-    max_group = -1
-    for payload in split_payloads:
-        if payload.test_groups.size:
-            max_group = max(max_group, int(payload.test_groups.max()))
-    if max_group < 0:
-        raise SimulationError("Calibration payloads missing groups")
-    return max_group + 1
-
-
-def _aggregate_pit_groups(
+def _pool_raw_pit_values(
     *,
-    split_payloads: Sequence[SplitPayload],
-    group_count: int,
+    records_by_time: Mapping[int, Sequence[TimeSampleRecord]],
     asset_count: int,
 ) -> np.ndarray:
-    sums = np.zeros((group_count, asset_count), dtype=float)
-    counts = np.zeros((group_count, asset_count), dtype=float)
-    for payload in split_payloads:
-        pit = _compute_pit(payload.z_samples, payload.z_true)
-        group_means, present = _mean_by_group(
-            values=pit,
-            group_ids=payload.test_groups,
-            group_count=group_count,
+    pooled: list[float] = []
+    for time_idx in sorted(records_by_time.keys()):
+        records = records_by_time[time_idx]
+        true_row = _resolve_true_row(
+            records=records,
+            time_idx=int(time_idx),
+            asset_count=asset_count,
         )
-        sums = np.where(present, sums + group_means, sums)
-        counts = np.where(present, counts + 1.0, counts)
-    return _safe_divide(sums, counts)
-
-
-def _aggregate_coverage_groups(
-    *,
-    split_payloads: Sequence[SplitPayload],
-    group_count: int,
-    asset_count: int,
-    coverage_levels: Sequence[float],
-) -> Mapping[float, np.ndarray]:
-    sums: dict[float, np.ndarray] = {}
-    counts: dict[float, np.ndarray] = {}
-    for level in coverage_levels:
-        sums[level] = np.zeros((group_count, asset_count), dtype=float)
-        counts[level] = np.zeros((group_count, asset_count), dtype=float)
-    for payload in split_payloads:
-        for level in coverage_levels:
-            indicator = _compute_coverage_indicator(
-                payload.z_samples, payload.z_true, float(level)
+        for asset_idx in range(asset_count):
+            z_true_value = float(np.take(true_row, asset_idx))
+            if not np.isfinite(z_true_value):
+                continue
+            values = _pool_equal_split_samples(
+                records=records,
+                asset_idx=asset_idx,
             )
-            group_means, present = _mean_by_group(
-                values=indicator,
-                group_ids=payload.test_groups,
-                group_count=group_count,
-            )
-            sums[level] = np.where(
-                present, sums[level] + group_means, sums[level]
-            )
-            counts[level] = np.where(
-                present, counts[level] + 1.0, counts[level]
-            )
-    return {
-        level: _safe_divide(sums[level], counts[level])
-        for level in coverage_levels
-    }
+            if values.size == 0:
+                continue
+            pooled.append(float(np.mean(values <= z_true_value)))
+    return np.asarray(pooled, dtype=float)
 
 
 def _compute_pit(z_samples: np.ndarray, z_true: np.ndarray) -> np.ndarray:
@@ -774,50 +921,6 @@ def _compute_pit(z_samples: np.ndarray, z_true: np.ndarray) -> np.ndarray:
     pit = (z_samples <= z_true[None, :, :]).mean(axis=0)
     pit[~valid] = np.nan
     return pit
-
-
-def _compute_coverage_indicator(
-    z_samples: np.ndarray, z_true: np.ndarray, level: float
-) -> np.ndarray:
-    lo = (1.0 - level) / 2.0
-    hi = 1.0 - lo
-    lower = np.nanquantile(z_samples, lo, axis=0)
-    upper = np.nanquantile(z_samples, hi, axis=0)
-    valid = np.isfinite(z_true) & np.isfinite(lower) & np.isfinite(upper)
-    indicator = ((z_true >= lower) & (z_true <= upper)).astype(float)
-    indicator[~valid] = np.nan
-    return indicator
-
-
-def _mean_by_group(
-    *,
-    values: np.ndarray,
-    group_ids: np.ndarray,
-    group_count: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    asset_count = values.shape[1]
-    means: list[np.ndarray] = []
-    present_rows: list[np.ndarray] = []
-    for group in range(group_count):
-        idx = group_ids == group
-        if not np.any(idx):
-            mean = np.full(asset_count, np.nan, dtype=float)
-        else:
-            mean = np.nanmean(values[idx], axis=0)
-        means.append(mean)
-        present_rows.append(np.isfinite(mean))
-    return np.vstack(means), np.vstack(present_rows)
-
-
-def _safe_divide(
-    numerator: np.ndarray, denominator: np.ndarray
-) -> np.ndarray:
-    return np.divide(
-        numerator,
-        denominator,
-        out=np.full(numerator.shape, np.nan, dtype=float),
-        where=denominator > 0,
-    )
 
 
 def _plot_pit_histogram(values: np.ndarray, output_dir: Path) -> None:
@@ -840,13 +943,35 @@ def _plot_pit_histogram(values: np.ndarray, output_dir: Path) -> None:
     plt.close(fig)
 
 
-def _coverage_curve_from_groups(
-    coverage_groups: Mapping[float, np.ndarray],
+def _coverage_curve_from_raw(
+    *,
+    data: FanChartData,
+    coverage_levels: Sequence[float],
 ) -> Mapping[float, float]:
     curve: dict[float, float] = {}
-    for level, group_vals in coverage_groups.items():
-        asset_means = np.nanmean(group_vals, axis=0)
-        curve[level] = float(np.nanmean(asset_means))
+    for level in coverage_levels:
+        lo = (1.0 - float(level)) / 2.0
+        hi = 1.0 - lo
+        lo_key = _match_quantile_key(data.quantiles, lo)
+        hi_key = _match_quantile_key(data.quantiles, hi)
+        if lo_key is None or hi_key is None:
+            raise SimulationError(
+                "Coverage quantiles missing",
+                context={"level": str(level)},
+            )
+        q_lo = data.quantiles[lo_key]
+        q_hi = data.quantiles[hi_key]
+        valid = (
+            np.isfinite(data.z_true)
+            & np.isfinite(q_lo)
+            & np.isfinite(q_hi)
+        )
+        covered = (data.z_true >= q_lo) & (data.z_true <= q_hi) & valid
+        finite = covered[valid]
+        if finite.size == 0:
+            curve[float(level)] = float("nan")
+        else:
+            curve[float(level)] = float(np.mean(finite.astype(float)))
     return curve
 
 

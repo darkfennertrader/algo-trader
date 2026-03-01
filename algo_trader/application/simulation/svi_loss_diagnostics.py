@@ -177,7 +177,8 @@ def _render_svi_loss_plot(
     plt, sns = _require_plotting()
     sns.set_theme(style="whitegrid")
     fig, ax = plt.subplots(figsize=(10, 5))
-    for curve in _sample_curves_for_plot(curves):
+    sampled = _sample_curves_for_plot(curves)
+    for curve in sampled:
         x = np.arange(1, curve.shape[0] + 1, dtype=int)
         ax.plot(x, curve, color="tab:blue", alpha=0.08, linewidth=1)
     ax.fill_between(
@@ -190,6 +191,7 @@ def _render_svi_loss_plot(
     ax.set_xlabel("SVI step")
     ax.set_ylabel("loss")
     ax.legend()
+    _add_zoomed_inset(ax=ax, summary=summary, sampled_curves=sampled)
     fig.tight_layout()
     fig.savefig(
         output_dir / f"outer_{outer_k}_svi_loss.png",
@@ -207,6 +209,67 @@ def _sample_curves_for_plot(
     stride = max(1, len(curves) // max_curves)
     sampled = list(curves[::stride])
     return sampled[:max_curves]
+
+
+def _add_zoomed_inset(
+    *, ax: Any, summary: SviLossSummary, sampled_curves: Sequence[np.ndarray]
+) -> None:
+    x_start, y_low, y_high = _inset_zoom_bounds(summary)
+    if x_start is None:
+        return
+    inset_ax = ax.inset_axes([0.54, 0.50, 0.43, 0.45])
+    for curve in sampled_curves:
+        if curve.shape[0] <= x_start:
+            continue
+        x = np.arange(1, curve.shape[0] + 1, dtype=int)
+        inset_ax.plot(
+            x,
+            curve,
+            color="tab:blue",
+            alpha=0.05,
+            linewidth=0.8,
+        )
+    inset_ax.fill_between(
+        summary.steps,
+        summary.p10,
+        summary.p90,
+        alpha=0.20,
+        color="tab:blue",
+    )
+    inset_ax.plot(summary.steps, summary.median, color="tab:blue", linewidth=1.5)
+    inset_ax.set_xlim(float(x_start), float(summary.steps[-1]))
+    inset_ax.set_ylim(y_low, y_high)
+    inset_ax.set_title("zoom", fontsize=9)
+    inset_ax.tick_params(labelsize=8)
+    if hasattr(ax, "indicate_inset_zoom"):
+        ax.indicate_inset_zoom(inset_ax, edgecolor="gray", alpha=0.6)
+
+
+def _inset_zoom_bounds(summary: SviLossSummary) -> tuple[int | None, float, float]:
+    if summary.steps.size < 3:
+        return None, float("nan"), float("nan")
+    x_start = int(summary.steps[1])
+    mask = summary.steps >= x_start
+    tail_values = np.hstack(
+        [
+            summary.median[mask],
+            summary.p10[mask],
+            summary.p90[mask],
+        ]
+    )
+    tail_array = np.asarray(tail_values, dtype=float)
+    finite = np.compress(np.isfinite(tail_array), tail_array)
+    if finite.size == 0:
+        return None, float("nan"), float("nan")
+    low = float(np.quantile(finite, 0.01))
+    high = float(np.quantile(finite, 0.99))
+    if not np.isfinite(low) or not np.isfinite(high):
+        return None, float("nan"), float("nan")
+    if high <= low:
+        spread = max(1e-6, abs(low) * 0.05)
+        return x_start, low - spread, high + spread
+    margin = max(1e-9, (high - low) * 0.08)
+    return x_start, low - margin, high + margin
 
 
 def _ensure_svi_loss_output_dir(base_dir: Path) -> Path:

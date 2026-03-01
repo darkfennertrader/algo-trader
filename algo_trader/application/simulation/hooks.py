@@ -23,6 +23,7 @@ from algo_trader.domain.simulation import (
 from algo_trader.pipeline.stages import modeling
 from .metrics import build_metric_scorer
 from .config_utils import require_bool
+from .model_params import resolve_dof_shift
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +200,7 @@ def _fit_pyro_svi(
         model_name,
         guide_name,
         norm_state,
-        _summarize_posterior_params(),
+        _summarize_posterior_params(config),
         _build_training_diagnostics(
             svi_loss_history=svi_loss_history, params=params
         ),
@@ -218,21 +219,35 @@ def _build_training_diagnostics(
     }
 
 
-def _summarize_posterior_params() -> Mapping[str, Any]:
+def _summarize_posterior_params(config: Mapping[str, Any]) -> Mapping[str, Any]:
     store = pyro.get_param_store()
     summary: dict[str, Any] = {}
+    dof_shift = resolve_dof_shift(config)
 
     nu_raw_loc = _get_param(store, "nu_raw_loc")
     nu_raw_scale = _get_param(store, "nu_raw_scale")
     nu_raw_mean = _lognormal_mean(nu_raw_loc, nu_raw_scale)
     if nu_raw_mean is not None:
         summary["nu_raw"] = _summarize_tensor(nu_raw_mean)
+    nu_stats = _lognormal_quantile_summary(nu_raw_loc, nu_raw_scale)
+    if nu_stats is not None:
+        summary["nu_raw_posterior"] = nu_stats
+        summary["nu_posterior"] = {
+            "q10": float(nu_stats["q10"] + dof_shift),
+            "median": float(nu_stats["median"] + dof_shift),
+            "q90": float(nu_stats["q90"] + dof_shift),
+        }
 
     sigma_loc = _get_param(store, "sigma_loc")
     sigma_scale = _get_param(store, "sigma_scale")
     sigma_mean = _lognormal_mean(sigma_loc, sigma_scale)
     if sigma_mean is not None:
         summary["sigma"] = _summarize_tensor(sigma_mean)
+    sigma_by_asset = _lognormal_quantiles_by_asset(
+        sigma_loc=sigma_loc, sigma_scale=sigma_scale
+    )
+    if sigma_by_asset is not None:
+        summary["sigma_by_asset"] = sigma_by_asset
 
     w_loc = _get_param(store, "w_loc")
     w_scale = _get_param(store, "w_scale")
@@ -267,6 +282,60 @@ def _lognormal_mean(
     ):
         return None
     return torch.exp(loc + 0.5 * scale.pow(2))
+
+
+def _lognormal_quantile_summary(
+    loc: torch.Tensor | None, scale: torch.Tensor | None
+) -> Mapping[str, float] | None:
+    if not isinstance(loc, torch.Tensor) or not isinstance(scale, torch.Tensor):
+        return None
+    if loc.numel() == 0 or scale.numel() == 0:
+        return None
+    q = _normal_quantiles(loc.device, loc.dtype)
+    median = torch.exp(loc)
+    q10 = torch.exp(loc + scale * q[0])
+    q90 = torch.exp(loc + scale * q[2])
+    finite = median[torch.isfinite(median)]
+    if finite.numel() == 0:
+        return None
+    return {
+        "q10": _safe_stat(torch.median, q10),
+        "median": _safe_stat(torch.median, median),
+        "q90": _safe_stat(torch.median, q90),
+    }
+
+
+def _lognormal_quantiles_by_asset(
+    *, sigma_loc: torch.Tensor | None, sigma_scale: torch.Tensor | None
+) -> Mapping[str, list[float]] | None:
+    if not isinstance(sigma_loc, torch.Tensor) or not isinstance(
+        sigma_scale, torch.Tensor
+    ):
+        return None
+    if sigma_loc.numel() == 0 or sigma_scale.numel() == 0:
+        return None
+    loc = sigma_loc.reshape(-1)
+    scale = sigma_scale.reshape(-1)
+    if loc.shape != scale.shape:
+        return None
+    q = _normal_quantiles(loc.device, loc.dtype)
+    median = torch.exp(loc)
+    q10 = torch.exp(loc + scale * q[0])
+    q90 = torch.exp(loc + scale * q[2])
+    return {
+        "q10": [float(value) for value in q10.detach().cpu().tolist()],
+        "median": [float(value) for value in median.detach().cpu().tolist()],
+        "q90": [float(value) for value in q90.detach().cpu().tolist()],
+    }
+
+
+def _normal_quantiles(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    standard = torch.distributions.Normal(  # pylint: disable=not-callable
+        torch.tensor(0.0, device=device, dtype=dtype),
+        torch.tensor(1.0, device=device, dtype=dtype),
+    )
+    points = torch.tensor([0.10, 0.50, 0.90], device=device, dtype=dtype)
+    return standard.icdf(points)
 
 
 def _summarize_tensor(values: torch.Tensor) -> Mapping[str, float]:

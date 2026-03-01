@@ -16,6 +16,7 @@ from .diagnostics import (
     run_fan_chart_diagnostics,
 )
 from .svi_loss_diagnostics import run_svi_loss_diagnostics
+from .posterior_scale_diagnostics import run_posterior_scale_diagnostics
 from .inner_objective import InnerObjectiveContext
 from .model_selection import (
     GlobalSelectionContext,
@@ -179,6 +180,11 @@ def run_global_diagnostics(
                 candidate_id=candidate_id,
                 config=diagnostics.fan_charts,
             )
+        )
+        run_posterior_scale_diagnostics(
+            base_dir=base_dir,
+            outer_ids=outer_ids,
+            candidate_id=candidate_id,
         )
 
 

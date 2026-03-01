@@ -481,10 +481,18 @@ def _build_fan_charts_config(
         config_path=config_path,
         default=FanChartsConfig().coverage_levels,
     )
+    rolling_mean = _parse_positive_int_list(
+        raw_fan.get("rolling_mean"),
+        field="diagnostics.fan_charts.rolling_mean",
+        config_path=config_path,
+        default=FanChartsConfig().rolling_mean,
+        allow_empty=True,
+    )
     return FanChartsConfig(
         enable=enable,
         assets_mode=assets_mode,
         assets=assets,
+        rolling_mean=rolling_mean,
         quantiles=quantiles,
         coverage_levels=coverage_levels,
     )
@@ -542,6 +550,56 @@ def _parse_float_list(
             )
     unique = sorted(set(values))
     return tuple(unique)
+
+
+def _parse_positive_int_list(
+    raw: Any,
+    *,
+    field: str,
+    config_path: Path,
+    default: tuple[int, ...],
+    allow_empty: bool = False,
+) -> tuple[int, ...]:
+    if raw is None:
+        values = list(default)
+    elif isinstance(raw, (list, tuple)):
+        values = [
+            _parse_positive_int(
+                item,
+                field=field,
+                config_path=config_path,
+            )
+            for item in raw
+        ]
+    else:
+        values = [
+            _parse_positive_int(
+                raw,
+                field=field,
+                config_path=config_path,
+            )
+        ]
+    if not values:
+        if allow_empty:
+            return tuple()
+        raise ConfigError(f"{field} must be non-empty in {config_path}")
+    unique = sorted(set(values))
+    return tuple(unique)
+
+
+def _parse_positive_int(
+    raw: Any,
+    *,
+    field: str,
+    config_path: Path,
+) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ConfigError(f"{field} entries must be integers in {config_path}")
+    if raw <= 0:
+        raise ConfigError(
+            f"{field} entries must be positive integers in {config_path}"
+        )
+    return int(raw)
 
 
 def _build_model_selection_es_band(

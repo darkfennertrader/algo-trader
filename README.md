@@ -130,6 +130,8 @@ Output locations (by pipeline stage, see `docs/workflows.md` for full detail):
 - Reuse rule: if the output directory already exists, reuse `inputs/panel_tensor.pt`; if it exists without that file, raise an error.
 - Flags: `simulation_mode` and `stop_after` control dry-run vs stub/full execution and early stopping.
 - Outputs: `SIMULATION_SOURCE/<label>/` with inputs, preprocessing, inner/outer artifacts, and `cv/` outputs like `cv_structure.json`, `summary.json`, and `timestamps_cv.csv`.
+- CV artifact encoding: `cv/cv_structure.json` and `inner/outer_<k>/splits.json` store index sets as compact inclusive ranges (`[start, end]`) instead of enumerating every week index.
+- Inner split visualization: each `inner/outer_<k>/` also includes `splits_timeline.png` with warmup/train/test/purge/embargo segments per split.
 - Optional prebuild: `model.prebuild` lets you run a train-only, no-leakage initialization step before tuning. It uses the intersection of all outer-fold training indices. Outputs are written to `SIMULATION_SOURCE/<label>/artifacts/prebuild/prebuild.json`.
 
 **Simulation Preprocessing**

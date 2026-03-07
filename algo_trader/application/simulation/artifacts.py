@@ -22,6 +22,8 @@ from algo_trader.infrastructure.data.versioning import (
     resolve_feature_store_version_label,
     resolve_root_dir,
 )
+from .index_ranges import indices_to_ranges
+from .split_timeline_plot import write_splits_timeline_plot
 from .summary_utils import build_cleaning_thresholds
 
 
@@ -107,8 +109,9 @@ class SimulationArtifacts:
     ) -> None:
         _ensure_dir(self._cv_dir, message="Failed to create CV output")
         payload = {
-            "warmup_idx": inputs.warmup_idx.tolist(),
-            "groups": [group.tolist() for group in inputs.groups],
+            "indexing": {"base": 0, "range": "inclusive"},
+            "warmup_ranges": indices_to_ranges(inputs.warmup_idx),
+            "group_ranges": [indices_to_ranges(group) for group in inputs.groups],
             "outer_test_group_ids": list(inputs.outer_ids),
             "outer_folds": [
                 _to_serializable(item) for item in inputs.outer_folds
@@ -175,17 +178,18 @@ class SimulationArtifacts:
         *,
         outer_k: int,
         inner_splits: Sequence[CPCVSplit],
+        warmup_idx: np.ndarray,
         best_config: Mapping[str, Any],
     ) -> None:
         target_dir = self._inner_dir / f"outer_{outer_k}"
         _ensure_dir(target_dir, message="Failed to create inner output")
         splits_payload = [
             {
-                "train_idx": split.train_idx.tolist(),
-                "test_idx": split.test_idx.tolist(),
+                "train_ranges": indices_to_ranges(split.train_idx),
+                "test_ranges": indices_to_ranges(split.test_idx),
                 "test_group_ids": list(split.test_group_ids),
-                "purged_idx": split.purged_idx.tolist(),
-                "embargoed_idx": split.embargoed_idx.tolist(),
+                "purged_ranges": indices_to_ranges(split.purged_idx),
+                "embargoed_ranges": indices_to_ranges(split.embargoed_idx),
             }
             for split in inner_splits
         ]
@@ -193,6 +197,11 @@ class SimulationArtifacts:
             target_dir / "splits.json",
             splits_payload,
             message="Failed to write inner splits",
+        )
+        write_splits_timeline_plot(
+            output_path=target_dir / "splits_timeline.png",
+            splits=inner_splits,
+            warmup_idx=warmup_idx,
         )
         _write_json(
             target_dir / "best_config.json",

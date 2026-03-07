@@ -13,6 +13,7 @@ import torch
 from algo_trader.domain import SimulationError
 from algo_trader.infrastructure import ensure_directory
 
+from .index_ranges import decode_indices_field
 from .target_space_transform import TargetSpace, TargetSpaceTransform
 from .model_params import resolve_dof_shift
 
@@ -298,10 +299,13 @@ def _split_model_norm(
     outer_context: _OuterContext, split_id: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     split = _split_entry(outer_context, split_id)
-    train_idx = split.get("train_idx")
-    if not isinstance(train_idx, list):
-        raise SimulationError("Split payload missing train_idx")
-    train_values = outer_context.run.panel_targets[np.asarray(train_idx, dtype=int)]
+    train_idx = decode_indices_field(
+        split,
+        idx_key="train_idx",
+        ranges_key="train_ranges",
+        field="train",
+    )
+    train_values = outer_context.run.panel_targets[train_idx]
     finite = np.isfinite(train_values)
     if not finite.any():
         return (

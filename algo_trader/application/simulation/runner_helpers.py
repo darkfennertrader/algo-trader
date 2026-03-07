@@ -13,6 +13,7 @@ from algo_trader.domain.simulation import (
     SimulationFlags,
     TrainingConfig,
 )
+from .index_ranges import indices_to_ranges
 
 
 def with_fold_seed(cv: CVParams, fold_id: int) -> CVParams:
@@ -104,7 +105,7 @@ def build_base_config(
 def outer_fold_payload(outer_fold: OuterFold) -> Mapping[str, Any]:
     return {
         "k_test": int(outer_fold.k_test),
-        "train_idx": outer_fold.train_idx.tolist(),
-        "test_idx": outer_fold.test_idx.tolist(),
+        "train_ranges": indices_to_ranges(outer_fold.train_idx),
+        "test_ranges": indices_to_ranges(outer_fold.test_idx),
         "inner_group_ids": list(outer_fold.inner_group_ids),
     }

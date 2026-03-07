@@ -872,6 +872,7 @@ def _write_inner_outputs(
     outer_context.artifacts.write_inner(
         outer_k=outer_fold.k_test,
         inner_splits=inner_splits,
+        warmup_idx=outer_context.context.cv.warmup_idx,
         best_config=best_config,
     )
     inner_summary = summarize_inner_cleaning(

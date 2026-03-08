@@ -36,6 +36,23 @@ def test_main_historical_invokes_runner(
     assert recorded["config_path"] == config_path
 
 
+def test_main_exogenous_invokes_runner(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    config_path = tmp_path / "fred_config.yml"
+    recorded: dict[str, Path | None] = {"config_path": None}
+
+    def fake_run(config_path: Path | None = None) -> None:
+        recorded["config_path"] = config_path
+
+    monkeypatch.setattr(main_module, "run_exogenous", fake_run)
+
+    exit_code = main(["--config", str(config_path), "exogenous"])
+
+    assert exit_code == 0
+    assert recorded["config_path"] == config_path
+
+
 def test_main_handles_domain_error(
     caplog: pytest.LogCaptureFixture, monkeypatch: MonkeyPatch
 ) -> None:

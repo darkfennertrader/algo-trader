@@ -80,10 +80,12 @@ Environment variables (names only, see `.env` and `.env.example`):
 - `FEATURE_STORE_SOURCE`
 - `MODEL_STORE_SOURCE`
 - `SIMULATION_SOURCE`
+- `EXOGENOUS_FEATURES_SOURCE`
 - `MAX_PARALLEL_REQUESTS`
 - `IB_HOST`
 - `IB_PORT`
 - `IB_CLIENT_ID`
+- `FRED_API_KEY`
 - `TORCH_DEVICE`
 - `HISTORICAL_DATA_PROVIDER` (optional)
 - `HISTORICAL_DATA_EXPORTER` (optional)
@@ -98,6 +100,7 @@ Output locations (by pipeline stage, see `docs/workflows.md` for full detail):
 - Feature engineering: `FEATURE_STORE_SOURCE/YYYY-WW/<group>/` (features CSV + tensor + metadata)
 - Modeling: `MODEL_STORE_SOURCE/<model>/<guide>/<pipeline>/<YYYY-WW>/` (params CSV + metadata)
 - Simulation: `SIMULATION_SOURCE/<version>/` (inputs, preprocessing, inner/outer, cv)
+- Exogenous (FRED): `EXOGENOUS_FEATURES_SOURCE/fred/<dir_name>/<series_id>.csv`
 
 ### `docs/configuration.md`
 
@@ -106,6 +109,8 @@ Output locations (by pipeline stage, see `docs/workflows.md` for full detail):
 **Setup**
 - Copy `config/tickers.example.yml` to `config/tickers.yml` and edit `tickers`, `duration`, `bar_size`, and `what_to_show`.
 - Set `MAX_PARALLEL_REQUESTS`, `IB_HOST`, `IB_PORT`, and `IB_CLIENT_ID` in `.env` (see `.env.example`).
+- Configure FRED exogenous ingestion via `config/fred_config.yml`.
+- Set `FRED_API_KEY` and `EXOGENOUS_FEATURES_SOURCE` in `.env`.
 
 **Data Cleaning**
 - Env: `DATA_SOURCE`, `DATA_LAKE_SOURCE`.
@@ -116,6 +121,12 @@ Output locations (by pipeline stage, see `docs/workflows.md` for full detail):
 - Env: `DATA_LAKE_SOURCE`, `FEATURE_STORE_SOURCE`.
 - Output: `FEATURE_STORE_SOURCE` under `.env`.
 - Behavior: selects the latest `YYYY-WW`, reads `returns.csv`, writes `processed.csv` to the feature store.
+
+**Exogenous (FRED)**
+- Config: `config/fred_config.yml` (or pass `--config` with `algotrader exogenous`).
+- Env: `FRED_API_KEY`, `EXOGENOUS_FEATURES_SOURCE`.
+- Output: `EXOGENOUS_FEATURES_SOURCE/fred/<dir_name>/<series_id>.csv`.
+- Window semantics: `start_date` and `end_date` are inclusive.
 
 **Modeling/Inference**
 - Env: `FEATURE_STORE_SOURCE` (input), `MODEL_STORE_SOURCE` (outputs).
@@ -233,6 +244,7 @@ Examples:
   - `random_count` selects an exact number of concrete output features (optional seed) based on current groups/horizons, then prints standard `feature_engineering --group ... --feature ...` commands.
 - Default pipeline (placeholder): `uv run algotrader`
 - Historical download: `uv run algotrader historical`
+- Exogenous download (FRED): `uv run algotrader exogenous --config config/fred_config.yml`
 - Data cleaning: `uv run algotrader data_cleaning --start YYYY-MM --end YYYY-MM --return-type simple --assets EUR.USD,IBUS30`
 - Data processing: `uv run algotrader data_processing` (defaults to `identity`; add `--preprocessor <name>` to override)
 - Feature engineering: `uv run algotrader feature_engineering`

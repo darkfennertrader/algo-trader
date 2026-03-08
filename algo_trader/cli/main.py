@@ -13,6 +13,7 @@ from algo_trader.application.historical import (
     configure_logging,
     run,
 )
+from algo_trader.application.exogenous import run as run_exogenous
 from algo_trader.application.data_cleaning import (
     RunRequest,
     run as run_data_cleaning,
@@ -39,6 +40,11 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "historical",
         help="Download historical data.",
+    )
+
+    subparsers.add_parser(
+        "exogenous",
+        help="Download exogenous data.",
     )
 
     subparsers.add_parser(
@@ -132,6 +138,11 @@ def _run_historical(config_path: Path | None) -> int:
     return 0
 
 
+def _run_exogenous(config_path: Path | None) -> int:
+    run_exogenous(config_path=config_path)
+    return 0
+
+
 def _run_backtest() -> int:
     logger.error("Backtest command not implemented yet.")
     return 1
@@ -208,6 +219,7 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
     handlers = {
         None: _run_pipeline,
         "historical": partial(_run_historical, config_path),
+        "exogenous": partial(_run_exogenous, config_path),
         "backtest": _run_backtest,
         "data_cleaning": partial(
             _run_data_cleaning,

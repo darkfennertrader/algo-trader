@@ -134,3 +134,23 @@ def test_key_feature_pool_breakout_includes_all_outputs() -> None:
         "brk_up_26w",
         "brk_up_4w",
     ]
+
+
+def test_exogenous_command_with_config(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        wizard, "_prompt_optional", lambda label: "config/fred_config.yml"
+    )
+
+    command = wizard._exogenous_command()
+
+    assert command.commands == [
+        ["algotrader", "exogenous", "--config", "config/fred_config.yml"]
+    ]
+
+
+def test_exogenous_command_without_config(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(wizard, "_prompt_optional", lambda label: "")
+
+    command = wizard._exogenous_command()
+
+    assert command.commands == [["algotrader", "exogenous"]]

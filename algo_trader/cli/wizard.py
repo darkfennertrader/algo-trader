@@ -74,6 +74,7 @@ def run() -> int:
         "Select a workflow:",
         [
             ("historical", "historical"),
+            ("exogenous", "exogenous"),
             ("data_cleaning", "data_cleaning"),
             ("feat. engineering", "feature_engineering"),
             ("data_processing", "data_processing"),
@@ -95,6 +96,16 @@ def run() -> int:
 def _historical_command() -> WizardCommand:
     args: list[str] = ["algotrader", "historical"]
     config_path = _prompt_optional("Config path (blank for default)")
+    if config_path:
+        args.extend(["--config", config_path])
+    return WizardCommand(commands=[args])
+
+
+def _exogenous_command() -> WizardCommand:
+    args: list[str] = ["algotrader", "exogenous"]
+    config_path = _prompt_optional(
+        "FRED config path (blank for config/fred_config.yml)"
+    )
     if config_path:
         args.extend(["--config", config_path])
     return WizardCommand(commands=[args])
@@ -183,6 +194,7 @@ def _build_workflow_command(workflow: str) -> WizardCommand:
 def _workflow_builders() -> dict[str, Callable[[], WizardCommand]]:
     return {
         "historical": _historical_command,
+        "exogenous": _exogenous_command,
         "data_cleaning": _data_cleaning_command,
         "data_processing": _data_processing_command,
         "feature_engineering": _feature_engineering_command,

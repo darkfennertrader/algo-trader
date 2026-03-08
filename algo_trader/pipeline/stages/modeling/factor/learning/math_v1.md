@@ -1,6 +1,6 @@
 # Factor Model V1 Learning Notes (Plain English)
 
-This file explains the 8 learning models from simplest to more advanced.
+This file explains the 9 learning models from simplest to more advanced.
 
 ## Level 1: Intercept-only
 File: `model_v1_l1_intercept.py`
@@ -240,6 +240,46 @@ Read order:
 4. Combine into total scale `u[t] = s_regime[t] * v[t]`.
 5. Apply `u[t]` in LowRank MVN covariance scaling.
 
+## Level 9: Level 8 + Global Macro Features with Hierarchical Pooling
+File: `model_v1_l9_marginalized_factors_sv_scale_mixture_global.py`
+
+What is added:
+- Keep Level 8 collapsed covariance and persistent volatility regime.
+- Split the mean into asset-local and global feature blocks:
+  - `X_asset[t,a,f]` stays asset-specific.
+  - `X_global[t,g]` is shared across assets at each time.
+- Add hierarchical partial pooling for global loadings:
+  - `beta[a,g] ~ Normal(beta0[g], tau_beta[g])`
+  - `beta0[g] ~ Normal(0, 0.05)`
+  - `tau_beta[g] ~ HalfNormal(0.05)`
+
+Mean decomposition:
+- `mu[t,a] = alpha[a]`
+  `         + sum_f X_asset[t,a,f] * w[a,f]`
+  `         + sum_g X_global[t,g] * beta[a,g]`
+
+Covariance and scale (same as Level 8):
+- `Sigma = B B' + diag(sigma_idio^2)`
+- `u[t] = s_regime[t] * v[t]`
+- `y[t] | u[t] ~ MVN(mu[t], Sigma / u[t])`
+- LowRank implementation:
+  - `cov_factor[t] = B / sqrt(u[t])`
+  - `cov_diag[t] = sigma_idio^2 / u[t]`
+
+Why this helps:
+- Macro regime signals (VIX, credit spreads, DXY, real yields, liquidity stress)
+  affect all assets through `X_global`.
+- Hierarchical pooling shares information across assets for each macro loading
+  and stabilizes estimates when per-asset history is limited.
+- Keeps the robust Level 8 covariance/tail structure unchanged.
+
+Read order:
+1. Build the Level 8 regime-scale and collapsed covariance pieces.
+2. Build asset-local mean term from `X_asset` and horseshoe `w`.
+3. Build global mean term from `X_global` and pooled `beta`.
+4. Sum both mean terms plus intercept `alpha`.
+5. Observe with the same LowRank MVN likelihood scaled by `u[t]`.
+
 ## Map to production `model_v1.py` and beyond
 - Level 1: baseline + noise.
 - Level 2: add linear features.
@@ -249,3 +289,5 @@ Read order:
 - Level 6: add joint heavy tails via shared weekly scale mixture.
 - Level 7: collapse weekly factors for a cleaner, more stable covariance posterior.
 - Level 8: add persistent volatility clustering on top of collapsed heavy-tail covariance.
+- Level 9: add global macro features in the mean with hierarchical pooling over
+  per-asset macro loadings.

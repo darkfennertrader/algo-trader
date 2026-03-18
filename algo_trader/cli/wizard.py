@@ -75,6 +75,8 @@ def run() -> int:
         [
             ("historical", "historical"),
             ("exogenous", "exogenous"),
+            ("exog. cleaning", "exogenous_cleaning"),
+            ("exog. features", "exogenous_feature_engineering"),
             ("data_cleaning", "data_cleaning"),
             ("feat. engineering", "feature_engineering"),
             ("data_processing", "data_processing"),
@@ -128,6 +130,36 @@ def _data_cleaning_command() -> WizardCommand:
     assets = _prompt_optional("Assets (comma-separated, blank for config)")
     if assets:
         args.extend(["--assets", assets])
+    return WizardCommand(commands=[args])
+
+
+def _exogenous_cleaning_command() -> WizardCommand:
+    args: list[str] = ["algotrader", "exogenous_cleaning"]
+    config_path = _prompt_optional(
+        "FRED config path (blank for config/fred_config.yml)"
+    )
+    if config_path:
+        args.extend(["--config", config_path])
+    return WizardCommand(commands=[args])
+
+
+def _exogenous_feature_engineering_command() -> WizardCommand:
+    args: list[str] = ["algotrader", "exogenous_feature_engineering"]
+    config_path = _prompt_optional(
+        "FRED config path (blank for config/fred_config.yml)"
+    )
+    if config_path:
+        args.extend(["--config", config_path])
+    start_date = _prompt_optional(
+        "Start date YYYY-MM-DD (blank for full valid range)"
+    )
+    if start_date:
+        args.extend(["--start-date", start_date])
+    end_date = _prompt_optional(
+        "End date YYYY-MM-DD (blank for full valid range)"
+    )
+    if end_date:
+        args.extend(["--end-date", end_date])
     return WizardCommand(commands=[args])
 
 
@@ -195,6 +227,8 @@ def _workflow_builders() -> dict[str, Callable[[], WizardCommand]]:
     return {
         "historical": _historical_command,
         "exogenous": _exogenous_command,
+        "exogenous_cleaning": _exogenous_cleaning_command,
+        "exogenous_feature_engineering": _exogenous_feature_engineering_command,
         "data_cleaning": _data_cleaning_command,
         "data_processing": _data_processing_command,
         "feature_engineering": _feature_engineering_command,

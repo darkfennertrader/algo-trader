@@ -153,7 +153,7 @@ def _resolve_group_names(
     groups = [
         entry.name
         for entry in feature_version_dir.iterdir()
-        if entry.is_dir()
+        if _is_feature_group_dir(entry)
     ]
     if not groups:
         raise DataSourceError(
@@ -161,6 +161,21 @@ def _resolve_group_names(
             context={"path": str(feature_version_dir)},
         )
     return sorted(groups)
+
+
+def _is_feature_group_dir(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    tensor_path = path / "features_tensor.pt"
+    metadata_path = path / "metadata.json"
+    if tensor_path.is_file() and metadata_path.is_file():
+        return True
+    if tensor_path.exists() or metadata_path.exists():
+        raise DataSourceError(
+            "Feature group artifacts are incomplete",
+            context={"path": str(path)},
+        )
+    return False
 
 
 @dataclass(frozen=True)

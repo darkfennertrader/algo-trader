@@ -14,6 +14,14 @@ from algo_trader.application.historical import (
     run,
 )
 from algo_trader.application.exogenous import run as run_exogenous
+from algo_trader.application.exogenous_cleaning import (
+    RunRequest as ExogenousCleaningRunRequest,
+    run as run_exogenous_cleaning,
+)
+from algo_trader.application.exogenous_feature_engineering import (
+    RunRequest as ExogenousFeatureEngineeringRunRequest,
+    run as run_exogenous_feature_engineering,
+)
 from algo_trader.application.data_cleaning import (
     RunRequest,
     run as run_data_cleaning,
@@ -45,6 +53,24 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "exogenous",
         help="Download exogenous data.",
+    )
+
+    subparsers.add_parser(
+        "exogenous_cleaning",
+        help="Clean raw exogenous data into a versioned data-lake package.",
+    )
+
+    exogenous_feature_parser = subparsers.add_parser(
+        "exogenous_feature_engineering",
+        help="Engineer exogenous asset/global features into the feature store.",
+    )
+    exogenous_feature_parser.add_argument(
+        "--start-date",
+        help="Optional inclusive start date in YYYY-MM-DD format.",
+    )
+    exogenous_feature_parser.add_argument(
+        "--end-date",
+        help="Optional inclusive end date in YYYY-MM-DD format.",
     )
 
     subparsers.add_parser(
@@ -143,6 +169,37 @@ def _run_exogenous(config_path: Path | None) -> int:
     return 0
 
 
+def _build_exogenous_cleaning_request(
+    args: argparse.Namespace, config_path: Path | None
+) -> ExogenousCleaningRunRequest:
+    _ = args
+    return ExogenousCleaningRunRequest(config_path=config_path)
+
+
+def _run_exogenous_cleaning(
+    *, request: ExogenousCleaningRunRequest
+) -> int:
+    run_exogenous_cleaning(request=request)
+    return 0
+
+
+def _build_exogenous_feature_engineering_request(
+    args: argparse.Namespace, config_path: Path | None
+) -> ExogenousFeatureEngineeringRunRequest:
+    return ExogenousFeatureEngineeringRunRequest(
+        config_path=config_path,
+        start_date=getattr(args, "start_date", None),
+        end_date=getattr(args, "end_date", None),
+    )
+
+
+def _run_exogenous_feature_engineering(
+    *, request: ExogenousFeatureEngineeringRunRequest
+) -> int:
+    run_exogenous_feature_engineering(request=request)
+    return 0
+
+
 def _run_backtest() -> int:
     logger.error("Backtest command not implemented yet.")
     return 1
@@ -220,6 +277,16 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
         None: _run_pipeline,
         "historical": partial(_run_historical, config_path),
         "exogenous": partial(_run_exogenous, config_path),
+        "exogenous_cleaning": partial(
+            _run_exogenous_cleaning,
+            request=_build_exogenous_cleaning_request(args, config_path),
+        ),
+        "exogenous_feature_engineering": partial(
+            _run_exogenous_feature_engineering,
+            request=_build_exogenous_feature_engineering_request(
+                args, config_path
+            ),
+        ),
         "backtest": _run_backtest,
         "data_cleaning": partial(
             _run_data_cleaning,

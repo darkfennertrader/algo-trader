@@ -53,6 +53,58 @@ def test_main_exogenous_invokes_runner(
     assert recorded["config_path"] == config_path
 
 
+def test_main_exogenous_cleaning_invokes_runner(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    config_path = tmp_path / "fred_config.yml"
+    recorded: dict[str, Path | None] = {"config_path": None}
+
+    def fake_run(*, request) -> None:  # type: ignore[no-untyped-def]
+        recorded["config_path"] = request.config_path
+
+    monkeypatch.setattr(main_module, "run_exogenous_cleaning", fake_run)
+
+    exit_code = main(["--config", str(config_path), "exogenous_cleaning"])
+
+    assert exit_code == 0
+    assert recorded["config_path"] == config_path
+
+
+def test_main_exogenous_feature_engineering_invokes_runner(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    config_path = tmp_path / "fred_config.yml"
+    recorded: dict[str, Path | str | None] = {
+        "config_path": None,
+        "start_date": None,
+        "end_date": None,
+    }
+
+    def fake_run(*, request) -> None:  # type: ignore[no-untyped-def]
+        recorded["config_path"] = request.config_path
+        recorded["start_date"] = request.start_date
+        recorded["end_date"] = request.end_date
+
+    monkeypatch.setattr(main_module, "run_exogenous_feature_engineering", fake_run)
+
+    exit_code = main(
+        [
+            "--config",
+            str(config_path),
+            "exogenous_feature_engineering",
+            "--start-date",
+            "2024-01-15",
+            "--end-date",
+            "2024-01-31",
+        ]
+    )
+
+    assert exit_code == 0
+    assert recorded["config_path"] == config_path
+    assert recorded["start_date"] == "2024-01-15"
+    assert recorded["end_date"] == "2024-01-31"
+
+
 def test_main_handles_domain_error(
     caplog: pytest.LogCaptureFixture, monkeypatch: MonkeyPatch
 ) -> None:

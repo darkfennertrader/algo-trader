@@ -6,6 +6,8 @@ LLM reading order:
 - `docs/configuration.md` - config and env setup
 - `docs/workflows.md` - common tasks and CLI
 - `docs/feature_engineering.md` - feature groups and definitions
+- `docs/exogenous_feature_engineering.md` - exogenous asset/global feature blocks
+- `docs/exogenous_feature_normalization.md` - exogenous normalization reference
 - `docs/simulation/nestedcv.md` - nested CV details
 - `docs/simulation/nestedcv_sequence.md` - nested CV sequence flow
 
@@ -14,6 +16,8 @@ Doc map:
 - `docs/configuration.md` - config, env vars, and data locations
 - `docs/workflows.md` - CLI commands and extension guides
 - `docs/feature_engineering.md` - feature engineering reference
+- `docs/exogenous_feature_engineering.md` - exogenous feature engineering reference
+- `docs/exogenous_feature_normalization.md` - exogenous normalization reference
 - `docs/simulation/nestedcv.md` - nested CV background and math
 - `docs/simulation/nestedcv_sequence.md` - nested CV sequence flow
 
@@ -96,8 +100,10 @@ Environment variables (names only, see `.env` and `.env.example`):
 Output locations (by pipeline stage, see `docs/workflows.md` for full detail):
 - Historical download: `DATA_SOURCE/<asset>/<YYYY>/hist_data_YYYY-MM.csv`
 - Data cleaning: `DATA_LAKE_SOURCE/YYYY-WW/` (returns, OHLC, metadata, return tensor)
+- Exogenous cleaning: `DATA_LAKE_SOURCE/YYYY-WW/exogenous/` (cleaned exogenous CSV + tensor + metadata)
 - Data processing: `FEATURE_STORE_SOURCE/<preprocessor>/<pipeline>/<YYYY-WW>/` (processed CSV + tensors)
 - Feature engineering: `FEATURE_STORE_SOURCE/YYYY-WW/<group>/` (features CSV + tensor + metadata)
+- Exogenous feature engineering: `FEATURE_STORE_SOURCE/YYYY-WW/exogenous/{asset,global}/` (asset/global exogenous CSV + tensor + metadata)
 - Modeling: `MODEL_STORE_SOURCE/<model>/<guide>/<pipeline>/<YYYY-WW>/` (params CSV + metadata)
 - Simulation: `SIMULATION_SOURCE/<version>/` (inputs, preprocessing, inner/outer, cv)
 - Exogenous (FRED): `EXOGENOUS_FEATURES_SOURCE/fred/<dir_name>/<series_id>.csv`
@@ -127,6 +133,21 @@ Output locations (by pipeline stage, see `docs/workflows.md` for full detail):
 - Env: `FRED_API_KEY`, `EXOGENOUS_FEATURES_SOURCE`.
 - Output: `EXOGENOUS_FEATURES_SOURCE/fred/<dir_name>/<series_id>.csv`.
 - Window semantics: `start_date` and `end_date` are inclusive.
+
+**Exogenous cleaning**
+- Config: `config/fred_config.yml` (or pass `--config` with `algotrader exogenous_cleaning`).
+- Env: `DATA_LAKE_SOURCE`, `EXOGENOUS_FEATURES_SOURCE`.
+- Output: `DATA_LAKE_SOURCE/YYYY-WW/exogenous/` with `exogenous_cleaned.csv`, `exogenous_metadata.json`, `exogenous_tensor.pt`.
+- Behavior: selects the latest `YYYY-WW`, aligns cleaned exogenous series to the returns calendar, trims to the common valid core start, and writes a no-missing cleaned exogenous package.
+
+**Exogenous feature engineering**
+- Config: `config/fred_config.yml` (or pass `--config` with `algotrader exogenous_feature_engineering`).
+- Env: `DATA_LAKE_SOURCE`, `FEATURE_STORE_SOURCE`.
+- Optional args: `--start-date YYYY-MM-DD`, `--end-date YYYY-MM-DD`.
+- Output:
+  - `FEATURE_STORE_SOURCE/YYYY-WW/exogenous/asset/`
+  - `FEATURE_STORE_SOURCE/YYYY-WW/exogenous/global/`
+- Behavior: selects the latest `YYYY-WW`, reads `returns.csv` plus `exogenous/exogenous_cleaned.csv`, intersects their timestamps, optionally subsets that valid common range by `start-date`/`end-date`, and writes engineered but unnormalized exogenous feature blocks for later SVI use.
 
 **Modeling/Inference**
 - Env: `FEATURE_STORE_SOURCE` (input), `MODEL_STORE_SOURCE` (outputs).

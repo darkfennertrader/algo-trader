@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from algo_trader.domain.simulation import Registry
 from algo_trader.infrastructure.data import (
     load_feature_store_panel_dataset,
+    load_feature_store_split_dataset,
     load_panel_tensor_dataset,
 )
 
@@ -24,5 +25,9 @@ def default_registries() -> SimulationRegistries:
     @datasets.register("feature_store_panel")
     def _build_feature_store_panel(*, config, device: str):
         return load_feature_store_panel_dataset(config=config, device=device)
+
+    @datasets.register("feature_store_split")
+    def _build_feature_store_split(*, config, device: str):
+        return load_feature_store_split_dataset(config=config, device=device)
 
     return SimulationRegistries(datasets=datasets)

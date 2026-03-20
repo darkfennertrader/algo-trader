@@ -20,13 +20,16 @@ class PrebuildRunResult:
 
 
 @dataclass(frozen=True)
-class PrebuildInputs:
+class PrebuildInputs:  # pylint: disable=too-many-instance-attributes
     X: torch.Tensor
+    X_global: torch.Tensor | None
     y: torch.Tensor
     M: torch.Tensor
+    M_global: torch.Tensor | None
     outer_folds: Sequence[OuterFold]
     group_by_index: np.ndarray
     feature_names: Sequence[str]
+    global_feature_names: Sequence[str]
     assets: Sequence[str]
 
 
@@ -141,9 +144,20 @@ def _build_prebuild_context(
 ) -> modeling.PrebuildContext:
     return modeling.PrebuildContext(
         X_train=inputs.X[train_idx],
+        X_global_train=(
+            None
+            if inputs.X_global is None
+            else inputs.X_global[train_idx]
+        ),
         y_train=inputs.y[train_idx],
         M_train=inputs.M[train_idx],
+        M_global_train=(
+            None
+            if inputs.M_global is None
+            else inputs.M_global[train_idx]
+        ),
         feature_names=inputs.feature_names,
+        global_feature_names=inputs.global_feature_names,
         assets=inputs.assets,
         params=prebuild.params,
     )

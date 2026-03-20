@@ -87,8 +87,14 @@ def build_base_config(
             "output_dir": debug_output_dir,
         },
         "training": {
+            "method": training.method,
             "target_normalization": training.target_normalization,
             "log_prob_scaling": training.log_prob_scaling,
+            "online_filtering": {
+                "steps_per_observation": (
+                    training.online_filtering.steps_per_observation
+                ),
+            },
             "svi": {
                 "num_steps": training.svi.num_steps,
                 "learning_rate": training.svi.learning_rate,

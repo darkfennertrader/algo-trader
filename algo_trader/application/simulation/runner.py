@@ -1,5 +1,6 @@
 # pylint: disable=too-many-lines
 from __future__ import annotations
+# pylint: disable=duplicate-code
 
 import logging
 import time
@@ -100,13 +101,16 @@ class CVStructure:
     group_by_index: np.ndarray
 
 @dataclass(frozen=True)
-class SimulationContext:
+class SimulationContext:  # pylint: disable=too-many-instance-attributes
     X: torch.Tensor
     M: torch.Tensor
+    X_global: torch.Tensor | None
+    M_global: torch.Tensor | None
     y: torch.Tensor
     preprocess_spec: PreprocessSpec
     cv: CVStructure
     feature_names: Sequence[str]
+    global_feature_names: Sequence[str]
     assets: Sequence[str]
 
 def _run_context(config_path: Path | None, resume: bool) -> Mapping[str, str]:
@@ -298,11 +302,14 @@ def _prepare_candidates(
         prebuild=config.modeling.model.prebuild,
         inputs=PrebuildInputs(
             X=context.X,
+            X_global=context.X_global,
             y=context.y,
             M=context.M,
+            M_global=context.M_global,
             outer_folds=context.cv.outer_folds,
             group_by_index=context.cv.group_by_index,
             feature_names=context.feature_names,
+            global_feature_names=context.global_feature_names,
             assets=context.assets,
         ),
         artifacts=artifacts,
@@ -376,7 +383,7 @@ def _debug_output_dir(
 def _load_dataset(config: SimulationConfig, device: str) -> PanelDataset:
     registries = default_registries()
     return registries.datasets.build(
-        "feature_store_panel", config=config.data, device=device
+        "feature_store_split", config=config.data, device=device
     )
 
 def _panel_tensor_path(base_dir: Path) -> Path:
@@ -443,6 +450,8 @@ def _build_context(
     return SimulationContext(
         X=X,
         M=M,
+        X_global=dataset.global_data,
+        M_global=dataset.global_missing_mask,
         y=y,
         preprocess_spec=preprocess_spec,
         cv=CVStructure(
@@ -453,6 +462,7 @@ def _build_context(
             group_by_index=group_by_index,
         ),
         feature_names=list(dataset.features),
+        global_feature_names=list(dataset.global_features),
         assets=list(dataset.assets),
     )
 
@@ -835,6 +845,9 @@ def _build_inner_objective(
         data=InnerObjectiveData(
             X=outer_context.context.X,
             M=outer_context.context.M,
+            X_global=outer_context.context.X_global,
+            M_global=outer_context.context.M_global,
+            global_feature_names=outer_context.context.global_feature_names,
             y=outer_context.context.y,
         ),
         artifacts=outer_context.artifacts,
@@ -933,6 +946,9 @@ def _run_outer_evaluation(
         context=OuterEvaluationContext(
             X=outer_context.context.X,
             M=outer_context.context.M,
+            X_global=outer_context.context.X_global,
+            M_global=outer_context.context.M_global,
+            global_feature_names=outer_context.context.global_feature_names,
             y=outer_context.context.y,
             outer_fold=outer_fold,
             preprocess_spec=outer_context.context.preprocess_spec,
@@ -1028,10 +1044,13 @@ def _build_artifacts(
             inputs=SimulationInputs(
                 X=context.X,
                 M=context.M,
+                X_global=context.X_global,
+                M_global=context.M_global,
                 y=context.y,
                 timestamps=dataset.dates,
                 assets=dataset.assets,
                 features=dataset.features,
+                global_features=dataset.global_features,
             )
         )
     return artifacts

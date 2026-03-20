@@ -1,6 +1,7 @@
 from __future__ import annotations
+# pylint: disable=duplicate-code
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Optional, Sequence, Tuple
 
 import numpy as np
@@ -43,6 +44,13 @@ class CleaningDrops:
     dropped_low_var: np.ndarray
     dropped_duplicates: np.ndarray
     duplicate_pairs: list[tuple[int, int, float]]
+
+
+@dataclass(frozen=True)
+class GlobalBlockInputs:
+    X: torch.Tensor
+    M: torch.Tensor
+    feature_names: Sequence[str]
 
 
 
@@ -604,3 +612,75 @@ def _select_transform_tensors(
         .index_select(dim=2, index=fidx)
     )
     return X_sel, M_sel
+
+
+def fit_global_feature_cleaning(
+    *,
+    inputs: GlobalBlockInputs,
+    train_idx: np.ndarray,
+    spec: PreprocessSpec,
+    frozen_feature_idx: Optional[np.ndarray] = None,
+) -> FeatureCleaningState:
+    return fit_feature_cleaning(
+        X=_to_global_panel(inputs.X),
+        M=_to_global_panel(inputs.M),
+        train_idx=train_idx,
+        spec=_with_feature_names(spec, inputs.feature_names),
+        frozen_feature_idx=frozen_feature_idx,
+    )
+
+
+def fit_global_robust_scaler(
+    *,
+    inputs: GlobalBlockInputs,
+    train_idx: np.ndarray,
+    cleaning: FeatureCleaningState,
+    spec: PreprocessSpec,
+) -> RobustScalerState:
+    return fit_robust_scaler(
+        X=_to_global_panel(inputs.X),
+        M=_to_global_panel(inputs.M),
+        train_idx=train_idx,
+        cleaning=cleaning,
+        spec=_with_feature_names(spec, inputs.feature_names),
+    )
+
+
+def transform_global_X(
+    inputs: GlobalBlockInputs,
+    idx: np.ndarray,
+    state: TransformState,
+    validate: bool = False,
+) -> torch.Tensor:
+    transformed = transform_X(
+        _to_global_panel(inputs.X),
+        _to_global_panel(inputs.M),
+        idx,
+        replace(
+            state,
+            spec=_with_feature_names(state.spec, inputs.feature_names),
+        ),
+        validate=validate,
+    )
+    return transformed.squeeze(1)
+
+
+def _to_global_panel(values: torch.Tensor) -> torch.Tensor:
+    if values.ndim != 2:
+        raise ValueError("Global feature tensors must be [T, G]")
+    return values.unsqueeze(1)
+
+
+def _with_feature_names(
+    spec: PreprocessSpec, feature_names: Sequence[str]
+) -> PreprocessSpec:
+    return replace(
+        spec,
+        scaling=replace(
+            spec.scaling,
+            inputs=replace(
+                spec.scaling.inputs,
+                feature_names=list(feature_names),
+            ),
+        ),
+    )

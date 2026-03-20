@@ -34,6 +34,8 @@ from algo_trader.domain.simulation import (
     SimulationConfig,
     SimulationFlags,
     TrainingConfig,
+    TrainingMethod,
+    TrainingOnlineFilteringConfig,
     TrainingSVIConfig,
     ModelSelectionBatching,
     ModelSelectionBootstrap,
@@ -298,7 +300,9 @@ def _build_training_config(
     if not isinstance(section, Mapping):
         raise ConfigError(f"training must be a mapping in {config_path}")
     extra_training = set(section) - {
+        "method",
         "svi",
+        "online_filtering",
         "target_normalization",
         "log_prob_scaling",
     }
@@ -310,6 +314,13 @@ def _build_training_config(
     raw_svi = section.get("svi")
     if not isinstance(raw_svi, Mapping):
         raise ConfigError(f"training.svi must be a mapping in {config_path}")
+    raw_online_filtering = section.get("online_filtering", {})
+    if raw_online_filtering is None:
+        raw_online_filtering = {}
+    if not isinstance(raw_online_filtering, Mapping):
+        raise ConfigError(
+            f"training.online_filtering must be a mapping in {config_path}"
+        )
     extra_svi = set(raw_svi) - {
         "num_steps",
         "learning_rate",
@@ -324,6 +335,15 @@ def _build_training_config(
             f"training.svi contains unknown keys in {config_path}",
             context={"keys": ", ".join(sorted(extra_svi))},
         )
+    extra_online = set(raw_online_filtering) - {"steps_per_observation"}
+    if extra_online:
+        raise ConfigError(
+            f"training.online_filtering contains unknown keys in {config_path}",
+            context={"keys": ", ".join(sorted(extra_online))},
+        )
+    method = _normalize_training_method(
+        section.get("method", "tbptt"), config_path
+    )
     target_norm = require_bool(
         section.get("target_normalization"),
         field="training.target_normalization",
@@ -352,15 +372,43 @@ def _build_training_config(
                 else None
             ),
         )
+        online_filtering = TrainingOnlineFilteringConfig(
+            steps_per_observation=int(
+                raw_online_filtering.get("steps_per_observation", 1)
+            )
+        )
     except (TypeError, ValueError) as exc:
         raise ConfigError(
             f"Invalid training configuration in {config_path}",
-            context={"section": "training.svi"},
+            context={"section": "training"},
         ) from exc
+    if online_filtering.steps_per_observation <= 0:
+        raise ConfigError(
+            f"training.online_filtering.steps_per_observation must be >= 1 in {config_path}"
+        )
+    if method == "online_filtering" and svi.grad_accum_steps != 1:
+        raise ConfigError(
+            f"training.svi.grad_accum_steps must be 1 when training.method=online_filtering in {config_path}"
+        )
     return TrainingConfig(
+        method=method,
         svi=svi,
+        online_filtering=online_filtering,
         target_normalization=target_norm,
         log_prob_scaling=log_prob_scaling,
+    )
+
+
+def _normalize_training_method(
+    value: object, config_path: Path
+) -> TrainingMethod:
+    raw = str(value).strip().lower()
+    if raw == "tbptt":
+        return "tbptt"
+    if raw == "online_filtering":
+        return "online_filtering"
+    raise ConfigError(
+        f"training.method must be tbptt or online_filtering in {config_path}"
     )
 
 

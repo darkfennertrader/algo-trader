@@ -187,6 +187,7 @@ class ModelPrebuildConfig:
 
 
 LogProbScaleMode = Literal["none", "num_obs"]
+TrainingMethod = Literal["tbptt", "online_filtering"]
 
 
 @dataclass(frozen=True)
@@ -201,8 +202,17 @@ class TrainingSVIConfig:
 
 
 @dataclass(frozen=True)
+class TrainingOnlineFilteringConfig:
+    steps_per_observation: int = 1
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
+    method: TrainingMethod = "tbptt"
     svi: TrainingSVIConfig = field(default_factory=TrainingSVIConfig)
+    online_filtering: TrainingOnlineFilteringConfig = field(
+        default_factory=TrainingOnlineFilteringConfig
+    )
     target_normalization: bool = False
     log_prob_scaling: bool = False
 

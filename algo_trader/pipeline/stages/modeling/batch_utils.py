@@ -25,12 +25,13 @@ def resolve_batch_shape(batch: ModelBatch) -> BatchShape:
             raise ConfigError("batch.y must have shape [T, A]")
         T, A = int(batch.y.shape[0]), int(batch.y.shape[1])
         return BatchShape(T, A, batch.y.device, batch.y.dtype, batch.y)
-    if batch.X is not None:
-        if batch.X.ndim != 3:
-            raise ConfigError("batch.X must have shape [T, A, F]")
-        T, A = int(batch.X.shape[0]), int(batch.X.shape[1])
-        return BatchShape(T, A, batch.X.device, batch.X.dtype, None)
-    raise ConfigError("ModelBatch must provide X or y")
+    X_asset = batch.X_asset if batch.X_asset is not None else batch.X
+    if X_asset is not None:
+        if X_asset.ndim != 3:
+            raise ConfigError("batch.X_asset must have shape [T, A, F]")
+        T, A = int(X_asset.shape[0]), int(X_asset.shape[1])
+        return BatchShape(T, A, X_asset.device, X_asset.dtype, None)
+    raise ConfigError("ModelBatch must provide X_asset or y")
 
 
 def sample_observation(

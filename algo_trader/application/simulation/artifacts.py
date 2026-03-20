@@ -1,4 +1,5 @@
 from __future__ import annotations
+# pylint: disable=duplicate-code
 
 import json
 from dataclasses import asdict, dataclass, is_dataclass
@@ -29,13 +30,16 @@ from .summary_utils import build_cleaning_thresholds
 
 
 @dataclass(frozen=True)
-class SimulationInputs:
+class SimulationInputs:  # pylint: disable=too-many-instance-attributes
     X: torch.Tensor
     M: torch.Tensor
+    X_global: torch.Tensor | None
+    M_global: torch.Tensor | None
     y: torch.Tensor
     timestamps: Sequence[Any]
     assets: Sequence[str]
     features: Sequence[str]
+    global_features: Sequence[str]
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,10 @@ class SimulationArtifacts:
             "assets": list(inputs.assets),
             "features": list(inputs.features),
         }
+        if inputs.X_global is not None and inputs.M_global is not None:
+            payload["global_values"] = inputs.X_global.detach().cpu()
+            payload["global_missing_mask"] = inputs.M_global.detach().cpu()
+            payload["global_features"] = list(inputs.global_features)
         path = self._inputs_dir / "panel_tensor.pt"
         _save_torch(payload, path, message="Failed to write simulation inputs")
         self._write_inputs_csv(inputs)
@@ -101,6 +109,17 @@ class SimulationArtifacts:
             mapping_frame,
             message="Failed to write timestamp mapping CSV",
         )
+        if inputs.X_global is not None and inputs.M_global is not None:
+            _write_csv(
+                self._inputs_dir / "global_features.csv",
+                _build_global_feature_frame(inputs),
+                message="Failed to write global features CSV",
+            )
+            _write_csv(
+                self._inputs_dir / "global_missing_mask.csv",
+                _build_global_mask_frame(inputs),
+                message="Failed to write global missing mask CSV",
+            )
 
     def write_cv_structure(
         self,
@@ -602,6 +621,34 @@ def _build_mask_frame(inputs: SimulationInputs) -> pd.DataFrame:
         _format_timestamp_strings(inputs.timestamps), name="timestamp"
     )
     return pd.DataFrame(flat, index=index, columns=columns)
+
+
+def _build_global_feature_frame(inputs: SimulationInputs) -> pd.DataFrame:
+    if inputs.X_global is None:
+        raise SimulationError("Global feature frame requires X_global")
+    values = inputs.X_global.detach().cpu().numpy()
+    index = pd.Index(
+        _format_timestamp_strings(inputs.timestamps), name="timestamp"
+    )
+    return pd.DataFrame(
+        values,
+        index=index,
+        columns=list(inputs.global_features),
+    )
+
+
+def _build_global_mask_frame(inputs: SimulationInputs) -> pd.DataFrame:
+    if inputs.M_global is None:
+        raise SimulationError("Global mask frame requires M_global")
+    values = inputs.M_global.detach().cpu().numpy()
+    index = pd.Index(
+        _format_timestamp_strings(inputs.timestamps), name="timestamp"
+    )
+    return pd.DataFrame(
+        values,
+        index=index,
+        columns=list(inputs.global_features),
+    )
 
 
 def _build_timestamp_mapping(inputs: SimulationInputs) -> pd.DataFrame:

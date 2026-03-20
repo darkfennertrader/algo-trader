@@ -19,9 +19,13 @@ from algo_trader.domain.simulation import (
 from .artifacts import SimulationArtifacts
 from .hooks import SimulationHooks
 from .preprocessing import (
+    GlobalBlockInputs,
     TransformState,
     fit_feature_cleaning,
+    fit_global_feature_cleaning,
     fit_robust_scaler,
+    fit_global_robust_scaler,
+    transform_global_X,
     transform_X,
 )
 from .target_space_transform import TargetSpaceTransform
@@ -31,6 +35,9 @@ from .target_space_transform import TargetSpaceTransform
 class InnerObjectiveData:
     X: torch.Tensor
     M: torch.Tensor
+    X_global: torch.Tensor | None
+    M_global: torch.Tensor | None
+    global_feature_names: Sequence[str]
     y: torch.Tensor
 
 
@@ -186,8 +193,10 @@ class SplitResources:
 class SplitBatches:
     cleaning: FeatureCleaningState
     X_train: torch.Tensor
+    X_train_global: torch.Tensor | None
     y_train: torch.Tensor
     X_test: torch.Tensor
+    X_test_global: torch.Tensor | None
     y_test: torch.Tensor
 
 
@@ -201,12 +210,14 @@ def _evaluate_split(context: SplitContext) -> SplitResult | None:
         return None
     model_state = context.resources.hooks.fit_model(
         X_train=batches.X_train,
+        X_train_global=batches.X_train_global,
         y_train=batches.y_train,
         config=split_config,
         init_state=None,
     )
     pred = context.resources.hooks.predict(
         X_pred=batches.X_test,
+        X_pred_global=batches.X_test_global,
         state=model_state,
         config=split_config,
         num_samples=context.params.num_pp_samples,
@@ -283,11 +294,14 @@ def _prepare_split_batches(
         context.split.test_idx,
         state,
     )
+    X_train_global, X_test_global = _prepare_global_batches(context)
     return SplitBatches(
         cleaning=cleaning,
         X_train=X_train,
+        X_train_global=X_train_global,
         y_train=_select_targets(context.data.y, context.split.train_idx),
         X_test=X_test,
+        X_test_global=X_test_global,
         y_test=_select_targets(context.data.y, context.split.test_idx),
     )
 
@@ -296,6 +310,49 @@ def _select_targets(y: torch.Tensor, indices: np.ndarray) -> torch.Tensor:
     return y[
         torch.as_tensor(indices, dtype=torch.long, device=y.device)
     ]
+
+
+def _prepare_global_batches(
+    context: SplitContext,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    if context.data.X_global is None or context.data.M_global is None:
+        return None, None
+    global_inputs = GlobalBlockInputs(
+        X=context.data.X_global,
+        M=context.data.M_global,
+        feature_names=context.data.global_feature_names,
+    )
+    cleaning = fit_global_feature_cleaning(
+        inputs=global_inputs,
+        train_idx=context.split.train_idx,
+        spec=context.params.preprocess_spec,
+        frozen_feature_idx=None,
+    )
+    if cleaning.feature_idx.size == 0:
+        return None, None
+    scaler = fit_global_robust_scaler(
+        inputs=global_inputs,
+        train_idx=context.split.train_idx,
+        cleaning=cleaning,
+        spec=context.params.preprocess_spec,
+    )
+    state = TransformState(
+        cleaning=cleaning,
+        scaler=scaler,
+        spec=context.params.preprocess_spec,
+    )
+    X_train = transform_global_X(
+        global_inputs,
+        context.split.train_idx,
+        state,
+        validate=True,
+    )
+    X_test = transform_global_X(
+        global_inputs,
+        context.split.test_idx,
+        state,
+    )
+    return X_train, X_test
 
 
 def aggregate_scores(

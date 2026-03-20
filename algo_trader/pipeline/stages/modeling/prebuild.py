@@ -7,11 +7,14 @@ import torch
 
 
 @dataclass(frozen=True)
-class PrebuildContext:
+class PrebuildContext:  # pylint: disable=too-many-instance-attributes
     X_train: torch.Tensor
+    X_global_train: torch.Tensor | None
     y_train: torch.Tensor
     M_train: torch.Tensor
+    M_global_train: torch.Tensor | None
     feature_names: Sequence[str]
+    global_feature_names: Sequence[str]
     assets: Sequence[str]
     params: Mapping[str, Any] = field(default_factory=dict)
 

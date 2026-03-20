@@ -1,4 +1,5 @@
 from __future__ import annotations
+# pylint: disable=too-many-arguments,too-many-positional-arguments
 
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -15,6 +16,12 @@ class PanelDataset(Protocol):
     def missing_mask(self) -> torch.Tensor: ...
 
     @property
+    def global_data(self) -> torch.Tensor | None: ...
+
+    @property
+    def global_missing_mask(self) -> torch.Tensor | None: ...
+
+    @property
     def dates(self) -> Sequence[Any]: ...
 
     @property
@@ -24,6 +31,9 @@ class PanelDataset(Protocol):
     def features(self) -> Sequence[str]: ...
 
     @property
+    def global_features(self) -> Sequence[str]: ...
+
+    @property
     def device(self) -> str: ...
 
 
@@ -31,6 +41,7 @@ class ModelFitter(Protocol):
     def __call__(
         self,
         X_train: torch.Tensor,
+        X_train_global: torch.Tensor | None,
         y_train: torch.Tensor,
         config: Mapping[str, Any],
         init_state: Mapping[str, Any] | None = None,
@@ -41,6 +52,7 @@ class Predictor(Protocol):
     def __call__(
         self,
         X_pred: torch.Tensor,
+        X_pred_global: torch.Tensor | None,
         state: Mapping[str, Any],
         config: Mapping[str, Any],
         num_samples: int,

@@ -24,6 +24,7 @@ from .panel_tensor_dataset import (
     load_panel_tensor_dataset,
 )
 from .feature_store_panel_dataset import load_feature_store_panel_dataset
+from .feature_store_split_dataset import load_feature_store_split_dataset
 
 __all__ = [
     "ReturnType",
@@ -43,4 +44,5 @@ __all__ = [
     "build_synthetic_panel_dataset",
     "load_panel_tensor_dataset",
     "load_feature_store_panel_dataset",
+    "load_feature_store_split_dataset",
 ]

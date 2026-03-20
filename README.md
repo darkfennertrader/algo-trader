@@ -104,6 +104,7 @@ Output locations (by pipeline stage, see `docs/workflows.md` for full detail):
 - Data processing: `FEATURE_STORE_SOURCE/<preprocessor>/<pipeline>/<YYYY-WW>/` (processed CSV + tensors)
 - Feature engineering: `FEATURE_STORE_SOURCE/YYYY-WW/<group>/` (features CSV + tensor + metadata)
 - Exogenous feature engineering: `FEATURE_STORE_SOURCE/YYYY-WW/exogenous/{asset,global}/` (asset/global exogenous CSV + tensor + metadata)
+- Simulation inputs: `inputs/panel_tensor.pt` now stores `X_asset` as `values` and, when present, `X_global` as `global_values`
 - Modeling: `MODEL_STORE_SOURCE/<model>/<guide>/<pipeline>/<YYYY-WW>/` (params CSV + metadata)
 - Simulation: `SIMULATION_SOURCE/<version>/` (inputs, preprocessing, inner/outer, cv)
 - Exogenous (FRED): `EXOGENOUS_FEATURES_SOURCE/fred/<dir_name>/<series_id>.csv`
@@ -156,8 +157,8 @@ Output locations (by pipeline stage, see `docs/workflows.md` for full detail):
 
 **Simulation**
 - Config: edit `config/simulation.yml` or pass `--simulation-config`.
-- Loader: fixed to `feature_store_panel` (not configurable).
-- Inputs: always build combined `T x A x F` tensor from the latest feature store groups plus the latest data lake return tensor.
+- Loader: fixed to the split feature-store loader (not configurable).
+- Inputs: build `X_asset` from standard feature groups plus `exogenous/asset`, optional `X_global` from `exogenous/global`, and `y` from the latest data lake return tensor.
 - Output path: `data.simulation_output_path` chooses the label under `SIMULATION_SOURCE` (e.g., `run_a`); null defaults to the latest `YYYY-WW`.
 - Reuse rule: if the output directory already exists, reuse `inputs/panel_tensor.pt`; if it exists without that file, raise an error.
 - Flags: `simulation_mode` and `stop_after` control dry-run vs stub/full execution and early stopping.

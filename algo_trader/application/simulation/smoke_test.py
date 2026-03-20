@@ -3,12 +3,18 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
+import torch
+
 from algo_trader.domain.simulation import PanelDataset, SimulationConfig
-from algo_trader.infrastructure.data import build_synthetic_panel_dataset
+from algo_trader.infrastructure.data import (
+    PanelTensorDataset,
+    build_synthetic_panel_dataset,
+)
 
 SMOKE_TEST_T = 8
 SMOKE_TEST_A = 3
 SMOKE_TEST_F = 5
+SMOKE_TEST_G = 2
 SMOKE_TEST_SEED = 123
 SMOKE_TEST_SVI_STEPS = 2
 SMOKE_TEST_NUM_PARTICLES = 1
@@ -106,10 +112,42 @@ def apply_smoke_test_overrides(
 
 
 def build_smoke_test_dataset(device: str) -> PanelDataset:
-    return build_synthetic_panel_dataset(
+    asset_dataset = build_synthetic_panel_dataset(
         T=SMOKE_TEST_T,
         A=SMOKE_TEST_A,
         F=SMOKE_TEST_F,
         seed=SMOKE_TEST_SEED,
         device=device,
     )
+    global_data, global_missing_mask, global_features = (
+        _build_smoke_test_global_block(device)
+    )
+    return PanelTensorDataset(
+        data=asset_dataset.data,
+        targets=asset_dataset.targets,
+        missing_mask=asset_dataset.missing_mask,
+        global_data=global_data,
+        global_missing_mask=global_missing_mask,
+        dates=asset_dataset.dates,
+        assets=asset_dataset.assets,
+        features=asset_dataset.features,
+        global_features=global_features,
+        device=asset_dataset.device,
+    )
+
+
+def _build_smoke_test_global_block(
+    device: str,
+) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
+    generator = torch.Generator().manual_seed(SMOKE_TEST_SEED + 1)
+    global_data = torch.randn(
+        (SMOKE_TEST_T, SMOKE_TEST_G),
+        generator=generator,
+        dtype=torch.float32,
+    ).to(device)
+    global_missing_mask = torch.zeros(
+        (SMOKE_TEST_T, SMOKE_TEST_G),
+        dtype=torch.bool,
+    ).to(device)
+    global_features = [f"GlobalFeature{i}" for i in range(SMOKE_TEST_G)]
+    return global_data, global_missing_mask, global_features

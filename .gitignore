@@ -15,3 +15,6 @@ typings
 config/*
 /docs
 /vendor
+
+# Research-only learning artifacts
+algo_trader/pipeline/stages/modeling/factor/learning/

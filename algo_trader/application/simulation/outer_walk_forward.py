@@ -1,4 +1,5 @@
 from __future__ import annotations
+# pylint: disable=duplicate-code
 
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -9,9 +10,13 @@ import torch
 from algo_trader.domain.simulation import FeatureCleaningState, OuterFold, PreprocessSpec
 from .hooks import SimulationHooks
 from .preprocessing import (
+    GlobalBlockInputs,
     TransformState,
     fit_feature_cleaning,
+    fit_global_feature_cleaning,
     fit_robust_scaler,
+    fit_global_robust_scaler,
+    transform_global_X,
     transform_X,
 )
 
@@ -23,9 +28,12 @@ class PortfolioSpec:
 
 
 @dataclass(frozen=True)
-class OuterEvaluationContext:
+class OuterEvaluationContext:  # pylint: disable=too-many-instance-attributes
     X: torch.Tensor
     M: torch.Tensor
+    X_global: torch.Tensor | None
+    M_global: torch.Tensor | None
+    global_feature_names: Sequence[str]
     y: torch.Tensor
     outer_fold: OuterFold
     preprocess_spec: PreprocessSpec
@@ -138,7 +146,13 @@ def _evaluate_week(
     train_idx_t = _expanding_train(
         loop_context.base_train, loop_context.test_weeks, current_t
     )
-    X_train_t, y_train_t, X_pred_t = _prepare_batches(
+    (
+        X_train_t,
+        X_train_global_t,
+        y_train_t,
+        X_pred_t,
+        X_pred_global_t,
+    ) = _prepare_batches(
         eval_context=loop_context.eval_context,
         train_idx=train_idx_t,
         pred_t=current_t,
@@ -147,6 +161,7 @@ def _evaluate_week(
 
     state = loop_context.hooks.fit_model(
         X_train=X_train_t,
+        X_train_global=X_train_global_t,
         y_train=y_train_t,
         config=loop_context.best_config,
         init_state=state,
@@ -154,6 +169,7 @@ def _evaluate_week(
 
     pred = loop_context.hooks.predict(
         X_pred=X_pred_t,
+        X_pred_global=X_pred_global_t,
         state=state,
         config=loop_context.best_config,
         num_samples=loop_context.eval_context.num_pp_samples,
@@ -177,7 +193,13 @@ def _prepare_batches(
     train_idx: np.ndarray,
     pred_t: int,
     cleaning_outer: FeatureCleaningState,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+]:
     scaler_t = fit_robust_scaler(
         X=eval_context.X,
         M=eval_context.M,
@@ -202,7 +224,58 @@ def _prepare_batches(
         np.array([pred_t], dtype=int),
         state_t,
     )
-    return X_train_t, y_train_t, X_pred_t
+    X_train_global_t, X_pred_global_t = _prepare_global_batches(
+        eval_context=eval_context,
+        train_idx=train_idx,
+        pred_t=pred_t,
+    )
+    return X_train_t, X_train_global_t, y_train_t, X_pred_t, X_pred_global_t
+
+
+def _prepare_global_batches(
+    *,
+    eval_context: OuterEvaluationContext,
+    train_idx: np.ndarray,
+    pred_t: int,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    if eval_context.X_global is None or eval_context.M_global is None:
+        return None, None
+    global_inputs = GlobalBlockInputs(
+        X=eval_context.X_global,
+        M=eval_context.M_global,
+        feature_names=eval_context.global_feature_names,
+    )
+    cleaning = fit_global_feature_cleaning(
+        inputs=global_inputs,
+        train_idx=train_idx,
+        spec=eval_context.preprocess_spec,
+        frozen_feature_idx=None,
+    )
+    if cleaning.feature_idx.size == 0:
+        return None, None
+    scaler = fit_global_robust_scaler(
+        inputs=global_inputs,
+        train_idx=train_idx,
+        cleaning=cleaning,
+        spec=eval_context.preprocess_spec,
+    )
+    state = TransformState(
+        cleaning=cleaning,
+        scaler=scaler,
+        spec=eval_context.preprocess_spec,
+    )
+    X_train = transform_global_X(
+        global_inputs,
+        train_idx,
+        state,
+        validate=True,
+    )
+    X_pred = transform_global_X(
+        global_inputs,
+        np.array([pred_t], dtype=int),
+        state,
+    )
+    return X_train, X_pred
 
 
 def _expanding_train(

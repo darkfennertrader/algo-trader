@@ -11,7 +11,7 @@ import torch
 from algo_trader.domain import SimulationError
 from algo_trader.domain.simulation import FanChartsConfig
 from algo_trader.infrastructure import ensure_directory
-
+from . import calibration_summary_diagnostics as calibration_diags
 
 @dataclass(frozen=True)
 class FanChartDiagnosticsContext:
@@ -20,14 +20,12 @@ class FanChartDiagnosticsContext:
     candidate_id: int
     config: FanChartsConfig
 
-
 @dataclass(frozen=True)
 class FanChartData:
     timestamps: list[pd.Timestamp]
     asset_names: list[str]
     z_true: np.ndarray
     quantiles: Mapping[float, np.ndarray]
-
 
 @dataclass(frozen=True)
 class TimeSampleRecord:
@@ -606,6 +604,16 @@ def _run_calibration_diagnostics(
         coverage_levels=coverage_levels,
     )
     _plot_coverage_curve(curve, output_dir)
+    summary = calibration_diags.build_calibration_summary(
+        curve=curve,
+        pit_values=pit_values,
+    )
+    calibration_diags.write_calibration_summary(
+        summary=summary, output_dir=output_dir
+    )
+    calibration_diags.plot_calibration_gap(
+        summary=summary, output_dir=output_dir
+    )
 
 
 @dataclass(frozen=True)
@@ -709,7 +717,8 @@ def _write_calibration_level_csv(
 ) -> None:
     frame = _build_calibration_level_frame(data, series)
     frame.to_csv(
-        output_dir / f"calibration_fan_{_coverage_level_tag(series.level)}.csv",
+        output_dir
+        / f"calibration_fan_{calibration_diags.coverage_level_tag(series.level)}.csv",
         index=False,
     )
 
@@ -770,7 +779,7 @@ def _plot_calibration_level(
         )
     ax.axhline(series.level, color="black", linestyle="--", linewidth=1)
     ax.set_title(
-        f"Calibration coverage ({_coverage_level_tag(series.level)})"
+        f"Calibration coverage ({calibration_diags.coverage_level_tag(series.level)})"
     )
     ax.set_xlabel("test week")
     ax.set_ylabel("coverage")
@@ -778,7 +787,8 @@ def _plot_calibration_level(
     fig.autofmt_xdate()
     fig.tight_layout()
     fig.savefig(
-        output_dir / f"calibration_fan_{_coverage_level_tag(series.level)}.png",
+        output_dir
+        / f"calibration_fan_{calibration_diags.coverage_level_tag(series.level)}.png",
         dpi=150,
         bbox_inches="tight",
     )
@@ -790,15 +800,6 @@ def _cleanup_legacy_calibration_outputs(output_dir: Path) -> None:
         legacy = output_dir / name
         if legacy.exists():
             legacy.unlink()
-
-
-def _coverage_level_tag(level: float) -> str:
-    pct = float(level) * 100.0
-    rounded = round(pct)
-    if abs(pct - rounded) <= 1e-6:
-        return f"p{int(rounded):02d}"
-    as_text = f"{pct:.3f}".rstrip("0").rstrip(".").replace(".", "_")
-    return f"p{as_text}"
 
 
 def _fan_bands(quantiles: Sequence[float]) -> list[tuple[float, float, float, str]]:

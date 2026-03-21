@@ -671,7 +671,9 @@ def _decode_local_parameters(
     # Keep the amortized local state close to the propagated AR(1) message.
     # Without a bounded residual step, the encoder can drive h_t too negative
     # in a single update, which collapses u_t and inflates predictive variance.
-    loc_step = _MAX_H_LOC_STEP * torch.tanh(encoded[0])
+    loc_step = (
+        prior_scale * _MAX_H_LOC_STEP * torch.tanh(encoded[0])
+    )
     current_h_loc = prior_loc + loc_step
     scale_step = torch.exp(
         _MAX_H_LOG_SCALE_STEP * torch.tanh(encoded[1])

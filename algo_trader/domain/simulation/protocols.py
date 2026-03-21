@@ -73,6 +73,8 @@ class Allocator(Protocol):
         self,
         pred: Mapping[str, Any],
         alloc_spec: Mapping[str, Any],
+        w_prev: torch.Tensor | None = None,
+        asset_names: Sequence[str] = (),
     ) -> torch.Tensor: ...
 
 

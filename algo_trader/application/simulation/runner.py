@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 import numpy as np
 import torch
@@ -92,6 +92,8 @@ from .prebuild import PrebuildInputs, apply_prebuild, maybe_run_prebuild
 
 logger = logging.getLogger(__name__)
 
+_CUDA_REF_SAMPLE_LIMIT = 8
+
 @dataclass(frozen=True)
 class CVStructure:
     warmup_idx: np.ndarray
@@ -119,23 +121,192 @@ def _run_context(config_path: Path | None, resume: bool) -> Mapping[str, str]:
         "resume": str(resume),
     }
 
+
+def _format_clock_time(timestamp: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(timestamp))
+
+
+def _format_duration_hms(duration_seconds: float) -> str:
+    total_seconds = max(int(round(duration_seconds)), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+@dataclass(frozen=True)
+class _RunRuntimeOptions:
+    use_ray: bool
+    ray_address: str | None
+    ray_logs_enabled: bool
+
+
+@dataclass(frozen=True)
+class _CudaRefSummary:
+    count: int
+    total_bytes: int
+    examples: tuple[str, ...]
+
+
+def _summarize_cuda_refs(named_values: Mapping[str, object]) -> _CudaRefSummary:
+    examples: list[str] = []
+    count, total_bytes = _walk_cuda_refs(
+        value=named_values,
+        path="root",
+        seen=set(),
+        examples=examples,
+    )
+    return _CudaRefSummary(
+        count=count,
+        total_bytes=total_bytes,
+        examples=tuple(examples),
+    )
+
+
+def _resolve_runtime_options(config: SimulationConfig) -> _RunRuntimeOptions:
+    return _RunRuntimeOptions(
+        use_ray=config.modeling.tuning.engine == "ray",
+        ray_address=config.modeling.tuning.ray.address,
+        ray_logs_enabled=config.modeling.tuning.ray.logs_enabled,
+    )
+
+
+def _walk_cuda_refs(
+    *,
+    value: object,
+    path: str,
+    seen: set[int],
+    examples: list[str],
+) -> tuple[int, int]:
+    object_id = id(value)
+    if object_id in seen:
+        return 0, 0
+    seen.add(object_id)
+    if isinstance(value, torch.Tensor):
+        return _summarize_cuda_tensor(value=value, path=path, examples=examples)
+    if isinstance(value, Mapping):
+        return _walk_mapping_cuda_refs(
+            value=value, path=path, seen=seen, examples=examples
+        )
+    if isinstance(value, (list, tuple)):
+        return _walk_sequence_cuda_refs(
+            value=value, path=path, seen=seen, examples=examples
+        )
+    if is_dataclass(value) and not isinstance(value, type):
+        return _walk_dataclass_cuda_refs(
+            value=value, path=path, seen=seen, examples=examples
+        )
+    return 0, 0
+
+
+def _summarize_cuda_tensor(
+    *, value: torch.Tensor, path: str, examples: list[str]
+) -> tuple[int, int]:
+    if value.device.type != "cuda":
+        return 0, 0
+    if len(examples) < _CUDA_REF_SAMPLE_LIMIT:
+        examples.append(
+            f"{path}: shape={tuple(value.shape)} dtype={value.dtype}"
+        )
+    return 1, int(value.numel() * value.element_size())
+
+
+def _walk_mapping_cuda_refs(
+    *,
+    value: Mapping[str, object],
+    path: str,
+    seen: set[int],
+    examples: list[str],
+) -> tuple[int, int]:
+    total_count = 0
+    total_bytes = 0
+    for key, item in value.items():
+        count, size = _walk_cuda_refs(
+            value=item,
+            path=f"{path}.{key}",
+            seen=seen,
+            examples=examples,
+        )
+        total_count += count
+        total_bytes += size
+    return total_count, total_bytes
+
+
+def _walk_sequence_cuda_refs(
+    *,
+    value: Sequence[object],
+    path: str,
+    seen: set[int],
+    examples: list[str],
+) -> tuple[int, int]:
+    total_count = 0
+    total_bytes = 0
+    for index, item in enumerate(value):
+        count, size = _walk_cuda_refs(
+            value=item,
+            path=f"{path}[{index}]",
+            seen=seen,
+            examples=examples,
+        )
+        total_count += count
+        total_bytes += size
+    return total_count, total_bytes
+
+
+def _walk_dataclass_cuda_refs(
+    *,
+    value: object,
+    path: str,
+    seen: set[int],
+    examples: list[str],
+) -> tuple[int, int]:
+    total_count = 0
+    total_bytes = 0
+    dataclass_value = cast(Any, value)
+    for field in fields(dataclass_value):
+        count, size = _walk_cuda_refs(
+            value=getattr(dataclass_value, field.name),
+            path=f"{path}.{field.name}",
+            seen=seen,
+            examples=examples,
+        )
+        total_count += count
+        total_bytes += size
+    return total_count, total_bytes
+
+
+def _log_cuda_ref_summary(
+    *,
+    use_gpu: bool,
+    stage: str,
+    named_values: Mapping[str, object],
+) -> None:
+    if not use_gpu:
+        return
+    summary = _summarize_cuda_refs(named_values)
+    logger.info(
+        "event=simulation.cuda_refs stage=%s count=%s total_bytes=%s examples=%s",
+        stage,
+        summary.count,
+        summary.total_bytes,
+        list(summary.examples),
+    )
+
 @log_boundary("simulation.run", context=_run_context)
 def run(
     *, config_path: Path | None = None, resume: bool = False
 ) -> Mapping[str, Any]:
+    started_at = time.time()
     config = apply_smoke_test_overrides(load_config(config_path))
     validate_resume_request(config=config, resume=resume)
     device = _resolve_device(config.flags.use_gpu)
-    setup = _prepare_run_state(config=config, device=device)
+    setup: RunSetup | None = _prepare_run_state(config=config, device=device)
     if setup.early_results is not None:
         return setup.early_results
     resume_state = ResumeState(enabled=resume)
-    use_ray = config.modeling.tuning.engine == "ray"
-    ray_address = config.modeling.tuning.ray.address
-    ray_logs_enabled = config.modeling.tuning.ray.logs_enabled
+    runtime = _resolve_runtime_options(config)
     cleanup_before_simulation_run(
-        use_ray=use_ray,
-        ray_address=ray_address,
+        use_ray=runtime.use_ray,
+        ray_address=runtime.ray_address,
         use_gpu=config.flags.use_gpu,
     )
     resume_tracker = build_resume_tracker(
@@ -147,9 +318,14 @@ def run(
         tuning_engine=setup.outer_context.config.modeling.tuning.engine,
         resume=resume,
     )
-    if use_ray:
-        init_ray_for_tuning(ray_address, logs_enabled=ray_logs_enabled)
+    if runtime.use_ray:
+        init_ray_for_tuning(
+            runtime.ray_address, logs_enabled=runtime.ray_logs_enabled
+        )
     interrupted = False
+    chosen_configs: dict[int, Mapping[str, Any]] = {}
+    outer_results: list[Mapping[str, Any]] = []
+    results: Mapping[str, Any] | None = None
     try:
         chosen_configs, outer_results = _evaluate_outer_folds(
             outer_context=setup.outer_context,
@@ -159,25 +335,59 @@ def run(
         )
         if resume_tracker is not None:
             resume_tracker.mark_run_completed()
+        if setup is None:
+            raise SimulationError("Simulation setup missing during result build")
+        results = _build_results(
+            config,
+            setup.outer_context.context,
+            chosen_configs,
+            outer_results,
+        )
+        results = with_run_meta(results, config.flags)
+        setup.outer_context.artifacts.write_results(results)
+        setup.outer_context.artifacts.write_cv_summary(results)
+        _log_cuda_ref_summary(
+            use_gpu=config.flags.use_gpu,
+            stage="pre_release",
+            named_values={
+                "setup": setup,
+                "chosen_configs": chosen_configs,
+                "outer_results": outer_results,
+                "results": results,
+            },
+        )
+        setup = None
+        chosen_configs = {}
+        outer_results = []
+        _log_cuda_ref_summary(
+            use_gpu=config.flags.use_gpu,
+            stage="post_release",
+            named_values={
+                "setup": setup,
+                "chosen_configs": chosen_configs,
+                "outer_results": outer_results,
+                "results": results,
+            },
+        )
     except KeyboardInterrupt:
         interrupted = True
         raise
     finally:
         cleanup_after_simulation_run(
-            use_ray=use_ray,
-            ray_address=ray_address,
+            use_ray=runtime.use_ray,
+            ray_address=runtime.ray_address,
             use_gpu=config.flags.use_gpu,
             interrupted=interrupted,
         )
-    results = _build_results(
-        config,
-        setup.outer_context.context,
-        chosen_configs,
-        outer_results,
+    if results is None:
+        raise SimulationError("Simulation completed without results")
+    ended_at = time.time()
+    logger.info(
+        "simulation_timing start=%s end=%s duration=%s",
+        _format_clock_time(started_at),
+        _format_clock_time(ended_at),
+        _format_duration_hms(ended_at - started_at),
     )
-    results = with_run_meta(results, config.flags)
-    setup.outer_context.artifacts.write_results(results)
-    setup.outer_context.artifacts.write_cv_summary(results)
     return results
 
 @dataclass(frozen=True)
@@ -959,6 +1169,7 @@ def _run_outer_evaluation(
                 allocation=outer_context.config.evaluation.allocation.spec,
                 cost=outer_context.config.evaluation.cost.spec,
             ),
+            assets=outer_context.context.assets,
         ),
         best_config=best_config,
         hooks=outer_context.hooks,

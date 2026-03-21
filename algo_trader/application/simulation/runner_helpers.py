@@ -79,8 +79,10 @@ def build_base_config(
         "model": {
             "model_name": model.model_name,
             "guide_name": model.guide_name,
+            "predict_name": model.predict_name,
             "params": dict(model.params),
             "guide_params": dict(model.guide_params),
+            "predict_params": dict(model.predict_params),
         },
         "debug": {
             "enabled": flags.smoke_test_debug,
@@ -90,20 +92,24 @@ def build_base_config(
             "method": training.method,
             "target_normalization": training.target_normalization,
             "log_prob_scaling": training.log_prob_scaling,
+            "svi_shared": {
+                "learning_rate": training.svi_shared.learning_rate,
+                "grad_accum_steps": training.svi_shared.grad_accum_steps,
+                "num_elbo_particles": (
+                    training.svi_shared.num_elbo_particles
+                ),
+                "log_every": training.svi_shared.log_every,
+            },
             "online_filtering": {
                 "steps_per_observation": (
                     training.online_filtering.steps_per_observation
                 ),
             },
-            "svi": {
-                "num_steps": training.svi.num_steps,
-                "learning_rate": training.svi.learning_rate,
-                "tbptt_window_len": training.svi.tbptt_window_len,
-                "tbptt_burn_in_len": training.svi.tbptt_burn_in_len,
-                "grad_accum_steps": training.svi.grad_accum_steps,
-                "num_elbo_particles": training.svi.num_elbo_particles,
-                "log_every": training.svi.log_every,
-            }
+            "tbptt": {
+                "num_steps": training.tbptt.num_steps,
+                "window_len": training.tbptt.window_len,
+                "burn_in_len": training.tbptt.burn_in_len,
+            },
         },
     }
 

@@ -80,6 +80,8 @@ class _TrainingArtifacts:
     norm_state: _TargetNormState | None
     posterior_summary: Mapping[str, Any] | None
     training_diagnostics: Mapping[str, Any] | None
+    filtering_state: Mapping[str, Any] | None = None
+    structural_posterior_means: Mapping[str, Any] | None = None
     param_store_state: Mapping[str, Any] | None = None
 
 

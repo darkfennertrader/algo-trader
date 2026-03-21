@@ -4,12 +4,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, TypeVar
 
 from algo_trader.domain import ConfigError
-from .protocols import PyroGuide, PyroModel
+from .protocols import PyroGuide, PyroModel, PyroPredictor
 
 ModelBuilder = Callable[[Mapping[str, Any]], PyroModel]
 GuideBuilder = Callable[[Mapping[str, Any]], PyroGuide]
+PredictorBuilder = Callable[[Mapping[str, Any]], PyroPredictor]
 TModelBuilder = TypeVar("TModelBuilder", bound=ModelBuilder)
 TGuideBuilder = TypeVar("TGuideBuilder", bound=GuideBuilder)
+TPredictorBuilder = TypeVar("TPredictorBuilder", bound=PredictorBuilder)
 
 
 @dataclass
@@ -70,8 +72,38 @@ class GuideRegistry:
         return sorted(self._items.keys())
 
 
+@dataclass
+class PredictorRegistry:
+    _items: dict[str, PredictorBuilder] = field(default_factory=dict)
+
+    def register(self, name: str, builder: PredictorBuilder) -> None:
+        normalized = _normalize_name(name)
+        if normalized in self._items:
+            raise ConfigError(
+                f"Predictor '{name}' is already registered",
+                context={"predictor": normalized},
+            )
+        self._items[normalized] = builder
+
+    def get(
+        self, name: str, params: Mapping[str, Any] | None = None
+    ) -> PyroPredictor:
+        normalized = _normalize_name(name)
+        builder = self._items.get(normalized)
+        if builder is None:
+            raise ConfigError(
+                f"Unknown predictor '{name}'",
+                context={"predictor": normalized},
+            )
+        return builder(dict(params or {}))
+
+    def list_names(self) -> list[str]:
+        return sorted(self._items.keys())
+
+
 _MODEL_REGISTRY = ModelRegistry()
 _GUIDE_REGISTRY = GuideRegistry()
+_PREDICTOR_REGISTRY = PredictorRegistry()
 
 
 def register_model(name: str) -> Callable[[TModelBuilder], TModelBuilder]:
@@ -85,6 +117,16 @@ def register_model(name: str) -> Callable[[TModelBuilder], TModelBuilder]:
 def register_guide(name: str) -> Callable[[TGuideBuilder], TGuideBuilder]:
     def decorator(builder: TGuideBuilder) -> TGuideBuilder:
         _GUIDE_REGISTRY.register(name, builder)
+        return builder
+
+    return decorator
+
+
+def register_predictor(
+    name: str,
+) -> Callable[[TPredictorBuilder], TPredictorBuilder]:
+    def decorator(builder: TPredictorBuilder) -> TPredictorBuilder:
+        _PREDICTOR_REGISTRY.register(name, builder)
         return builder
 
     return decorator

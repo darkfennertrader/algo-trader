@@ -23,6 +23,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "seaborn[stats]>=0.13.2",
     "graphviz>=0.21",
+    "skfolio>=0.15.7",
 ]
 
 [build-system]

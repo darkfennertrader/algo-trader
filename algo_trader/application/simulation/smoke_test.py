@@ -11,6 +11,8 @@ from algo_trader.infrastructure.data import (
     build_synthetic_panel_dataset,
 )
 
+from .interrupt_cleanup import clear_cuda_memory
+
 SMOKE_TEST_T = 8
 SMOKE_TEST_A = 3
 SMOKE_TEST_F = 5
@@ -49,13 +51,20 @@ def apply_smoke_test_overrides(
         space=tuple(),
         num_samples=1,
     )
-    training_svi = replace(
-        config.modeling.training.svi,
-        num_steps=SMOKE_TEST_SVI_STEPS,
+    training_svi_shared = replace(
+        config.modeling.training.svi_shared,
         num_elbo_particles=SMOKE_TEST_NUM_PARTICLES,
         log_every=None,
     )
-    training = replace(config.modeling.training, svi=training_svi)
+    training_tbptt = replace(
+        config.modeling.training.tbptt,
+        num_steps=SMOKE_TEST_SVI_STEPS,
+    )
+    training = replace(
+        config.modeling.training,
+        svi_shared=training_svi_shared,
+        tbptt=training_tbptt,
+    )
     modeling = replace(config.modeling, training=training, tuning=tuning)
     model_selection = replace(
         config.evaluation.model_selection, enable=False
@@ -112,6 +121,7 @@ def apply_smoke_test_overrides(
 
 
 def build_smoke_test_dataset(device: str) -> PanelDataset:
+    _clear_cuda_before_smoke_test(device)
     asset_dataset = build_synthetic_panel_dataset(
         T=SMOKE_TEST_T,
         A=SMOKE_TEST_A,
@@ -134,6 +144,12 @@ def build_smoke_test_dataset(device: str) -> PanelDataset:
         global_features=global_features,
         device=asset_dataset.device,
     )
+
+
+def _clear_cuda_before_smoke_test(device: str) -> None:
+    if not device.startswith("cuda"):
+        return
+    clear_cuda_memory()
 
 
 def _build_smoke_test_global_block(

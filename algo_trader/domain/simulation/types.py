@@ -174,8 +174,10 @@ class PreprocessSpec:
 class ModelConfig:
     model_name: str
     guide_name: str
+    predict_name: str | None = None
     params: Mapping[str, Any] = field(default_factory=dict)
     guide_params: Mapping[str, Any] = field(default_factory=dict)
+    predict_params: Mapping[str, Any] = field(default_factory=dict)
     prebuild: "ModelPrebuildConfig | None" = None
 
 
@@ -191,14 +193,18 @@ TrainingMethod = Literal["tbptt", "online_filtering"]
 
 
 @dataclass(frozen=True)
-class TrainingSVIConfig:
-    num_steps: int = 2_000
+class TrainingSVISharedConfig:
     learning_rate: float = 1e-3
-    tbptt_window_len: int | None = None
-    tbptt_burn_in_len: int = 0
     grad_accum_steps: int = 1
     num_elbo_particles: int = 1
     log_every: int | None = 100
+
+
+@dataclass(frozen=True)
+class TrainingTBPTTConfig:
+    num_steps: int = 2_000
+    window_len: int | None = None
+    burn_in_len: int = 0
 
 
 @dataclass(frozen=True)
@@ -209,7 +215,10 @@ class TrainingOnlineFilteringConfig:
 @dataclass(frozen=True)
 class TrainingConfig:
     method: TrainingMethod = "tbptt"
-    svi: TrainingSVIConfig = field(default_factory=TrainingSVIConfig)
+    svi_shared: TrainingSVISharedConfig = field(
+        default_factory=TrainingSVISharedConfig
+    )
+    tbptt: TrainingTBPTTConfig = field(default_factory=TrainingTBPTTConfig)
     online_filtering: TrainingOnlineFilteringConfig = field(
         default_factory=TrainingOnlineFilteringConfig
     )

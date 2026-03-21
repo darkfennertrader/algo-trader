@@ -39,6 +39,7 @@ class OuterEvaluationContext:  # pylint: disable=too-many-instance-attributes
     preprocess_spec: PreprocessSpec
     num_pp_samples: int
     portfolio: PortfolioSpec
+    assets: Sequence[str]
 
 
 @dataclass(frozen=True)
@@ -175,7 +176,12 @@ def _evaluate_week(
         num_samples=loop_context.eval_context.num_pp_samples,
     )
 
-    w = loop_context.hooks.allocate(pred=pred, alloc_spec=loop_context.alloc_spec)
+    w = loop_context.hooks.allocate(
+        pred=pred,
+        alloc_spec=loop_context.alloc_spec,
+        w_prev=w_prev,
+        asset_names=loop_context.eval_context.assets,
+    )
     if w.device != loop_context.eval_context.y.device:
         w = w.to(device=loop_context.eval_context.y.device)
 

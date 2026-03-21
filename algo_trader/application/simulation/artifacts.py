@@ -328,6 +328,23 @@ class SimulationArtifacts:
             message="Failed to write postprocess diagnostics",
         )
 
+    def write_postprocess_debug(
+        self,
+        *,
+        outer_k: int,
+        candidate_id: int,
+        split_id: int,
+        payload: Mapping[str, Any],
+    ) -> None:
+        target_dir = self._postprocess_dir(outer_k) / "debug"
+        _ensure_dir(target_dir, message="Failed to create postprocess debug")
+        filename = f"candidate_{candidate_id:04d}_split_{split_id:04d}_state.pt"
+        _save_torch(
+            _to_torch_payload(payload),
+            target_dir / filename,
+            message="Failed to write postprocess debug payload",
+        )
+
     def write_postprocess_metrics(
         self,
         *,
@@ -712,6 +729,23 @@ def _to_serializable(value: Any) -> Any:
         result = value
     else:
         result = str(value)
+    return result
+
+
+def _to_torch_payload(value: Any) -> Any:
+    result: Any
+    if is_dataclass(value) and not isinstance(value, type):
+        result = _to_torch_payload(asdict(value))
+    elif isinstance(value, Mapping):
+        result = {str(k): _to_torch_payload(v) for k, v in value.items()}
+    elif isinstance(value, (list, tuple)):
+        result = [_to_torch_payload(item) for item in value]
+    elif isinstance(value, torch.Tensor):
+        result = value.detach().cpu()
+    elif isinstance(value, np.ndarray):
+        result = torch.from_numpy(value.copy())
+    else:
+        result = value
     return result
 
 

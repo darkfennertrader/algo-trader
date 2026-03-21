@@ -1,8 +1,10 @@
 from __future__ import annotations
+# pylint: disable=too-many-lines
 
+from dataclasses import dataclass
 import logging
 import time
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import Any, Callable, Iterable, Mapping, Sequence, cast
 
 import pyro
 import torch
@@ -15,6 +17,7 @@ from algo_trader.pipeline.stages import modeling
 
 from .config_utils import require_bool
 from .hooks_batching import (
+    _DebugParticipants,
     _apply_target_denorm,
     _build_online_filtering_batches,
     _build_prediction_batch,
@@ -22,6 +25,16 @@ from .hooks_batching import (
     _configure_debug_sink,
     _debug_config,
     _prepare_training_batches,
+)
+from .hooks_state import (
+    _build_filtering_state,
+    _coerce_filtering_state_payload,
+    _export_structural_posterior_means,
+    _reset_param_store,
+    _restore_param_store_state,
+    _serialize_filtering_state,
+    _snapshot_param_store_state,
+    _with_filtering_state,
 )
 from .hooks_types import (
     _FitInputs,
@@ -39,6 +52,27 @@ logger = logging.getLogger(__name__)
 
 _MODEL_REGISTRY = modeling.default_model_registry()
 _GUIDE_REGISTRY = modeling.default_guide_registry()
+_PREDICTOR_REGISTRY = modeling.default_predictor_registry()
+
+
+@dataclass(frozen=True)
+class _ResolvedModelConfig:
+    model_name: str
+    guide_name: str
+    predict_name: str | None
+    model_params: Mapping[str, Any]
+    guide_params: Mapping[str, Any]
+    predict_params: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class _ResolvedModeling:
+    model_name: str
+    guide_name: str
+    predict_name: str | None
+    model: modeling.PyroModel
+    guide: modeling.PyroGuide
+    predictor: modeling.PyroPredictor | None
 
 
 def _log_missing_targets(y_train: torch.Tensor) -> None:
@@ -55,13 +89,62 @@ def _log_missing_targets(y_train: torch.Tensor) -> None:
 
 def _resolve_model_and_guide(
     config: Mapping[str, Any],
-) -> tuple[str, str, modeling.PyroModel, modeling.PyroGuide]:
-    model_name, guide_name, model_params, guide_params = _resolve_model_config(
-        config
+) -> _ResolvedModeling:
+    config_values = _resolve_model_config(config)
+    training_method = _config_training_method(config)
+    model = _MODEL_REGISTRY.get(
+        config_values.model_name,
+        config_values.model_params,
     )
-    model = _MODEL_REGISTRY.get(model_name, model_params)
-    guide = _GUIDE_REGISTRY.get(guide_name, guide_params)
-    return model_name, guide_name, model, guide
+    _validate_training_method_support(
+        model_name=config_values.model_name,
+        model=model,
+        training_method=training_method,
+    )
+    guide = _GUIDE_REGISTRY.get(
+        config_values.guide_name,
+        config_values.guide_params,
+    )
+    predictor = None
+    if config_values.predict_name is not None:
+        predictor = _PREDICTOR_REGISTRY.get(
+            config_values.predict_name,
+            config_values.predict_params,
+        )
+    return _ResolvedModeling(
+        model_name=config_values.model_name,
+        guide_name=config_values.guide_name,
+        predict_name=config_values.predict_name,
+        model=model,
+        guide=guide,
+        predictor=predictor,
+    )
+
+
+def _config_training_method(config: Mapping[str, Any]) -> str:
+    training = config.get("training")
+    if not isinstance(training, Mapping):
+        return "tbptt"
+    return _resolve_training_method(training.get("method", "tbptt"))
+
+
+def _validate_training_method_support(
+    *,
+    model_name: str,
+    model: modeling.PyroModel,
+    training_method: str,
+) -> None:
+    supported_methods = getattr(model, "supported_training_methods", None)
+    if not callable(supported_methods):
+        return
+    raw_supported = cast(Iterable[object], supported_methods())
+    supported = tuple(str(value) for value in raw_supported)
+    if training_method in supported:
+        return
+    raise ConfigError(
+        f"{model_name} does not support training.method={training_method}",
+        context={"supported_methods": ", ".join(sorted(supported))},
+    )
 
 
 def _fit_pyro(
@@ -94,14 +177,18 @@ def _fit_pyro_svi(
     params: _TrainingParams | None = None,
 ) -> Mapping[str, Any]:
     _log_missing_targets(inputs.y_train)
-    model_name, guide_name, model, guide = _resolve_model_and_guide(config)
+    resolved = _resolve_model_and_guide(config)
     debug_config = _debug_config(config)
     _configure_debug_sink(
         debug_config=debug_config,
-        model_name=model_name,
-        guide_name=guide_name,
-        model=model,
-        guide=guide,
+        participants=_DebugParticipants(
+            model_name=resolved.model_name,
+            guide_name=resolved.guide_name,
+            predictor_name=resolved.predict_name,
+            model=resolved.model,
+            guide=resolved.guide,
+            predictor=resolved.predictor,
+        ),
     )
     params = params or _training_params(config)
     batches, norm_state = _prepare_training_batches(
@@ -113,14 +200,14 @@ def _fit_pyro_svi(
     )
     pyro.clear_param_store()
     svi_loss_history = _run_svi_steps(
-        svi=_build_svi(model=model, guide=guide, params=params),
+        svi=_build_svi(model=resolved.model, guide=resolved.guide, params=params),
         batches=batches,
         params=params,
         context=_run_context(config),
     )
     return _build_training_state(
-        model_name,
-        guide_name,
+        resolved.model_name,
+        resolved.guide_name,
         _TrainingArtifacts(
             norm_state=norm_state,
             posterior_summary=_summarize_posterior_params(config),
@@ -141,14 +228,18 @@ def _fit_pyro_online_filtering(
     params: _TrainingParams,
 ) -> Mapping[str, Any]:
     _log_missing_targets(inputs.y_train)
-    model_name, guide_name, model, guide = _resolve_model_and_guide(config)
+    resolved = _resolve_model_and_guide(config)
     debug_config = _debug_config(config)
     _configure_debug_sink(
         debug_config=debug_config,
-        model_name=model_name,
-        guide_name=guide_name,
-        model=model,
-        guide=guide,
+        participants=_DebugParticipants(
+            model_name=resolved.model_name,
+            guide_name=resolved.guide_name,
+            predictor_name=resolved.predict_name,
+            model=resolved.model,
+            guide=resolved.guide,
+            predictor=resolved.predictor,
+        ),
     )
     batches, norm_state = _prepare_training_batches(
         inputs.X_train,
@@ -158,15 +249,24 @@ def _fit_pyro_online_filtering(
         debug_config.enabled,
     )
     _reset_param_store(init_state)
-    svi_loss_history = _run_online_filtering_steps(
-        svi=_build_svi(model=model, guide=guide, params=params),
+    filtering_state = _coerce_filtering_state_payload(init_state)
+    svi_loss_history, final_filtering_state = _run_online_filtering_steps(
+        svi=_build_svi(
+            model=resolved.model,
+            guide=resolved.guide,
+            params=params,
+        ),
         batches=batches,
         params=params,
         context=_run_context(config),
+        initial_filtering_state=filtering_state,
+    )
+    structural_posterior_means = _export_structural_posterior_means(
+        resolved.guide
     )
     return _build_training_state(
-        model_name,
-        guide_name,
+        resolved.model_name,
+        resolved.guide_name,
         _TrainingArtifacts(
             norm_state=norm_state,
             posterior_summary=_summarize_posterior_params(config),
@@ -175,6 +275,8 @@ def _fit_pyro_online_filtering(
                 params=params,
                 num_batches=len(batches),
             ),
+            filtering_state=_serialize_filtering_state(final_filtering_state),
+            structural_posterior_means=structural_posterior_means,
             param_store_state=_snapshot_param_store_state(),
         ),
     )
@@ -199,6 +301,12 @@ def _build_training_state(
     if artifacts.training_diagnostics:
         state["training_diagnostics"] = dict(
             artifacts.training_diagnostics
+        )
+    if artifacts.filtering_state is not None:
+        state["filtering_state"] = dict(artifacts.filtering_state)
+    if artifacts.structural_posterior_means is not None:
+        state["structural_posterior_means"] = dict(
+            artifacts.structural_posterior_means
         )
     if artifacts.param_store_state is not None:
         state["param_store_state"] = dict(artifacts.param_store_state)
@@ -236,21 +344,41 @@ def _predict_pyro(
     config: Mapping[str, Any],
     num_samples: int,
 ) -> Mapping[str, Any]:
-    _, _, model, guide = _resolve_model_and_guide(config)
+    resolved = _resolve_model_and_guide(config)
     num_samples = max(int(num_samples), 1)
     _restore_param_store_state(state)
-    batch = _build_prediction_batch(X_pred, X_pred_global)
-    unconditioned = poutine.uncondition(model)
-    predictive = Predictive(
-        unconditioned,
-        guide=guide,
-        num_samples=num_samples,
-        return_sites=("obs",),
+    batch = _build_prediction_batch(
+        X_pred,
+        X_pred_global,
+        filtering_state=_coerce_filtering_state_payload(state),
     )
-    samples = predictive(batch)["obs"]
-    mean = samples.mean(dim=0)
+    request = modeling.PredictiveRequest(
+        model=resolved.model,
+        guide=resolved.guide,
+        batch=batch,
+        num_samples=num_samples,
+        state=state,
+    )
+    pred = _predict_model_specific(
+        request=request,
+        predictor=resolved.predictor,
+    )
+    if pred is None:
+        pred = _predict_with_pyro_predictive(
+            model=request.model,
+            guide=request.guide,
+            batch=request.batch,
+            num_samples=request.num_samples,
+        )
+    samples = _require_prediction_tensor(pred, key="samples")
+    mean = _require_prediction_tensor(pred, key="mean")
     mean, samples = _apply_target_denorm(mean, samples, state)
-    return {"samples": samples, "mean": mean}
+    result = dict(pred)
+    result["samples"] = samples
+    result["mean"] = mean
+    if "covariance" in result:
+        result["covariance"] = modeling.predictive_covariance(samples)
+    return result
 
 
 def _score_metrics(
@@ -262,9 +390,57 @@ def _score_metrics(
     return float(scorer(y_true, pred, score_spec))
 
 
+def _predict_model_specific(
+    *,
+    request: modeling.PredictiveRequest,
+    predictor: modeling.PyroPredictor | None = None,
+) -> Mapping[str, Any] | None:
+    if predictor is not None:
+        return cast(Mapping[str, Any] | None, predictor(request))
+    model_predictor = getattr(request.model, "posterior_predict", None)
+    if not callable(model_predictor):
+        return None
+    return cast(
+        Mapping[str, Any] | None,
+        model_predictor(
+            guide=request.guide,
+            batch=request.batch,
+            num_samples=request.num_samples,
+            state=request.state,
+        ),
+    )
+
+
+def _predict_with_pyro_predictive(
+    *,
+    model: modeling.PyroModel,
+    guide: modeling.PyroGuide,
+    batch: modeling.ModelBatch,
+    num_samples: int,
+) -> Mapping[str, Any]:
+    unconditioned = poutine.uncondition(model)
+    predictive = Predictive(
+        unconditioned,
+        guide=guide,
+        num_samples=num_samples,
+        return_sites=("obs",),
+    )
+    samples = predictive(batch)["obs"]
+    return {"samples": samples, "mean": samples.mean(dim=0)}
+
+
+def _require_prediction_tensor(
+    pred: Mapping[str, Any], *, key: str
+) -> torch.Tensor:
+    value = pred.get(key)
+    if not isinstance(value, torch.Tensor):
+        raise SimulationError(f"Prediction output must include tensor {key!r}")
+    return value
+
+
 def _resolve_model_config(
     config: Mapping[str, Any],
-) -> tuple[str, str, Mapping[str, Any], Mapping[str, Any]]:
+) -> _ResolvedModelConfig:
     model = config.get("model")
     if not isinstance(model, Mapping):
         raise ConfigError("model config missing for simulation hooks")
@@ -274,13 +450,18 @@ def _resolve_model_config(
         raise ConfigError("model.model_name must be set for simulation hooks")
     if not guide_name:
         raise ConfigError("model.guide_name must be set for simulation hooks")
-    return (
-        model_name,
-        guide_name,
-        _coerce_mapping(model.get("params", {}), label="model.params"),
-        _coerce_mapping(
+    return _ResolvedModelConfig(
+        model_name=model_name,
+        guide_name=guide_name,
+        predict_name=_optional_name(model.get("predict_name")),
+        model_params=_coerce_mapping(model.get("params", {}), label="model.params"),
+        guide_params=_coerce_mapping(
             model.get("guide_params", {}),
             label="model.guide_params",
+        ),
+        predict_params=_coerce_mapping(
+            model.get("predict_params", {}),
+            label="model.predict_params",
         ),
     )
 
@@ -293,15 +474,26 @@ def _coerce_mapping(value: object, *, label: str) -> Mapping[str, Any]:
     return dict(value)
 
 
+def _optional_name(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    return normalized or None
+
+
 def _training_params(config: Mapping[str, Any]) -> _TrainingParams:
     training = _require_mapping(
         config.get("training"),
         message="training config missing for simulation hooks",
     )
     method = _resolve_training_method(training.get("method", "tbptt"))
-    raw_svi = _require_mapping(
-        training.get("svi"),
-        message="training.svi config missing for simulation hooks",
+    raw_svi_shared = _require_mapping(
+        training.get("svi_shared"),
+        message="training.svi_shared config missing for simulation hooks",
+    )
+    raw_tbptt = _require_mapping(
+        training.get("tbptt"),
+        message="training.tbptt config missing for simulation hooks",
     )
     raw_online_filtering = _optional_mapping(
         training.get("online_filtering"),
@@ -312,20 +504,27 @@ def _training_params(config: Mapping[str, Any]) -> _TrainingParams:
         field="training.target_normalization",
         config_path=None,
     )
+    if method == "online_filtering" and target_norm:
+        raise ConfigError(
+            "training.target_normalization must be false when "
+            "training.method=online_filtering"
+        )
     grad_accum_steps = _resolve_grad_accum_steps(
-        raw_svi=raw_svi,
+        raw_svi_shared=raw_svi_shared,
         method=method,
     )
     return _TrainingParams(
         method=method,
         svi=_SVIParams(
-            steps=int(raw_svi.get("num_steps", 0)),
-            learning_rate=float(raw_svi.get("learning_rate", 1e-3)),
-            num_elbo_particles=int(raw_svi.get("num_elbo_particles", 1)),
-            log_every=_resolve_log_every(raw_svi),
+            steps=int(raw_tbptt.get("num_steps", 0)),
+            learning_rate=float(raw_svi_shared.get("learning_rate", 1e-3)),
+            num_elbo_particles=int(
+                raw_svi_shared.get("num_elbo_particles", 1)
+            ),
+            log_every=_resolve_log_every(raw_svi_shared),
             grad_accum_steps=grad_accum_steps,
         ),
-        tbptt=_resolve_tbptt_params(raw_svi),
+        tbptt=_resolve_tbptt_params(raw_tbptt),
         online_filtering=_OnlineFilteringParams(
             steps_per_observation=_resolve_steps_per_observation(
                 raw_online_filtering
@@ -363,28 +562,30 @@ def _resolve_training_method(value: object) -> str:
     raise ConfigError("training.method must be tbptt or online_filtering")
 
 
-def _resolve_log_every(raw_svi: Mapping[str, Any]) -> int | None:
-    raw_log_every = raw_svi.get("log_every")
+def _resolve_log_every(raw_svi_shared: Mapping[str, Any]) -> int | None:
+    raw_log_every = raw_svi_shared.get("log_every")
     if raw_log_every is None:
         return None
     log_every = int(raw_log_every)
     if log_every <= 0:
-        raise ConfigError("training.svi.log_every must be >= 1 or null")
+        raise ConfigError(
+            "training.svi_shared.log_every must be >= 1 or null"
+        )
     return log_every
 
 
-def _resolve_tbptt_params(raw_svi: Mapping[str, Any]) -> _TBPTTParams:
+def _resolve_tbptt_params(raw_tbptt: Mapping[str, Any]) -> _TBPTTParams:
     window_len = _resolve_optional_positive_int(
-        raw_svi.get("tbptt_window_len"),
-        field="training.svi.tbptt_window_len",
+        raw_tbptt.get("window_len"),
+        field="training.tbptt.window_len",
     )
-    burn_in_len = int(raw_svi.get("tbptt_burn_in_len", 0))
+    burn_in_len = int(raw_tbptt.get("burn_in_len", 0))
     if burn_in_len < 0:
-        raise ConfigError("training.svi.tbptt_burn_in_len must be >= 0")
+        raise ConfigError("training.tbptt.burn_in_len must be >= 0")
     if window_len is not None and burn_in_len >= window_len:
         raise ConfigError(
-            "training.svi.tbptt_burn_in_len must be < "
-            "training.svi.tbptt_window_len"
+            "training.tbptt.burn_in_len must be < "
+            "training.tbptt.window_len"
         )
     return _TBPTTParams(window_len=window_len, burn_in_len=burn_in_len)
 
@@ -401,14 +602,14 @@ def _resolve_optional_positive_int(
 
 
 def _resolve_grad_accum_steps(
-    *, raw_svi: Mapping[str, Any], method: str
+    *, raw_svi_shared: Mapping[str, Any], method: str
 ) -> int:
-    grad_accum_steps = int(raw_svi.get("grad_accum_steps", 1))
+    grad_accum_steps = int(raw_svi_shared.get("grad_accum_steps", 1))
     if grad_accum_steps <= 0:
-        raise ConfigError("training.svi.grad_accum_steps must be >= 1")
+        raise ConfigError("training.svi_shared.grad_accum_steps must be >= 1")
     if method == "online_filtering" and grad_accum_steps != 1:
         raise ConfigError(
-            "training.svi.grad_accum_steps must be 1 when "
+            "training.svi_shared.grad_accum_steps must be 1 when "
             "training.method=online_filtering"
         )
     return grad_accum_steps
@@ -499,7 +700,8 @@ def _run_online_filtering_steps(
     batches: list[modeling.ModelBatch],
     params: _TrainingParams,
     context: Mapping[str, Any],
-) -> list[float]:
+    initial_filtering_state: object | None = None,
+) -> tuple[list[float], object | None]:
     start = time.perf_counter()
     if not batches:
         raise SimulationError(
@@ -508,7 +710,9 @@ def _run_online_filtering_steps(
     loss_history: list[float] = []
     update_index = 0
     total_batches = len(batches)
+    current_filtering_state = initial_filtering_state
     for batch_index, batch in enumerate(batches, start=1):
+        batch = _with_filtering_state(batch, current_filtering_state)
         for _ in range(params.online_filtering.steps_per_observation):
             update_index += 1
             loss, params_in_step = _loss_and_params(svi, batch)
@@ -525,7 +729,12 @@ def _run_online_filtering_steps(
                     ),
                     start=start,
                 )
-    return loss_history
+        current_filtering_state = _build_filtering_state(
+            guide=svi.guide,
+            batch=batch,
+            default=current_filtering_state,
+        )
+    return loss_history, current_filtering_state
 
 
 def _online_filtering_context(
@@ -738,27 +947,6 @@ def _safe_stat(
     if finite.numel() == 0:
         return float("nan")
     return float(fn(finite).item())
-
-
-def _snapshot_param_store_state() -> Mapping[str, Any]:
-    return cast(Mapping[str, Any], pyro.get_param_store().get_state())
-
-
-def _restore_param_store_state(state: Mapping[str, Any]) -> None:
-    raw_state = state.get("param_store_state")
-    if raw_state is None:
-        return
-    if not isinstance(raw_state, Mapping):
-        raise SimulationError("param_store_state must be a mapping")
-    pyro.get_param_store().set_state(cast(Any, raw_state))
-
-
-def _reset_param_store(
-    init_state: Mapping[str, Any] | None,
-) -> None:
-    pyro.clear_param_store()
-    if init_state is not None:
-        _restore_param_store_state(init_state)
 
 
 def _fit_bayes_svi_stub(

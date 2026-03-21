@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .hooks_allocation import _allocate_weights, _allocate_weights_stub
 from .hooks_batching import (
     _apply_target_denorm,
     _build_online_filtering_batches,
@@ -21,7 +22,6 @@ from .hooks_batching import (
 )
 from .hooks_inference import (
     _accumulate_svi_grads,
-    _allocate_weights_stub,
     _build_svi,
     _build_training_diagnostics,
     _build_training_state,
@@ -46,7 +46,6 @@ from .hooks_inference import (
     _posterior_predict_stub,
     _predict_pyro,
     _require_mapping,
-    _reset_param_store,
     _resolve_grad_accum_steps,
     _resolve_log_every,
     _resolve_model_and_guide,
@@ -55,17 +54,25 @@ from .hooks_inference import (
     _resolve_steps_per_observation,
     _resolve_tbptt_params,
     _resolve_training_method,
-    _restore_param_store_state,
     _run_context,
     _run_online_filtering_steps,
     _run_svi_steps,
     _safe_stat,
     _score_metrics,
     _score_predictive_stub,
-    _snapshot_param_store_state,
     _summarize_posterior_params,
     _summarize_tensor,
     _training_params,
+)
+from .hooks_state import (
+    _build_filtering_state,
+    _coerce_filtering_state_payload,
+    _export_structural_posterior_means,
+    _reset_param_store,
+    _restore_param_store_state,
+    _serialize_filtering_state,
+    _snapshot_param_store_state,
+    _with_filtering_state,
 )
 from .hooks_types import (
     SimulationHooks,
@@ -86,7 +93,7 @@ def default_hooks() -> SimulationHooks:
         fit_model=_fit_pyro,
         predict=_predict_pyro,
         score=_score_metrics,
-        allocate=_allocate_weights_stub,
+        allocate=_allocate_weights,
         compute_pnl=_compute_weekly_pnl_stub,
     )
 
@@ -113,6 +120,7 @@ __all__ = [
     "_TrainingArtifacts",
     "_TrainingParams",
     "_accumulate_svi_grads",
+    "_allocate_weights",
     "_allocate_weights_stub",
     "_apply_target_denorm",
     "_build_online_filtering_batches",
@@ -148,6 +156,9 @@ __all__ = [
     "_predict_pyro",
     "_prepare_training_batches",
     "_prepare_training_observations",
+    "_build_filtering_state",
+    "_coerce_filtering_state_payload",
+    "_export_structural_posterior_means",
     "_require_mapping",
     "_reset_param_store",
     "_resolve_grad_accum_steps",
@@ -167,6 +178,7 @@ __all__ = [
     "_safe_stat",
     "_score_metrics",
     "_score_predictive_stub",
+    "_serialize_filtering_state",
     "_slice_online_filtering_batches",
     "_slice_tbptt_windows",
     "_snapshot_param_store_state",
@@ -175,6 +187,7 @@ __all__ = [
     "_summarize_tensor",
     "_training_params",
     "_validate_training_inputs",
+    "_with_filtering_state",
     "default_hooks",
     "stub_hooks",
 ]

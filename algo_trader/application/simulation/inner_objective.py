@@ -200,6 +200,13 @@ class SplitBatches:
     y_test: torch.Tensor
 
 
+@dataclass(frozen=True)
+class _OnlineStepInputs:
+    X_step: torch.Tensor
+    X_step_global: torch.Tensor | None
+    y_step: torch.Tensor
+
+
 def _evaluate_split(context: SplitContext) -> SplitResult | None:
     started = time.perf_counter()
     split_config = _split_config(
@@ -215,12 +222,12 @@ def _evaluate_split(context: SplitContext) -> SplitResult | None:
         config=split_config,
         init_state=None,
     )
-    pred = context.resources.hooks.predict(
-        X_pred=batches.X_test,
-        X_pred_global=batches.X_test_global,
-        state=model_state,
+    pred = _predict_validation_horizon(
+        hooks=context.resources.hooks,
+        batches=batches,
         config=split_config,
         num_samples=context.params.num_pp_samples,
+        model_state=model_state,
     )
     pred = _maybe_prepare_energy_score_pred(
         pred=pred,
@@ -240,6 +247,10 @@ def _evaluate_split(context: SplitContext) -> SplitResult | None:
         y_test=batches.y_test,
         model_state=model_state,
     )
+    _maybe_write_postprocess_debug(
+        context=context,
+        model_state=model_state,
+    )
     score = float(
         context.resources.hooks.score(
             y_true=batches.y_test,
@@ -255,6 +266,170 @@ def _evaluate_split(context: SplitContext) -> SplitResult | None:
         n_features_kept=int(batches.cleaning.feature_idx.size),
         elapsed_s=elapsed,
     )
+
+
+def _predict_validation_horizon(
+    *,
+    hooks: SimulationHooks,
+    batches: SplitBatches,
+    config: Mapping[str, Any],
+    num_samples: int,
+    model_state: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if _training_method(config) != "online_filtering":
+        return hooks.predict(
+            X_pred=batches.X_test,
+            X_pred_global=batches.X_test_global,
+            state=model_state,
+            config=config,
+            num_samples=num_samples,
+        )
+    return _predict_validation_sequential(
+        hooks=hooks,
+        batches=batches,
+        config=config,
+        num_samples=num_samples,
+        model_state=model_state,
+    )
+
+
+def _training_method(config: Mapping[str, Any]) -> str:
+    training = config.get("training")
+    if not isinstance(training, Mapping):
+        return "tbptt"
+    method = str(training.get("method", "tbptt")).strip().lower()
+    if method in {"tbptt", "online_filtering"}:
+        return method
+    raise SimulationError("training.method must be tbptt or online_filtering")
+
+
+def _predict_validation_sequential(
+    *,
+    hooks: SimulationHooks,
+    batches: SplitBatches,
+    config: Mapping[str, Any],
+    num_samples: int,
+    model_state: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    state = model_state
+    predictions: list[Mapping[str, Any]] = []
+    for step in range(int(batches.y_test.shape[0])):
+        step_inputs = _online_step_inputs(batches, step)
+        prediction = hooks.predict(
+            X_pred=step_inputs.X_step,
+            X_pred_global=step_inputs.X_step_global,
+            state=state,
+            config=config,
+            num_samples=num_samples,
+        )
+        predictions.append(prediction)
+        state = _maybe_update_online_filter_state(
+            hooks=hooks,
+            state=state,
+            config=config,
+            step_inputs=step_inputs,
+        )
+    return _merge_prediction_steps(predictions)
+
+
+def _slice_time_step(values: torch.Tensor, step: int) -> torch.Tensor:
+    return values[step : step + 1]
+
+
+def _slice_optional_time_step(
+    values: torch.Tensor | None, step: int
+) -> torch.Tensor | None:
+    if values is None:
+        return None
+    return values[step : step + 1]
+
+
+def _online_step_inputs(
+    batches: SplitBatches, step: int
+) -> _OnlineStepInputs:
+    return _OnlineStepInputs(
+        X_step=_slice_time_step(batches.X_test, step),
+        X_step_global=_slice_optional_time_step(batches.X_test_global, step),
+        y_step=_slice_time_step(batches.y_test, step),
+    )
+
+
+def _maybe_update_online_filter_state(
+    *,
+    hooks: SimulationHooks,
+    state: Mapping[str, Any],
+    config: Mapping[str, Any],
+    step_inputs: _OnlineStepInputs,
+) -> Mapping[str, Any]:
+    if not torch.isfinite(step_inputs.y_step).any():
+        return state
+    return hooks.fit_model(
+        X_train=step_inputs.X_step,
+        X_train_global=step_inputs.X_step_global,
+        y_train=step_inputs.y_step,
+        config=config,
+        init_state=state,
+    )
+
+
+def _merge_prediction_steps(
+    predictions: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    if not predictions:
+        raise SimulationError("Sequential validation requires predictions")
+    samples = torch.cat(
+        [_require_prediction_tensor(pred, key="samples") for pred in predictions],
+        dim=1,
+    )
+    mean = torch.cat(
+        [_require_prediction_tensor(pred, key="mean") for pred in predictions],
+        dim=0,
+    )
+    merged: dict[str, Any] = {
+        "samples": samples,
+        "mean": mean,
+    }
+    covariance_steps = _collect_covariance_steps(predictions)
+    if covariance_steps is not None:
+        merged["covariance"] = covariance_steps
+    return merged
+
+
+def _collect_covariance_steps(
+    predictions: Sequence[Mapping[str, Any]],
+) -> torch.Tensor | None:
+    covariances: list[torch.Tensor] = []
+    for pred in predictions:
+        covariance = pred.get("covariance")
+        if covariance is None:
+            return None
+        if not isinstance(covariance, torch.Tensor):
+            raise SimulationError(
+                "Sequential prediction covariance must be a tensor"
+            )
+        covariances.append(_normalize_covariance_step(covariance))
+    return torch.cat(covariances, dim=0)
+
+
+def _normalize_covariance_step(covariance: torch.Tensor) -> torch.Tensor:
+    if covariance.ndim == 2:
+        return covariance.unsqueeze(0)
+    if covariance.ndim != 3 or covariance.shape[0] != 1:
+        raise SimulationError(
+            "Sequential prediction covariance must be [A, A] or [1, A, A]"
+        )
+    return covariance
+
+
+def _require_prediction_tensor(
+    pred: Mapping[str, Any], *, key: str
+) -> torch.Tensor:
+    value = pred.get(key)
+    if not isinstance(value, torch.Tensor):
+        raise SimulationError(
+            f"Sequential prediction output must include tensor {key!r}"
+        )
+    return value
 
 
 def _prepare_split_batches(
@@ -482,6 +657,23 @@ def _maybe_write_postprocess_diagnostics(
     )
 
 
+def _maybe_write_postprocess_debug(
+    *,
+    context: SplitContext,
+    model_state: Mapping[str, Any],
+) -> None:
+    if not context.resources.model_selection.enable:
+        return
+    if context.candidate_id < 0:
+        raise SimulationError("Debug payload requires candidate_id in run_context")
+    context.resources.artifacts.write_postprocess_debug(
+        outer_k=context.params.outer_k,
+        candidate_id=context.candidate_id,
+        split_id=context.split_id,
+        payload=_build_debug_payload(context=context, model_state=model_state),
+    )
+
+
 def _require_samples_tensor(pred: Mapping[str, Any]) -> torch.Tensor:
     samples = pred.get("samples")
     if not isinstance(samples, torch.Tensor):
@@ -506,6 +698,7 @@ def _build_diagnostics_payload(
         "candidate_id": context.candidate_id,
         "split_id": context.split_id,
         "posterior": _posterior_summary_payload(model_state),
+        "state": _state_summary_payload(model_state),
         "training": _training_diagnostics_payload(model_state),
         "predictive": {
             "samples": _sample_stats(samples),
@@ -522,6 +715,42 @@ def _posterior_summary_payload(
     if isinstance(summary, Mapping):
         return dict(summary)
     return {}
+
+
+def _state_summary_payload(
+    model_state: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    return {
+        "filtering_state": _filtering_state_summary(model_state),
+        "structural": _structural_state_summary(model_state),
+    }
+
+
+def _filtering_state_summary(
+    model_state: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    state = model_state.get("filtering_state")
+    if not isinstance(state, Mapping):
+        return {}
+    payload: dict[str, Any] = {"steps_seen": state.get("steps_seen")}
+    for key in ("h_loc", "h_scale"):
+        value = state.get(key)
+        if isinstance(value, torch.Tensor):
+            payload[key] = _value_stats(value.detach().reshape(-1))
+    return payload
+
+
+def _structural_state_summary(
+    model_state: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    structural = model_state.get("structural_posterior_means")
+    if not isinstance(structural, Mapping):
+        return {}
+    payload: dict[str, Any] = {}
+    for key, value in structural.items():
+        if isinstance(value, torch.Tensor):
+            payload[str(key)] = _value_stats(value.detach().reshape(-1))
+    return payload
 
 
 def _training_diagnostics_payload(
@@ -542,6 +771,24 @@ def _training_diagnostics_payload(
     if not cleaned_history:
         return {}
     return {"svi_loss_history": cleaned_history}
+
+
+def _build_debug_payload(
+    *,
+    context: SplitContext,
+    model_state: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    return {
+        "outer_k": context.params.outer_k,
+        "candidate_id": context.candidate_id,
+        "split_id": context.split_id,
+        "filtering_state": model_state.get("filtering_state"),
+        "structural_posterior_means": model_state.get(
+            "structural_posterior_means"
+        ),
+        "posterior_summary": model_state.get("posterior_summary"),
+        "training_diagnostics": model_state.get("training_diagnostics"),
+    }
 
 
 def _sample_stats(samples: torch.Tensor) -> Mapping[str, float]:

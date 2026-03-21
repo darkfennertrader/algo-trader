@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from dataclasses import dataclass
 import inspect
 from typing import Any, Mapping, cast
 
@@ -17,6 +18,16 @@ from .hooks_types import (
 )
 
 _TARGET_NORM_EPS = 1e-6
+
+
+@dataclass(frozen=True)
+class _DebugParticipants:
+    model_name: str
+    guide_name: str
+    predictor_name: str | None
+    model: modeling.PyroModel
+    guide: modeling.PyroGuide
+    predictor: modeling.PyroPredictor | None = None
 
 
 def _prepare_training_batches(
@@ -277,10 +288,7 @@ def _debug_config(config: Mapping[str, Any]) -> _DebugConfig:
 def _configure_debug_sink(
     *,
     debug_config: _DebugConfig,
-    model_name: str,
-    guide_name: str,
-    model: modeling.PyroModel,
-    guide: modeling.PyroGuide,
+    participants: _DebugParticipants,
 ) -> None:
     if not debug_config.enabled or debug_config.output_dir is None:
         return
@@ -291,10 +299,16 @@ def _configure_debug_sink(
         output_dir=debug_config.output_dir,
         metadata=modeling.DebugMetadata(
             run_timestamp=run_timestamp,
-            model_name=model_name,
-            guide_name=guide_name,
-            model_file=_source_path(model),
-            guide_file=_source_path(guide),
+            model_name=participants.model_name,
+            guide_name=participants.guide_name,
+            predictor_name=participants.predictor_name,
+            model_file=_source_path(participants.model),
+            guide_file=_source_path(participants.guide),
+            predictor_file=(
+                _source_path(participants.predictor)
+                if participants.predictor is not None
+                else None
+            ),
         ),
     )
 
@@ -318,7 +332,9 @@ def _resolve_obs_scale(
 
 
 def _build_prediction_batch(
-    X_pred: torch.Tensor, X_pred_global: torch.Tensor | None
+    X_pred: torch.Tensor,
+    X_pred_global: torch.Tensor | None,
+    filtering_state: object | None = None,
 ) -> modeling.ModelBatch:
     if X_pred.ndim != 3:
         raise SimulationError("X_pred must be [T, A, F]")
@@ -334,4 +350,5 @@ def _build_prediction_batch(
         y=None,
         M=None,
         obs_scale=None,
+        filtering_state=filtering_state,
     )

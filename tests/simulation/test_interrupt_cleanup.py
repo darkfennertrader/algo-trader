@@ -21,7 +21,7 @@ def test_cleanup_interrupt_local_ray_and_gpu(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(
         interrupt_cleanup,
         "_clear_cuda_memory",
-        lambda: calls.append("clear_cuda"),
+        lambda **_: calls.append("clear_cuda"),
     )
     monkeypatch.setattr(
         interrupt_cleanup,
@@ -61,7 +61,7 @@ def test_cleanup_interrupt_remote_ray_skips_local_stop(
     monkeypatch.setattr(
         interrupt_cleanup,
         "_clear_cuda_memory",
-        lambda: calls.append("clear_cuda"),
+        lambda **_: calls.append("clear_cuda"),
     )
     monkeypatch.setattr(
         interrupt_cleanup,
@@ -95,7 +95,7 @@ def test_cleanup_before_run_local_ray_and_gpu(
     monkeypatch.setattr(
         interrupt_cleanup,
         "_clear_cuda_memory",
-        lambda: calls.append("clear_cuda"),
+        lambda **_: calls.append("clear_cuda"),
     )
 
     interrupt_cleanup.cleanup_before_simulation_run(
@@ -124,7 +124,7 @@ def test_cleanup_interrupt_fallback_to_force_ray_stop(
         interrupt_cleanup, "_safe_shutdown_ray_runtime", lambda: None
     )
     monkeypatch.setattr(
-        interrupt_cleanup, "_clear_cuda_memory", lambda: None
+        interrupt_cleanup, "_clear_cuda_memory", lambda **_: None
     )
     monkeypatch.setattr(
         interrupt_cleanup,

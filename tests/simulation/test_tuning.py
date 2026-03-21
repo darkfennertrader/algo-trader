@@ -19,14 +19,14 @@ def test_build_candidates_sobol_stratified() -> None:
             transform="none",
         ),
         TuningParamSpec(
-            path="training.svi.learning_rate",
+            path="training.svi_shared.learning_rate",
             param_type="float",
             bounds=(1e-4, 1e-2),
             transform="log10",
             when={"model.params.activation": ("relu",)},
         ),
         TuningParamSpec(
-            path="training.svi.num_steps",
+            path="training.tbptt.num_steps",
             param_type="int",
             bounds=(500, 1500),
             transform="linear",
@@ -37,24 +37,24 @@ def test_build_candidates_sobol_stratified() -> None:
     assert len(candidates) == 8
     for candidate in candidates:
         assert candidate["model.params.activation"] in {"relu", "tanh"}
-        steps = candidate["training.svi.num_steps"]
+        steps = candidate["training.tbptt.num_steps"]
         assert 500 <= steps <= 1500
         assert float(steps).is_integer()
         if candidate["model.params.activation"] == "relu":
-            lr = candidate["training.svi.learning_rate"]
+            lr = candidate["training.svi_shared.learning_rate"]
             assert 1e-4 <= lr <= 1e-2
         else:
-            assert "training.svi.learning_rate" not in candidate
+            assert "training.svi_shared.learning_rate" not in candidate
 
 
 def test_build_candidates_rejects_invalid_when() -> None:
     space = (
         TuningParamSpec(
-            path="training.svi.num_steps",
+            path="training.tbptt.num_steps",
             param_type="categorical",
             values=(500, 1000),
             transform="none",
-            when={"training.svi.learning_rate": (1e-3,)},
+            when={"training.svi_shared.learning_rate": (1e-3,)},
         ),
     )
     with pytest.raises(ConfigError):
@@ -63,16 +63,19 @@ def test_build_candidates_rejects_invalid_when() -> None:
 
 def test_apply_param_updates_dot_paths() -> None:
     base = {
-        "training": {"svi": {"learning_rate": 1e-3, "num_steps": 1000}},
+        "training": {
+            "svi_shared": {"learning_rate": 1e-3},
+            "tbptt": {"num_steps": 1000},
+        },
         "model": {"params": {}},
     }
     merged = apply_param_updates(
         base,
         {
-            "training.svi.learning_rate": 5e-4,
+            "training.svi_shared.learning_rate": 5e-4,
             "model.params.activation": "relu",
         },
     )
-    assert merged["training"]["svi"]["learning_rate"] == 5e-4
-    assert merged["training"]["svi"]["num_steps"] == 1000
+    assert merged["training"]["svi_shared"]["learning_rate"] == 5e-4
+    assert merged["training"]["tbptt"]["num_steps"] == 1000
     assert merged["model"]["params"]["activation"] == "relu"

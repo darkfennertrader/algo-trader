@@ -130,6 +130,9 @@ class FactorModelV1(PyroModel):
     # Hierarchical regression with Student-t likelihood and horseshoe shrinkage.
     priors: FactorModelPriors = field(default_factory=FactorModelPriors)
 
+    def supported_training_methods(self) -> tuple[str, ...]:
+        return ("tbptt", "online_filtering")
+
     def __call__(self, batch: ModelBatch) -> None:
         """Define the Pyro model over a batch.
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import logging
 import os
 from pathlib import Path
@@ -7,6 +8,7 @@ import signal
 from subprocess import CalledProcessError, run
 import time
 
+import pyro
 import torch
 
 from .tune_runner import shutdown_ray_for_tuning
@@ -15,6 +17,8 @@ logger = logging.getLogger(__name__)
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 _STOPPED_SIMULATION_STATE = "T"
 _KILL_WAIT_SECONDS = 0.2
+_RECENT_CUDA_CLEAR_SECONDS = 2.0
+_CUDA_CLEAR_STATE: dict[str, float | None] = {"last": None}
 
 
 def cleanup_before_simulation_run(
@@ -27,7 +31,7 @@ def cleanup_before_simulation_run(
     if use_ray and ray_address is None:
         _stop_local_ray_cluster()
     if use_gpu:
-        _clear_cuda_memory()
+        _clear_cuda_memory(skip_if_recent=True)
 
 
 def cleanup_after_simulation_run(
@@ -173,15 +177,33 @@ def _alive_processes(pids: list[int]) -> list[int]:
     return alive
 
 
-def _clear_cuda_memory() -> None:
+def clear_cuda_memory(*, skip_if_recent: bool = False) -> None:
     if not torch.cuda.is_available():
         return
+    if skip_if_recent and _cuda_cleared_recently():
+        return
+    _release_current_process_cuda_refs()
     device_count = int(torch.cuda.device_count())
     for device_id in range(device_count):
         with torch.cuda.device(device_id):
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
-    logger.info(
-        "Cleared CUDA cache after interruption for %s device(s)",
-        device_count,
-    )
+    _CUDA_CLEAR_STATE["last"] = time.monotonic()
+    logger.info("Cleared CUDA cache for %s device(s)", device_count)
+
+
+def _clear_cuda_memory(*, skip_if_recent: bool = False) -> None:
+    """Backward-compatible private alias for existing tests/call sites."""
+    clear_cuda_memory(skip_if_recent=skip_if_recent)
+
+
+def _cuda_cleared_recently() -> bool:
+    last_clear = _CUDA_CLEAR_STATE["last"]
+    if last_clear is None:
+        return False
+    return (time.monotonic() - last_clear) < _RECENT_CUDA_CLEAR_SECONDS
+
+
+def _release_current_process_cuda_refs() -> None:
+    pyro.clear_param_store()
+    gc.collect()

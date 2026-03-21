@@ -12,8 +12,10 @@ class DebugMetadata:
     run_timestamp: str
     model_name: str
     guide_name: str
+    predictor_name: str | None
     model_file: str | None
     guide_file: str | None
+    predictor_file: str | None
 
 
 @dataclass(frozen=True)
@@ -72,8 +74,10 @@ def _write_debug_header(state: _DebugState) -> None:
         f"run_timestamp: {state.metadata.run_timestamp}",
         f"model_name: {state.metadata.model_name}",
         f"guide_name: {state.metadata.guide_name}",
+        f"predictor_name: {state.metadata.predictor_name}",
         f"model_file: {state.metadata.model_file}",
         f"guide_file: {state.metadata.guide_file}",
+        f"predictor_file: {state.metadata.predictor_file}",
         "",
     ]
     _write_lines(state, lines, overwrite=True)

@@ -1,4 +1,5 @@
 from __future__ import annotations
+# pylint: disable=too-many-lines
 
 from dataclasses import asdict
 from pathlib import Path
@@ -8,7 +9,6 @@ import yaml
 
 from algo_trader.domain import ConfigError
 from algo_trader.domain.simulation import (
-    AllocationConfig,
     CleaningSpec,
     CostConfig,
     CPCVParams,
@@ -36,7 +36,8 @@ from algo_trader.domain.simulation import (
     TrainingConfig,
     TrainingMethod,
     TrainingOnlineFilteringConfig,
-    TrainingSVIConfig,
+    TrainingSVISharedConfig,
+    TrainingTBPTTConfig,
     ModelSelectionBatching,
     ModelSelectionBootstrap,
     ModelSelectionComplexity,
@@ -45,6 +46,7 @@ from algo_trader.domain.simulation import (
     ModelSelectionTail,
     ModelPrebuildConfig,
 )
+from .config_allocation import _build_allocation_config
 from .config_tuning import build_tuning_config
 from .config_utils import coerce_mapping, require_bool, require_string
 
@@ -217,8 +219,10 @@ def _build_model_config(
     extra = set(section) - {
         "model_name",
         "guide_name",
+        "predict_name",
         "params",
         "guide_params",
+        "predict_params",
         "prebuild",
     }
     if extra:
@@ -236,6 +240,11 @@ def _build_model_config(
         field="model.guide_name",
         config_path=config_path,
     )
+    predict_name = _optional_string(
+        section.get("predict_name"),
+        field="model.predict_name",
+        config_path=config_path,
+    )
     params = coerce_mapping(
         section.get("params"),
         field="model.params",
@@ -246,16 +255,34 @@ def _build_model_config(
         field="model.guide_params",
         config_path=config_path,
     )
+    predict_params = coerce_mapping(
+        section.get("predict_params"),
+        field="model.predict_params",
+        config_path=config_path,
+    )
     prebuild = _build_model_prebuild(
         section.get("prebuild"), config_path
     )
     return ModelConfig(
         model_name=model_name,
         guide_name=guide_name,
+        predict_name=predict_name,
         params=params,
         guide_params=guide_params,
+        predict_params=predict_params,
         prebuild=prebuild,
     )
+
+
+def _optional_string(
+    value: object,
+    *,
+    field: str,
+    config_path: Path,
+) -> str | None:
+    if value is None:
+        return None
+    return require_string(value, field=field, config_path=config_path)
 
 
 def _build_model_prebuild(
@@ -299,9 +326,40 @@ def _build_training_config(
     section = raw.get("training")
     if not isinstance(section, Mapping):
         raise ConfigError(f"training must be a mapping in {config_path}")
+    raw_svi_shared, raw_tbptt, raw_online_filtering = (
+        _resolve_training_sections(section, config_path)
+    )
+    method = _normalize_training_method(
+        section.get("method", "tbptt"), config_path
+    )
+    target_norm, log_prob_scaling = _resolve_training_bools(
+        section, config_path
+    )
+    svi_shared, tbptt, online_filtering = _build_training_blocks(
+        raw_svi_shared=raw_svi_shared,
+        raw_tbptt=raw_tbptt,
+        raw_online_filtering=raw_online_filtering,
+        config_path=config_path,
+    )
+    training = TrainingConfig(
+        method=method,
+        svi_shared=svi_shared,
+        tbptt=tbptt,
+        online_filtering=online_filtering,
+        target_normalization=target_norm,
+        log_prob_scaling=log_prob_scaling,
+    )
+    _validate_training_config(training=training, config_path=config_path)
+    return training
+
+
+def _resolve_training_sections(
+    section: Mapping[str, Any], config_path: Path
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
     extra_training = set(section) - {
         "method",
-        "svi",
+        "svi_shared",
+        "tbptt",
         "online_filtering",
         "target_normalization",
         "log_prob_scaling",
@@ -311,39 +369,55 @@ def _build_training_config(
             f"training contains unknown keys in {config_path}",
             context={"keys": ", ".join(sorted(extra_training))},
         )
-    raw_svi = section.get("svi")
-    if not isinstance(raw_svi, Mapping):
-        raise ConfigError(f"training.svi must be a mapping in {config_path}")
-    raw_online_filtering = section.get("online_filtering", {})
-    if raw_online_filtering is None:
-        raw_online_filtering = {}
-    if not isinstance(raw_online_filtering, Mapping):
-        raise ConfigError(
-            f"training.online_filtering must be a mapping in {config_path}"
-        )
-    extra_svi = set(raw_svi) - {
-        "num_steps",
-        "learning_rate",
-        "tbptt_window_len",
-        "tbptt_burn_in_len",
-        "grad_accum_steps",
-        "num_elbo_particles",
-        "log_every",
-    }
-    if extra_svi:
-        raise ConfigError(
-            f"training.svi contains unknown keys in {config_path}",
-            context={"keys": ", ".join(sorted(extra_svi))},
-        )
-    extra_online = set(raw_online_filtering) - {"steps_per_observation"}
-    if extra_online:
-        raise ConfigError(
-            f"training.online_filtering contains unknown keys in {config_path}",
-            context={"keys": ", ".join(sorted(extra_online))},
-        )
-    method = _normalize_training_method(
-        section.get("method", "tbptt"), config_path
+    return (
+        _require_training_mapping(
+            section.get("svi_shared"),
+            field="training.svi_shared",
+            config_path=config_path,
+            allowed_keys={
+                "learning_rate",
+                "grad_accum_steps",
+                "num_elbo_particles",
+                "log_every",
+            },
+        ),
+        _require_training_mapping(
+            section.get("tbptt"),
+            field="training.tbptt",
+            config_path=config_path,
+            allowed_keys={"num_steps", "window_len", "burn_in_len"},
+        ),
+        _require_training_mapping(
+            section.get("online_filtering", {}),
+            field="training.online_filtering",
+            config_path=config_path,
+            allowed_keys={"steps_per_observation"},
+        ),
     )
+
+
+def _require_training_mapping(
+    raw: object,
+    *,
+    field: str,
+    config_path: Path,
+    allowed_keys: set[str],
+) -> Mapping[str, Any]:
+    value = {} if raw is None else raw
+    if not isinstance(value, Mapping):
+        raise ConfigError(f"{field} must be a mapping in {config_path}")
+    extra = set(value) - allowed_keys
+    if extra:
+        raise ConfigError(
+            f"{field} contains unknown keys in {config_path}",
+            context={"keys": ", ".join(sorted(extra))},
+        )
+    return value
+
+
+def _resolve_training_bools(
+    section: Mapping[str, Any], config_path: Path
+) -> tuple[bool, bool]:
     target_norm = require_bool(
         section.get("target_normalization"),
         field="training.target_normalization",
@@ -354,49 +428,87 @@ def _build_training_config(
         field="training.log_prob_scaling",
         config_path=config_path,
     )
+    return target_norm, log_prob_scaling
+
+
+def _build_training_blocks(
+    *,
+    raw_svi_shared: Mapping[str, Any],
+    raw_tbptt: Mapping[str, Any],
+    raw_online_filtering: Mapping[str, Any],
+    config_path: Path,
+) -> tuple[
+    TrainingSVISharedConfig,
+    TrainingTBPTTConfig,
+    TrainingOnlineFilteringConfig,
+]:
     try:
-        svi = TrainingSVIConfig(
-            num_steps=int(raw_svi.get("num_steps", 2_000)),
-            learning_rate=float(raw_svi.get("learning_rate", 1e-3)),
-            tbptt_window_len=(
-                int(raw_svi["tbptt_window_len"])
-                if raw_svi.get("tbptt_window_len") is not None
-                else None
+        return (
+            TrainingSVISharedConfig(
+                learning_rate=float(raw_svi_shared.get("learning_rate", 1e-3)),
+                grad_accum_steps=int(raw_svi_shared.get("grad_accum_steps", 1)),
+                num_elbo_particles=int(
+                    raw_svi_shared.get("num_elbo_particles", 1)
+                ),
+                log_every=(
+                    int(raw_svi_shared["log_every"])
+                    if raw_svi_shared.get("log_every") is not None
+                    else None
+                ),
             ),
-            tbptt_burn_in_len=int(raw_svi.get("tbptt_burn_in_len", 0)),
-            grad_accum_steps=int(raw_svi.get("grad_accum_steps", 1)),
-            num_elbo_particles=int(raw_svi.get("num_elbo_particles", 1)),
-            log_every=(
-                int(raw_svi["log_every"])
-                if raw_svi.get("log_every") is not None
-                else None
+            TrainingTBPTTConfig(
+                num_steps=int(raw_tbptt.get("num_steps", 2_000)),
+                window_len=(
+                    int(raw_tbptt["window_len"])
+                    if raw_tbptt.get("window_len") is not None
+                    else None
+                ),
+                burn_in_len=int(raw_tbptt.get("burn_in_len", 0)),
             ),
-        )
-        online_filtering = TrainingOnlineFilteringConfig(
-            steps_per_observation=int(
-                raw_online_filtering.get("steps_per_observation", 1)
-            )
+            TrainingOnlineFilteringConfig(
+                steps_per_observation=int(
+                    raw_online_filtering.get("steps_per_observation", 1)
+                )
+            ),
         )
     except (TypeError, ValueError) as exc:
         raise ConfigError(
             f"Invalid training configuration in {config_path}",
             context={"section": "training"},
         ) from exc
-    if online_filtering.steps_per_observation <= 0:
+
+
+def _validate_training_config(
+    *,
+    training: TrainingConfig,
+    config_path: Path,
+) -> None:
+    if training.online_filtering.steps_per_observation <= 0:
         raise ConfigError(
             f"training.online_filtering.steps_per_observation must be >= 1 in {config_path}"
         )
-    if method == "online_filtering" and svi.grad_accum_steps != 1:
+    if training.method == "online_filtering" and training.target_normalization:
         raise ConfigError(
-            f"training.svi.grad_accum_steps must be 1 when training.method=online_filtering in {config_path}"
+            f"training.target_normalization must be false when training.method=online_filtering in {config_path}"
         )
-    return TrainingConfig(
-        method=method,
-        svi=svi,
-        online_filtering=online_filtering,
-        target_normalization=target_norm,
-        log_prob_scaling=log_prob_scaling,
-    )
+    if (
+        training.method == "online_filtering"
+        and training.svi_shared.grad_accum_steps != 1
+    ):
+        raise ConfigError(
+            f"training.svi_shared.grad_accum_steps must be 1 when training.method=online_filtering in {config_path}"
+        )
+    if training.tbptt.burn_in_len < 0:
+        raise ConfigError(
+            f"training.tbptt.burn_in_len must be >= 0 in {config_path}"
+        )
+    if (
+        training.tbptt.window_len is not None
+        and training.tbptt.burn_in_len >= training.tbptt.window_len
+    ):
+        raise ConfigError(
+            f"training.tbptt.burn_in_len must be < training.tbptt.window_len in {config_path}"
+        )
 
 
 def _normalize_training_method(
@@ -417,7 +529,7 @@ def _build_evaluation_spec(
 ) -> EvaluationSpec:
     scoring = _build_section(raw, "scoring", ScoringConfig, config_path)
     predictive = _build_section(raw, "predictive", PredictiveConfig, config_path)
-    allocation = _build_section(raw, "allocation", AllocationConfig, config_path)
+    allocation = _build_allocation_config(raw, config_path)
     cost = _build_section(raw, "cost", CostConfig, config_path)
     model_selection = _build_model_selection_config(raw, config_path)
     diagnostics = _build_diagnostics_config(raw, config_path)

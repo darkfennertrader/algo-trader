@@ -14,6 +14,9 @@ from .registry_core import register_model
 
 @dataclass(frozen=True)
 class TestModel(PyroModel):
+    def supported_training_methods(self) -> tuple[str, ...]:
+        return ("tbptt", "online_filtering")
+
     def __call__(self, batch: ModelBatch) -> None:
         shape = resolve_batch_shape(batch)
         zeros = torch.zeros(shape.A, device=shape.device, dtype=shape.dtype)

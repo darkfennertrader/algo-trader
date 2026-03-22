@@ -186,13 +186,7 @@ def test_exogenous_cleaning_command_defaults(monkeypatch: MonkeyPatch) -> None:
 def test_exogenous_feature_engineering_command_with_config(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    answers = iter(
-        [
-            "config/fred_config.yml",
-            "2024-01-15",
-            "2024-01-31",
-        ]
-    )
+    answers = iter(["config/fred_config.yml"])
     monkeypatch.setattr(wizard, "_prompt_optional", lambda label: next(answers))
 
     command = wizard._exogenous_feature_engineering_command()
@@ -203,9 +197,5 @@ def test_exogenous_feature_engineering_command_with_config(
             "exogenous_feature_engineering",
             "--config",
             "config/fred_config.yml",
-            "--start-date",
-            "2024-01-15",
-            "--end-date",
-            "2024-01-31",
         ]
     ]

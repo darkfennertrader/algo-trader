@@ -64,14 +64,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "exogenous_feature_engineering",
         help="Engineer exogenous asset/global features into the feature store.",
     )
-    exogenous_feature_parser.add_argument(
-        "--start-date",
-        help="Optional inclusive start date in YYYY-MM-DD format.",
-    )
-    exogenous_feature_parser.add_argument(
-        "--end-date",
-        help="Optional inclusive end date in YYYY-MM-DD format.",
-    )
 
     subparsers.add_parser(
         "backtest",
@@ -186,11 +178,8 @@ def _run_exogenous_cleaning(
 def _build_exogenous_feature_engineering_request(
     args: argparse.Namespace, config_path: Path | None
 ) -> ExogenousFeatureEngineeringRunRequest:
-    return ExogenousFeatureEngineeringRunRequest(
-        config_path=config_path,
-        start_date=getattr(args, "start_date", None),
-        end_date=getattr(args, "end_date", None),
-    )
+    _ = args
+    return ExogenousFeatureEngineeringRunRequest(config_path=config_path)
 
 
 def _run_exogenous_feature_engineering(

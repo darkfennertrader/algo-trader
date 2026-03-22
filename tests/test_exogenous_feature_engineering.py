@@ -181,21 +181,31 @@ def test_exogenous_feature_engineering_runner_writes_asset_and_global_blocks(
         index_col=0,
         parse_dates=[0],
         header=[0, 1],
+        skip_blank_lines=False,
+        na_values=[""],
     )
     assert list(asset_frame.columns) == [
         ("AUD.CAD", "carry_3m_diff"),
         ("EUR.USD", "carry_3m_diff"),
         ("IBUS500", "carry_3m_diff"),
     ]
-    assert asset_frame[("AUD.CAD", "carry_3m_diff")].tolist() == pytest.approx(
+    assert pd.isna(asset_frame[("AUD.CAD", "carry_3m_diff")].iloc[0])
+    assert asset_frame[("AUD.CAD", "carry_3m_diff")].iloc[1:].tolist() == pytest.approx(
         [0.2, 0.2, 0.2]
     )
-    assert asset_frame[("EUR.USD", "carry_3m_diff")].tolist() == pytest.approx(
+    assert pd.isna(asset_frame[("EUR.USD", "carry_3m_diff")].iloc[0])
+    assert asset_frame[("EUR.USD", "carry_3m_diff")].iloc[1:].tolist() == pytest.approx(
         [-2.0, -1.9, -1.9]
     )
     assert asset_frame[("IBUS500", "carry_3m_diff")].isna().all()
 
-    global_frame = pd.read_csv(output_paths[1], index_col=0, parse_dates=[0])
+    global_frame = pd.read_csv(
+        output_paths[1],
+        index_col=0,
+        parse_dates=[0],
+        skip_blank_lines=False,
+        na_values=[""],
+    )
     assert list(global_frame.columns) == [
         "log_vix_us",
         "log_usd_broad",
@@ -205,12 +215,14 @@ def test_exogenous_feature_engineering_runner_writes_asset_and_global_blocks(
     assert global_frame.index.tolist() == list(
         pd.to_datetime(
             [
+                "2024-01-05 16:00:00+00:00",
                 "2024-01-12 16:00:00+00:00",
                 "2024-01-19 16:00:00+00:00",
                 "2024-01-26 16:00:00+00:00",
             ]
         )
     )
+    assert global_frame.iloc[0].isna().all()
 
     asset_metadata = json.loads(
         (
@@ -234,7 +246,7 @@ def test_exogenous_feature_engineering_runner_writes_asset_and_global_blocks(
     ]
 
 
-def test_exogenous_feature_engineering_runner_applies_date_window(
+def test_exogenous_feature_engineering_runner_uses_full_returns_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config_path = tmp_path / "fred_config.yml"
@@ -315,11 +327,7 @@ def test_exogenous_feature_engineering_runner_applies_date_window(
     monkeypatch.setenv("FEATURE_STORE_SOURCE", str(feature_store))
 
     output_paths = exogenous_feature_engineering_runner.run(
-        request=RunRequest(
-            config_path=config_path,
-            start_date="2024-01-19",
-            end_date="2024-01-26",
-        )
+        request=RunRequest(config_path=config_path)
     )
 
     asset_frame = pd.read_csv(
@@ -327,20 +335,26 @@ def test_exogenous_feature_engineering_runner_applies_date_window(
         index_col=0,
         parse_dates=[0],
         header=[0, 1],
+        skip_blank_lines=False,
+        na_values=[""],
     )
     assert asset_frame.index.tolist() == list(
         pd.to_datetime(
             [
+                "2024-01-05 16:00:00+00:00",
+                "2024-01-12 16:00:00+00:00",
                 "2024-01-19 16:00:00+00:00",
                 "2024-01-26 16:00:00+00:00",
             ]
         )
     )
+    assert asset_frame.iloc[0].isna().all()
+    assert not asset_frame.iloc[1].isna().all()
 
     asset_metadata = json.loads(
         (
             feature_store / "2024-10" / "exogenous" / "asset" / "metadata.json"
         ).read_text(encoding="utf-8")
     )
-    assert asset_metadata["requested_start_date"] == "2024-01-19"
-    assert asset_metadata["requested_end_date"] == "2024-01-26"
+    assert "requested_start_date" not in asset_metadata
+    assert "requested_end_date" not in asset_metadata

@@ -122,7 +122,6 @@ def run(*, request: RunRequest) -> Path:
     )
     cleaned_frame, kept, dropped = _build_cleaned_frame(
         alignments=alignments,
-        config=config,
     )
     outputs = _prepare_output_paths(version_dir, config.cleaning.output)
     writer = _build_output_writer()
@@ -374,84 +373,28 @@ def _first_valid_position(series: pd.Series) -> int | None:
 def _build_cleaned_frame(
     *,
     alignments: Sequence[SeriesAlignmentResult],
-    config: FredRequestConfig,
 ) -> tuple[pd.DataFrame, list[SeriesAlignmentResult], list[SeriesAlignmentResult]]:
-    start_position = _resolve_trim_start(alignments)
-    kept: list[SeriesAlignmentResult] = []
-    dropped: list[SeriesAlignmentResult] = []
-    for alignment in alignments:
-        trimmed = alignment.aligned.iloc[start_position:].copy()
-        updated = replace(
+    kept = [
+        replace(
             alignment,
-            aligned=trimmed,
             stats=replace(
                 alignment.stats,
-                missing_count_trimmed=int(trimmed.isna().sum()),
+                missing_count_trimmed=int(alignment.aligned.isna().sum()),
             ),
         )
-        if updated.config.priority == "core":
-            _validate_core_series(updated, config_path=config.config_path)
-            kept.append(updated)
-            continue
-        if updated.missing_count_trimmed > 0:
-            dropped.append(
-                replace(
-                    updated,
-                    stats=replace(
-                        updated.stats,
-                        drop_reason="missing_after_alignment",
-                    ),
-                )
-            )
-            continue
-        kept.append(updated)
+        for alignment in alignments
+    ]
+    dropped: list[SeriesAlignmentResult] = []
     if not kept:
         raise DataProcessingError(
             "No exogenous features available after cleaning",
-            context={"config_path": str(config.config_path)},
         )
     frame = pd.concat([item.aligned for item in kept], axis=1)
-    if config.cleaning.coverage_policy.require_no_missing_after_cleaning:
-        if frame.isna().any().any():
-            raise DataProcessingError(
-                "Cleaned exogenous frame contains missing values",
-                context={"config_path": str(config.config_path)},
-            )
     if frame.empty:
         raise DataProcessingError(
             "No exogenous features available after cleaning",
-            context={"config_path": str(config.config_path)},
         )
     return frame, kept, dropped
-
-
-def _resolve_trim_start(alignments: Sequence[SeriesAlignmentResult]) -> int:
-    core_positions: list[int] = []
-    for alignment in alignments:
-        if alignment.config.priority != "core":
-            continue
-        if alignment.first_valid_position is None:
-            raise DataProcessingError(
-                "Core exogenous series is unavailable",
-                context={"feature": alignment.feature_name},
-            )
-        core_positions.append(alignment.first_valid_position)
-    if not core_positions:
-        raise DataProcessingError("At least one core exogenous series is required")
-    return max(core_positions)
-
-
-def _validate_core_series(
-    alignment: SeriesAlignmentResult, *, config_path: Path
-) -> None:
-    if alignment.missing_count_trimmed > 0:
-        raise DataProcessingError(
-            "Core exogenous series has missing values after cleaning",
-            context={
-                "config_path": str(config_path),
-                "feature": alignment.feature_name,
-            },
-        )
 
 
 def _prepare_output_paths(
@@ -492,15 +435,18 @@ def _write_tensor(frame: pd.DataFrame, tensor_path: Path) -> None:
         timezone=_OUTPUT_TIMEZONE,
     )
     values = np.array(frame.to_numpy(dtype=float), copy=True)
-    missing_mask = np.isnan(values)
     timestamps = timestamps_to_epoch_hours(index)
-    write_tensor_bundle(
-        tensor_path,
-        values=torch.as_tensor(values, dtype=torch.float64),
-        timestamps=torch.as_tensor(timestamps, dtype=torch.int64),
-        missing_mask=torch.as_tensor(missing_mask, dtype=torch.bool),
-        error_message="Failed to write cleaned exogenous tensor",
-    )
+    payload = {
+        "values": torch.as_tensor(values, dtype=torch.float64),
+        "timestamps": torch.as_tensor(timestamps, dtype=torch.int64),
+    }
+    try:
+        torch.save(payload, tensor_path)
+    except Exception as exc:
+        raise DataProcessingError(
+            "Failed to write cleaned exogenous tensor",
+            context={"path": str(tensor_path)},
+        ) from exc
 
 
 def _build_metadata(

@@ -150,16 +150,6 @@ def _exogenous_feature_engineering_command() -> WizardCommand:
     )
     if config_path:
         args.extend(["--config", config_path])
-    start_date = _prompt_optional(
-        "Start date YYYY-MM-DD (blank for full valid range)"
-    )
-    if start_date:
-        args.extend(["--start-date", start_date])
-    end_date = _prompt_optional(
-        "End date YYYY-MM-DD (blank for full valid range)"
-    )
-    if end_date:
-        args.extend(["--end-date", end_date])
     return WizardCommand(commands=[args])
 
 

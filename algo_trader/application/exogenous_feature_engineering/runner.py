@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -64,8 +63,6 @@ _LOG_LEVEL_FAMILIES = {
 @dataclass(frozen=True)
 class RunRequest:
     config_path: Path | None = None
-    start_date: str | None = None
-    end_date: str | None = None
 
 
 @dataclass(frozen=True)
@@ -109,8 +106,6 @@ class GlobalFeatureBlock:
 def _run_context(request: RunRequest) -> dict[str, str]:
     return {
         "config_path": str(request.config_path or DEFAULT_CONFIG_PATH),
-        "start_date": request.start_date or "",
-        "end_date": request.end_date or "",
     }
 
 
@@ -132,14 +127,9 @@ def run(*, request: RunRequest) -> list[Path]:
             "Failed to read exogenous_cleaned.csv for exogenous_feature_engineering"
         ),
     )
-    date_window = _resolve_date_window(request)
-    common_index = _resolve_common_index(
-        returns_frame.index,
-        exogenous_frame.index,
-        date_window=date_window,
-    )
+    common_index = _resolve_returns_index(returns_frame.index)
     aligned_returns = returns_frame.loc[common_index].copy()
-    aligned_exogenous = exogenous_frame.loc[common_index].copy()
+    aligned_exogenous = exogenous_frame.reindex(common_index).copy()
     asset_block = _build_asset_block(
         config=config,
         returns_frame=aligned_returns,
@@ -159,14 +149,12 @@ def run(*, request: RunRequest) -> list[Path]:
         paths=asset_paths,
         writer=writer,
         sources=sources,
-        request=request,
     )
     _write_global_outputs(
         block=global_block,
         paths=global_paths,
         writer=writer,
         sources=sources,
-        request=request,
     )
     logger.info(
         "Saved exogenous feature outputs asset_path=%s global_path=%s rows=%s",
@@ -213,82 +201,12 @@ def _load_indexed_frame(
     return frame.sort_index()
 
 
-def _resolve_common_index(
-    returns_index: pd.Index,
-    exogenous_index: pd.Index,
-    *,
-    date_window: tuple[date | None, date | None],
-) -> pd.DatetimeIndex:
-    common = returns_index.intersection(exogenous_index)
-    common = _apply_date_window(common, date_window=date_window)
-    if common.empty:
-        raise DataProcessingError(
-            "Returns and cleaned exogenous data do not share any timestamps"
-        )
+def _resolve_returns_index(returns_index: pd.Index) -> pd.DatetimeIndex:
     return require_utc_hourly_index(
-        pd.DatetimeIndex(common),
-        label="exogenous_feature_engineering_common_index",
+        pd.DatetimeIndex(returns_index),
+        label="exogenous_feature_engineering_returns_index",
         timezone=_TENSOR_TIMEZONE,
     )
-
-
-def _resolve_date_window(request: RunRequest) -> tuple[date | None, date | None]:
-    start_date = _parse_optional_date(
-        request.start_date, field_name="start_date"
-    )
-    end_date = _parse_optional_date(request.end_date, field_name="end_date")
-    if start_date is not None and end_date is not None and start_date > end_date:
-        raise ConfigError(
-            "start_date must be <= end_date",
-            context={
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat(),
-            },
-        )
-    return start_date, end_date
-
-
-def _parse_optional_date(
-    value: str | None, *, field_name: str
-) -> date | None:
-    if value is None:
-        return None
-    raw = value.strip()
-    if not raw:
-        return None
-    try:
-        return date.fromisoformat(raw)
-    except ValueError as exc:
-        raise ConfigError(
-            f"{field_name} must be in YYYY-MM-DD format",
-            context={field_name: raw},
-        ) from exc
-
-
-def _apply_date_window(
-    index: pd.Index, *, date_window: tuple[date | None, date | None]
-) -> pd.DatetimeIndex:
-    filtered = pd.DatetimeIndex(index)
-    normalized = filtered.tz_convert(_TENSOR_TIMEZONE).normalize()
-    start_date, end_date = date_window
-    if start_date is not None:
-        start_stamp = pd.Timestamp(start_date, tz=_TENSOR_TIMEZONE)
-        filtered = filtered[normalized >= start_stamp]
-        normalized = normalized[normalized >= start_stamp]
-    if end_date is not None:
-        end_stamp = pd.Timestamp(end_date, tz=_TENSOR_TIMEZONE)
-        filtered = filtered[normalized <= end_stamp]
-    if filtered.empty:
-        context: dict[str, str] = {}
-        if start_date is not None:
-            context["start_date"] = start_date.isoformat()
-        if end_date is not None:
-            context["end_date"] = end_date.isoformat()
-        raise DataProcessingError(
-            "Requested exogenous feature date window is empty",
-            context=context or None,
-        )
-    return filtered
 
 
 def _build_asset_block(
@@ -517,16 +435,14 @@ def _write_asset_outputs(
     paths: ExogenousOutputPaths,
     writer: OutputWriter,
     sources: RunSources,
-    request: RunRequest,
 ) -> None:
-    writer.write_frame(block.frame, paths.base.output_path)
+    _write_feature_frame(block.frame, paths.base.output_path)
     _write_asset_tensor(block, paths.tensor_path)
     writer.write_metadata(
         _asset_metadata(
             block=block,
             paths=paths,
             sources=sources,
-            request=request,
         ),
         paths.base.metadata_path,
     )
@@ -557,12 +473,21 @@ def _write_asset_tensor(block: AssetFeatureBlock, path: Path) -> None:
     )
 
 
+def _write_feature_frame(frame: pd.DataFrame, path: Path) -> None:
+    try:
+        frame.to_csv(path, index=True, index_label="timestamp")
+    except Exception as exc:
+        raise DataProcessingError(
+            "Failed to write exogenous feature CSV",
+            context={"path": str(path)},
+        ) from exc
+
+
 def _asset_metadata(
     *,
     block: AssetFeatureBlock,
     paths: ExogenousOutputPaths,
     sources: RunSources,
-    request: RunRequest,
 ) -> dict[str, object]:
     return {
         "namespace": _FEATURE_NAMESPACE,
@@ -577,8 +502,6 @@ def _asset_metadata(
         "run_at": format_run_at(datetime.now(timezone.utc)),
         "calendar_start": block.frame.index.min().isoformat(),
         "calendar_end": block.frame.index.max().isoformat(),
-        "requested_start_date": request.start_date,
-        "requested_end_date": request.end_date,
         "calendar_source": format_tilde_path(sources.returns_path),
         "source": [
             format_tilde_path(sources.returns_path),
@@ -599,16 +522,14 @@ def _write_global_outputs(
     paths: ExogenousOutputPaths,
     writer: OutputWriter,
     sources: RunSources,
-    request: RunRequest,
 ) -> None:
-    writer.write_frame(block.frame, paths.base.output_path)
+    _write_feature_frame(block.frame, paths.base.output_path)
     _write_global_tensor(block.frame, paths.tensor_path)
     writer.write_metadata(
         _global_metadata(
             block=block,
             paths=paths,
             sources=sources,
-            request=request,
         ),
         paths.base.metadata_path,
     )
@@ -636,7 +557,6 @@ def _global_metadata(
     block: GlobalFeatureBlock,
     paths: ExogenousOutputPaths,
     sources: RunSources,
-    request: RunRequest,
 ) -> dict[str, object]:
     return {
         "namespace": _FEATURE_NAMESPACE,
@@ -649,8 +569,6 @@ def _global_metadata(
         "run_at": format_run_at(datetime.now(timezone.utc)),
         "calendar_start": block.frame.index.min().isoformat(),
         "calendar_end": block.frame.index.max().isoformat(),
-        "requested_start_date": request.start_date,
-        "requested_end_date": request.end_date,
         "calendar_source": format_tilde_path(sources.returns_path),
         "source": [
             format_tilde_path(sources.returns_path),

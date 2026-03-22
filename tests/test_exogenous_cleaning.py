@@ -10,7 +10,6 @@ from algo_trader.application.exogenous_cleaning import (
     RunRequest,
     runner as exogenous_cleaning_runner,
 )
-from algo_trader.domain import DataProcessingError
 
 
 def _write_returns(path: Path, timestamps: list[str]) -> None:
@@ -104,11 +103,16 @@ def test_exogenous_cleaning_runner_writes_aligned_outputs(
     ]
     assert list(output_frame.index) == list(
         pd.to_datetime(
-            ["2024-01-12 16:00:00+00:00", "2024-01-19 16:00:00+00:00"]
+            [
+                "2024-01-05 16:00:00+00:00",
+                "2024-01-12 16:00:00+00:00",
+                "2024-01-19 16:00:00+00:00",
+            ]
         )
     )
-    assert output_frame.iloc[:, 0].tolist() == [15.0, 16.0]
-    assert output_frame.iloc[:, 1].tolist() == [5.0, 5.0]
+    assert output_frame.iloc[:, 0].tolist() == [14.0, 15.0, 16.0]
+    assert pd.isna(output_frame.iloc[0, 1])
+    assert output_frame.iloc[1:, 1].tolist() == [5.0, 5.0]
 
     metadata = json.loads(
         (version_dir / "exogenous" / "exogenous_metadata.json").read_text(
@@ -117,6 +121,7 @@ def test_exogenous_cleaning_runner_writes_aligned_outputs(
     )
     assert metadata["version_label"] == "2024-10"
     assert metadata["features"] == 2
+    assert metadata["dropped_features"] == []
 
 
 def test_exogenous_cleaning_runner_drops_optional_series(
@@ -178,18 +183,20 @@ def test_exogenous_cleaning_runner_drops_optional_series(
     )
 
     output_frame = pd.read_csv(output_path, index_col=0, parse_dates=[0])
-    assert list(output_frame.columns) == ["fred__equity_implied_vol__VIXCLS"]
+    assert list(output_frame.columns) == [
+        "fred__equity_implied_vol__VIXCLS",
+        "fred__rates_implied_vol__MOVE",
+    ]
+    assert output_frame["fred__rates_implied_vol__MOVE"].isna().sum() == 2
     metadata = json.loads(
         (version_dir / "exogenous" / "exogenous_metadata.json").read_text(
             encoding="utf-8"
         )
     )
-    assert len(metadata["dropped_features"]) == 1
-    assert metadata["dropped_features"][0]["series_id"] == "MOVE"
-    assert metadata["dropped_features"][0]["drop_reason"] == "missing_after_alignment"
+    assert metadata["dropped_features"] == []
 
 
-def test_exogenous_cleaning_runner_fails_on_missing_core_series(
+def test_exogenous_cleaning_runner_keeps_missing_core_series(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config_path = tmp_path / "fred_config.yml"
@@ -225,7 +232,8 @@ def test_exogenous_cleaning_runner_fails_on_missing_core_series(
     monkeypatch.setenv("EXOGENOUS_FEATURES_SOURCE", str(raw_root))
     monkeypatch.setenv("DATA_LAKE_SOURCE", str(data_lake))
 
-    with pytest.raises(DataProcessingError, match="Core exogenous series is unavailable"):
-        exogenous_cleaning_runner.run(
-            request=RunRequest(config_path=config_path)
-        )
+    output_path = exogenous_cleaning_runner.run(
+        request=RunRequest(config_path=config_path)
+    )
+    output_frame = pd.read_csv(output_path, index_col=0, parse_dates=[0])
+    assert output_frame["fred__broad_USD_factor__DTWEXBGS"].isna().all()

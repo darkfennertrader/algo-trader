@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, cast
 
 import yaml
 
@@ -860,13 +860,19 @@ def _build_model_selection_complexity(
         raise ConfigError(
             f"model_selection.complexity must be a mapping in {config_path}"
         )
-    method = str(raw_complexity.get("method", "random")).strip().lower()
-    if method != "random":
+    method = str(
+        raw_complexity.get("method", "posterior_l1")
+    ).strip().lower()
+    if method not in {"random", "posterior_l1"}:
         raise ConfigError(
-            f"model_selection.complexity.method must be 'random' in {config_path}"
+            "model_selection.complexity.method must be "
+            f"'random' or 'posterior_l1' in {config_path}"
         )
     seed = int(raw_complexity.get("seed", 123))
-    return ModelSelectionComplexity(method="random", seed=seed)
+    return ModelSelectionComplexity(
+        method=cast(Literal["random", "posterior_l1"], method),
+        seed=seed,
+    )
 
 
 def _build_section(
@@ -961,6 +967,9 @@ def _build_preprocess_spec(
             feature_names=section.get("feature_names"),
             append_mask_as_features=bool(
                 section.get("append_mask_as_features", False)
+            ),
+            append_exogenous_mask_as_features=bool(
+                section.get("append_exogenous_mask_as_features", False)
             ),
         )
         scaling = ScalingSpec(

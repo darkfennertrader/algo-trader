@@ -2,7 +2,7 @@ from __future__ import annotations
 # pylint: disable=duplicate-code
 
 from dataclasses import dataclass, replace
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import torch
@@ -69,7 +69,7 @@ def _flatten_training_slice(
     M: torch.Tensor,
     train_idx: np.ndarray,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    tidx = torch.as_tensor(train_idx, dtype=torch.long, device=X.device)
+    tidx = _index_tensor(train_idx, device=X.device)
     Xtr = X.index_select(dim=0, index=tidx)
     Mtr = M.index_select(dim=0, index=tidx)
     F = X.shape[-1]
@@ -536,8 +536,8 @@ def _select_training_matrix(
     feature_idx: np.ndarray,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = X.device
-    fidx = torch.as_tensor(feature_idx, dtype=torch.long, device=device)
-    tidx = torch.as_tensor(train_idx, dtype=torch.long, device=device)
+    fidx = _index_tensor(feature_idx, device=device)
+    tidx = _index_tensor(train_idx, device=device)
     Xtr = X.index_select(dim=0, index=tidx).reshape(-1, X.shape[-1])[:, fidx]
     Mtr = (
         observed.index_select(dim=0, index=tidx)
@@ -604,14 +604,25 @@ def _select_transform_tensors(
     feature_idx: np.ndarray,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = X.device
-    fidx = torch.as_tensor(feature_idx, dtype=torch.long, device=device)
-    iidx = torch.as_tensor(idx, dtype=torch.long, device=device)
+    fidx = _index_tensor(feature_idx, device=device)
+    iidx = _index_tensor(idx, device=device)
     X_sel = X.index_select(dim=0, index=iidx).index_select(dim=2, index=fidx)
     M_sel = (
         observed.index_select(dim=0, index=iidx)
         .index_select(dim=2, index=fidx)
     )
     return X_sel, M_sel
+
+
+def _index_tensor(
+    indices: np.ndarray, *, device: torch.device
+) -> torch.LongTensor:
+    # CPCV/purge utilities can hand back non-writable NumPy views.
+    writable = np.array(indices, dtype=np.int64, copy=True)
+    return cast(
+        torch.LongTensor,
+        torch.tensor(writable, dtype=torch.long, device=device),
+    )
 
 
 def fit_global_feature_cleaning(
@@ -652,14 +663,17 @@ def transform_global_X(
     state: TransformState,
     validate: bool = False,
 ) -> torch.Tensor:
+    global_state = replace(
+        state,
+        spec=_with_global_feature_options(
+            spec=_with_feature_names(state.spec, inputs.feature_names)
+        ),
+    )
     transformed = transform_X(
         _to_global_panel(inputs.X),
         _to_global_panel(inputs.M),
         idx,
-        replace(
-            state,
-            spec=_with_feature_names(state.spec, inputs.feature_names),
-        ),
+        global_state,
         validate=validate,
     )
     return transformed.squeeze(1)
@@ -681,6 +695,21 @@ def _with_feature_names(
             inputs=replace(
                 spec.scaling.inputs,
                 feature_names=list(feature_names),
+            ),
+        ),
+    )
+
+
+def _with_global_feature_options(spec: PreprocessSpec) -> PreprocessSpec:
+    return replace(
+        spec,
+        scaling=replace(
+            spec.scaling,
+            inputs=replace(
+                spec.scaling.inputs,
+                append_mask_as_features=(
+                    spec.scaling.inputs.append_exogenous_mask_as_features
+                ),
             ),
         ),
     )

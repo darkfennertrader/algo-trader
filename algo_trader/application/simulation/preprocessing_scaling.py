@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import torch
@@ -79,9 +79,7 @@ def _compute_scale_params(
     policy_all = _infer_scale_policy(
         spec.scaling.inputs.feature_names, F=total_features
     )
-    policy_clean = torch.as_tensor(
-        policy_all[feature_idx], dtype=torch.long, device=Xtr.device
-    )
+    policy_clean = _index_tensor(policy_all[feature_idx], device=Xtr.device)
 
     shift = torch.where(policy_clean == 0, med, torch.zeros_like(med))
     scale = torch.where(
@@ -159,10 +157,8 @@ def _select_breakout_training_tensors(
     breakout_pos: np.ndarray,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = X.device
-    tidx = torch.as_tensor(train_idx, dtype=torch.long, device=device)
-    fidx = torch.as_tensor(
-        feature_idx[breakout_pos], dtype=torch.long, device=device
-    )
+    tidx = _index_tensor(train_idx, device=device)
+    fidx = _index_tensor(feature_idx[breakout_pos], device=device)
     Xb = X.index_select(dim=0, index=tidx).index_select(dim=2, index=fidx)
     Mb = observed.index_select(dim=0, index=tidx).index_select(dim=2, index=fidx)
     return Xb, Mb
@@ -200,7 +196,7 @@ def _compute_winsor_params(
     q_low = torch.nanquantile(X_nan, lower_q, dim=0)
     q_high = torch.nanquantile(X_nan, upper_q, dim=0)
     q_low, q_high = _sanitize_winsor_bounds(q_low, q_high)
-    pos = torch.as_tensor(positions, dtype=torch.long, device=Xtr.device)
+    pos = _index_tensor(positions, device=Xtr.device)
     return WinsorState(
         positions=positions,
         lower=q_low.index_select(dim=0, index=pos),
@@ -256,8 +252,8 @@ def _select_guardrail_tensors(
     feature_idx: np.ndarray,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = X.device
-    tidx = torch.as_tensor(train_idx, dtype=torch.long, device=device)
-    fidx = torch.as_tensor(feature_idx, dtype=torch.long, device=device)
+    tidx = _index_tensor(train_idx, device=device)
+    fidx = _index_tensor(feature_idx, device=device)
     Xtr = X.index_select(dim=0, index=tidx).index_select(dim=2, index=fidx)
     Mtr = observed.index_select(dim=0, index=tidx).index_select(dim=2, index=fidx)
     return Xtr, Mtr
@@ -301,7 +297,7 @@ def _apply_breakout_transform(
     if breakout.positions.size == 0:
         return X_scaled
     device = X_sel.device
-    bpos = torch.as_tensor(breakout.positions, dtype=torch.long, device=device)
+    bpos = _index_tensor(breakout.positions, device=device)
     p = breakout.p.to(device=device, dtype=X_sel.dtype)
     denom = breakout.denom.to(device=device, dtype=X_sel.dtype)
     const = breakout.const.to(device=device)
@@ -320,7 +316,7 @@ def _apply_winsorization_2d(
 ) -> torch.Tensor:
     if winsor.positions.size == 0:
         return Xtr
-    pos = torch.as_tensor(winsor.positions, dtype=torch.long, device=Xtr.device)
+    pos = _index_tensor(winsor.positions, device=Xtr.device)
     lower = winsor.lower.to(device=Xtr.device, dtype=Xtr.dtype)
     upper = winsor.upper.to(device=Xtr.device, dtype=Xtr.dtype)
     X_sel = Xtr.index_select(dim=1, index=pos)
@@ -337,7 +333,7 @@ def _apply_winsorization_3d(
 ) -> torch.Tensor:
     if winsor.positions.size == 0:
         return X_sel
-    pos = torch.as_tensor(winsor.positions, dtype=torch.long, device=X_sel.device)
+    pos = _index_tensor(winsor.positions, device=X_sel.device)
     lower = winsor.lower.to(device=X_sel.device, dtype=X_sel.dtype)
     upper = winsor.upper.to(device=X_sel.device, dtype=X_sel.dtype)
     X_feat = X_sel.index_select(dim=2, index=pos)
@@ -356,6 +352,16 @@ def _apply_constant_guardrail(
         return X_scaled
     guard = mask.to(device=X_scaled.device)
     return X_scaled.masked_fill(guard.unsqueeze(0), 0.0)
+
+
+def _index_tensor(
+    indices: np.ndarray, *, device: torch.device
+) -> torch.LongTensor:
+    writable = np.array(indices, dtype=np.int64, copy=True)
+    return cast(
+        torch.LongTensor,
+        torch.tensor(writable, dtype=torch.long, device=device),
+    )
 
 
 def _clip_scaled_features(

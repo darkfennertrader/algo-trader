@@ -14,7 +14,7 @@ def default_model_registry() -> ModelRegistry:
     # Add new model modules here so decorators execute on registry creation.
     from . import test_model  # pylint: disable=import-outside-toplevel
     from .factor import model_l10  # pylint: disable=import-outside-toplevel
-    from .factor import model_v1  # pylint: disable=import-outside-toplevel
+    from .factor import model_l11  # pylint: disable=import-outside-toplevel
 
     return _MODEL_REGISTRY
 
@@ -23,7 +23,7 @@ def default_guide_registry() -> GuideRegistry:
     # Add new guide modules here so decorators execute on registry creation.
     from . import test_guide  # pylint: disable=import-outside-toplevel
     from .factor import guide_l10  # pylint: disable=import-outside-toplevel
-    from .factor import guide_v1  # pylint: disable=import-outside-toplevel
+    from .factor import guide_l11  # pylint: disable=import-outside-toplevel
 
     return _GUIDE_REGISTRY
 
@@ -31,5 +31,6 @@ def default_guide_registry() -> GuideRegistry:
 def default_predictor_registry() -> PredictorRegistry:
     # Add new predictor modules here so decorators execute on registry creation.
     from .factor import predict_l10  # pylint: disable=import-outside-toplevel
+    from .factor import predict_l11  # pylint: disable=import-outside-toplevel
 
     return _PREDICTOR_REGISTRY

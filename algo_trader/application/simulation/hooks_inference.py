@@ -128,6 +128,22 @@ def _config_training_method(config: Mapping[str, Any]) -> str:
     return _resolve_training_method(training.get("method", "tbptt"))
 
 
+def _config_asset_names(
+    config: Mapping[str, Any],
+) -> tuple[str, ...] | None:
+    run_context = config.get("run_context")
+    if not isinstance(run_context, Mapping):
+        return None
+    raw_asset_names = run_context.get("asset_names")
+    if raw_asset_names is None:
+        return None
+    if not isinstance(raw_asset_names, Sequence) or isinstance(
+        raw_asset_names, (str, bytes)
+    ):
+        raise ConfigError("run_context.asset_names must be a sequence")
+    return tuple(str(name) for name in raw_asset_names)
+
+
 def _validate_training_method_support(
     *,
     model_name: str,
@@ -159,6 +175,7 @@ def _fit_pyro(
         X_train=X_train,
         X_train_global=X_train_global,
         y_train=y_train,
+        asset_names=_config_asset_names(config),
     )
     if params.method == "online_filtering":
         return _fit_pyro_online_filtering(
@@ -192,9 +209,7 @@ def _fit_pyro_svi(
     )
     params = params or _training_params(config)
     batches, norm_state = _prepare_training_batches(
-        inputs.X_train,
-        inputs.X_train_global,
-        inputs.y_train,
+        inputs,
         params,
         debug_config.enabled,
     )
@@ -242,9 +257,7 @@ def _fit_pyro_online_filtering(
         ),
     )
     batches, norm_state = _prepare_training_batches(
-        inputs.X_train,
-        inputs.X_train_global,
-        inputs.y_train,
+        inputs,
         params,
         debug_config.enabled,
     )
@@ -351,6 +364,7 @@ def _predict_pyro(
         X_pred,
         X_pred_global,
         filtering_state=_coerce_filtering_state_payload(state),
+        asset_names=_config_asset_names(config),
     )
     request = modeling.PredictiveRequest(
         model=resolved.model,

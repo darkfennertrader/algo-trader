@@ -199,3 +199,15 @@ def test_exogenous_feature_engineering_command_with_config(
             "config/fred_config.yml",
         ]
     ]
+
+
+def test_workflow_menu_options_match_expected_order() -> None:
+    assert wizard._WORKFLOW_MENU_OPTIONS == (
+        ("download: historical", "historical"),
+        ("download: exogenous", "exogenous"),
+        ("tech. feat. cleaning", "data_cleaning"),
+        ("exogenous cleaning", "exogenous_cleaning"),
+        ("tech. feat. engineering", "feature_engineering"),
+        ("exogenous feat. engineering", "exogenous_feature_engineering"),
+        ("simulation", "simulation"),
+    )

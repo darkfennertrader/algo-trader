@@ -50,6 +50,15 @@ PromptKind = Literal["optional", "choice"]
 FeatureSelectionMode = Literal["all", "manual", "random_count"]
 SelectedFeaturesByGroup = dict[str, Sequence[str] | None]
 _SAMPLE_ASSETS: tuple[str, ...] = ("SYN_A", "SYN_B", "SYN_C")
+_WORKFLOW_MENU_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("download: historical", "historical"),
+    ("download: exogenous", "exogenous"),
+    ("tech. feat. cleaning", "data_cleaning"),
+    ("exogenous cleaning", "exogenous_cleaning"),
+    ("tech. feat. engineering", "feature_engineering"),
+    ("exogenous feat. engineering", "exogenous_feature_engineering"),
+    ("simulation", "simulation"),
+)
 
 
 @dataclass(frozen=True)
@@ -70,19 +79,7 @@ class KeyFeatureOption:
 
 def run() -> int:
     print("Algo Trader Wizard")
-    workflow = _prompt_menu(
-        "Select a workflow:",
-        [
-            ("historical", "historical"),
-            ("exogenous", "exogenous"),
-            ("exog. cleaning", "exogenous_cleaning"),
-            ("exog. features", "exogenous_feature_engineering"),
-            ("data_cleaning", "data_cleaning"),
-            ("feat. engineering", "feature_engineering"),
-            ("data_processing", "data_processing"),
-            ("simulation", "simulation"),
-        ],
-    )
+    workflow = _prompt_menu("Select a workflow:", _WORKFLOW_MENU_OPTIONS)
     command = _build_workflow_command(workflow)
 
     print("\nGenerated command:")

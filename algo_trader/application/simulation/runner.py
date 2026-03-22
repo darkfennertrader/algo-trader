@@ -1058,6 +1058,7 @@ def _build_inner_objective(
             X_global=outer_context.context.X_global,
             M_global=outer_context.context.M_global,
             global_feature_names=outer_context.context.global_feature_names,
+            assets=outer_context.context.assets,
             y=outer_context.context.y,
         ),
         artifacts=outer_context.artifacts,

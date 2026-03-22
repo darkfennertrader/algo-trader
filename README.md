@@ -139,16 +139,15 @@ Output locations (by pipeline stage, see `docs/workflows.md` for full detail):
 - Config: `config/fred_config.yml` (or pass `--config` with `algotrader exogenous_cleaning`).
 - Env: `DATA_LAKE_SOURCE`, `EXOGENOUS_FEATURES_SOURCE`.
 - Output: `DATA_LAKE_SOURCE/YYYY-WW/exogenous/` with `exogenous_cleaned.csv`, `exogenous_metadata.json`, `exogenous_tensor.pt`.
-- Behavior: selects the latest `YYYY-WW`, aligns cleaned exogenous series to the returns calendar, trims to the common valid core start, and writes a no-missing cleaned exogenous package.
+- Behavior: selects the latest `YYYY-WW`, uses the saved `returns.csv` index as the master weekly window, aligns cleaned exogenous series to that full returns window, preserves `NaN`s inside it, and writes a cleaned exogenous package for later feature engineering.
 
 **Exogenous feature engineering**
 - Config: `config/fred_config.yml` (or pass `--config` with `algotrader exogenous_feature_engineering`).
 - Env: `DATA_LAKE_SOURCE`, `FEATURE_STORE_SOURCE`.
-- Optional args: `--start-date YYYY-MM-DD`, `--end-date YYYY-MM-DD`.
 - Output:
   - `FEATURE_STORE_SOURCE/YYYY-WW/exogenous/asset/`
   - `FEATURE_STORE_SOURCE/YYYY-WW/exogenous/global/`
-- Behavior: selects the latest `YYYY-WW`, reads `returns.csv` plus `exogenous/exogenous_cleaned.csv`, intersects their timestamps, optionally subsets that valid common range by `start-date`/`end-date`, and writes engineered but unnormalized exogenous feature blocks for later SVI use.
+- Behavior: selects the latest `YYYY-WW`, reads `returns.csv` plus `exogenous/exogenous_cleaned.csv`, uses the full returns index as the master window, preserves rows made unavailable by lags/rolling transforms as `NaN`, and writes engineered but unnormalized exogenous feature blocks for later SVI use.
 
 **Modeling/Inference**
 - Env: `FEATURE_STORE_SOURCE` (input), `MODEL_STORE_SOURCE` (outputs).
@@ -183,6 +182,7 @@ Output locations (by pipeline stage, see `docs/workflows.md` for full detail):
 - `preprocessing.max_abs_fail`: fail-fast threshold for max abs scaled value (train only).
 - `preprocessing.impute_missing_to_zero`: impute missing after scaling if true.
 - `preprocessing.append_mask_as_features`: append missing mask as extra feature channels if true.
+- `preprocessing.append_exogenous_mask_as_features`: append the global exogenous missing mask as extra `X_global` channels if true.
 
 **Simulation Prebuild**
 Use `model.prebuild` to compute data-driven defaults before the tuning phase. The prebuild hook only sees the train-only slice that is safe across all outer folds.
@@ -262,11 +262,21 @@ Examples:
 
 ## CLI
 - Wizard (interactive command builder): `uv run algotrader wizard`
+  - Workflow menu order is:
+    1. `download: historical`
+    2. `download: exogenous`
+    3. `tech. feat. cleaning`
+    4. `exogenous cleaning`
+    5. `tech. feat. engineering`
+    6. `exogenous feat. engineering`
+    7. `simulation`
   - Feature engineering wizard supports `all`, `manual`, or `random_count` feature selection.
   - `random_count` selects an exact number of concrete output features (optional seed) based on current groups/horizons, then prints standard `feature_engineering --group ... --feature ...` commands.
 - Default pipeline (placeholder): `uv run algotrader`
 - Historical download: `uv run algotrader historical`
 - Exogenous download (FRED): `uv run algotrader exogenous --config config/fred_config.yml`
+- Exogenous cleaning: `uv run algotrader exogenous_cleaning --config config/fred_config.yml`
+- Exogenous feature engineering: `uv run algotrader exogenous_feature_engineering --config config/fred_config.yml`
 - Data cleaning: `uv run algotrader data_cleaning --start YYYY-MM --end YYYY-MM --return-type simple --assets EUR.USD,IBUS30`
 - Data processing: `uv run algotrader data_processing` (defaults to `identity`; add `--preprocessor <name>` to override)
 - Feature engineering: `uv run algotrader feature_engineering`
@@ -308,6 +318,7 @@ Data cleaning return options:
 ## Feature engineering
 
 See `docs/feature_engineering.md` for feature groups and definitions.
+See `docs/exogenous_feature_engineering.md` for exogenous asset/global feature blocks.
 
 ## Preprocessors
 

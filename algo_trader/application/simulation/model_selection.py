@@ -9,7 +9,11 @@ import numpy as np
 import torch
 
 from algo_trader.domain import SimulationError
-from algo_trader.domain.simulation import CandidateSpec, ModelSelectionConfig
+from algo_trader.domain.simulation import (
+    CandidateSpec,
+    ModelSelectionComplexity,
+    ModelSelectionConfig,
+)
 from .artifacts import SimulationArtifacts
 from .metrics.inner import energy_score_terms
 
@@ -76,17 +80,24 @@ def select_best_candidate_post_tune(
         model_selection=context.model_selection,
         device=device,
     )
+    complexity = _complexity_scores_post_tune(
+        base_dir=context.artifacts.base_dir,
+        outer_k=context.outer_k,
+        candidates=context.candidates,
+        model_selection=context.model_selection,
+    )
     selection = _select_final_candidate(
         es_metrics=es_metrics,
         crps_metrics=crps_metrics,
         ql_metrics=ql_metrics,
-        candidates=context.candidates,
         model_selection=context.model_selection,
+        complexity=complexity,
     )
     metrics_payload = _build_metrics_payload(
         es_metrics=es_metrics,
         crps_metrics=crps_metrics,
         ql_metrics=ql_metrics,
+        complexity=complexity,
     )
     context.artifacts.write_postprocess_metrics(
         outer_k=context.outer_k, metrics=metrics_payload
@@ -108,20 +119,21 @@ def select_best_candidate_global(
         base_dir=context.artifacts.base_dir,
         outer_ids=context.outer_ids,
     )
-    es_metrics, crps_metrics, ql_metrics = _aggregate_global_metrics(
+    es_metrics, crps_metrics, ql_metrics, complexity = _aggregate_global_metrics(
         outer_metrics
     )
     selection = _select_final_candidate(
         es_metrics=es_metrics,
         crps_metrics=crps_metrics,
         ql_metrics=ql_metrics,
-        candidates=context.candidates,
         model_selection=context.model_selection,
+        complexity=complexity,
     )
     metrics_payload = _build_metrics_payload(
         es_metrics=es_metrics,
         crps_metrics=crps_metrics,
         ql_metrics=ql_metrics,
+        complexity=complexity,
     )
     context.artifacts.write_global_metrics(payload=metrics_payload)
     context.artifacts.write_global_selection(payload=selection)
@@ -592,13 +604,12 @@ def _select_final_candidate(
     es_metrics: Mapping[int, Mapping[str, float]],
     crps_metrics: Mapping[int, float],
     ql_metrics: Mapping[int, float],
-    candidates: Sequence[CandidateSpec],
     model_selection: ModelSelectionConfig,
+    complexity: Mapping[int, float],
 ) -> Mapping[str, Any]:
     survivors = _select_es_survivors(es_metrics, model_selection)
     secondary = _secondary_scores(survivors, crps_metrics, ql_metrics)
     survivors2 = _secondary_survivors(secondary)
-    complexity = _complexity_scores(candidates, model_selection)
     best_id = _pick_best_by_complexity(
         survivors2, complexity, es_metrics
     )
@@ -671,14 +682,21 @@ def _rank_values(
 
 
 def _complexity_scores(
+    *,
+    values_by_candidate: Mapping[int, Sequence[float]],
     candidates: Sequence[CandidateSpec],
-    model_selection: ModelSelectionConfig,
+    method: ModelSelectionComplexity,
 ) -> Mapping[int, float]:
-    rng = np.random.default_rng(model_selection.complexity.seed)
-    return {
-        int(candidate.candidate_id): float(rng.random())
-        for candidate in candidates
-    }
+    if method.method == "random":
+        rng = np.random.default_rng(method.seed)
+        return {
+            int(candidate.candidate_id): float(rng.random())
+            for candidate in candidates
+        }
+    return _posterior_l1_complexity(
+        values_by_candidate=values_by_candidate,
+        candidates=candidates,
+    )
 
 
 def _build_metrics_payload(
@@ -686,6 +704,7 @@ def _build_metrics_payload(
     es_metrics: Mapping[int, Mapping[str, float]],
     crps_metrics: Mapping[int, float],
     ql_metrics: Mapping[int, float],
+    complexity: Mapping[int, float],
 ) -> Mapping[str, Any]:
     payload: dict[str, Any] = {}
     for candidate_id, values in es_metrics.items():
@@ -694,6 +713,9 @@ def _build_metrics_payload(
             "se_es": float(values["se_es"]),
             "crps_model": float(crps_metrics.get(candidate_id, float("nan"))),
             "ql_model": float(ql_metrics.get(candidate_id, float("nan"))),
+            "complexity": float(
+                complexity.get(candidate_id, float("nan"))
+            ),
         }
     return payload
 
@@ -741,23 +763,127 @@ def _aggregate_global_metrics(
     Mapping[int, Mapping[str, float]],
     Mapping[int, float],
     Mapping[int, float],
+    Mapping[int, float],
 ]:
     candidate_ids = _collect_candidate_ids(metrics_list)
     es_metrics: dict[int, Mapping[str, float]] = {}
     crps_metrics: dict[int, float] = {}
     ql_metrics: dict[int, float] = {}
+    complexity_metrics: dict[int, float] = {}
     for candidate_id in candidate_ids:
         es_vals = _collect_metric(metrics_list, candidate_id, "es_model")
         se_vals = _collect_metric(metrics_list, candidate_id, "se_es")
         crps_vals = _collect_metric(metrics_list, candidate_id, "crps_model")
         ql_vals = _collect_metric(metrics_list, candidate_id, "ql_model")
+        complexity_vals = _collect_metric(
+            metrics_list, candidate_id, "complexity"
+        )
         es_metrics[candidate_id] = {
             "es_model": _median_or_nan(es_vals),
             "se_es": _median_or_nan(se_vals),
         }
         crps_metrics[candidate_id] = _median_or_nan(crps_vals)
         ql_metrics[candidate_id] = _median_or_nan(ql_vals)
-    return es_metrics, crps_metrics, ql_metrics
+        complexity_metrics[candidate_id] = _median_or_nan(complexity_vals)
+    return es_metrics, crps_metrics, ql_metrics, complexity_metrics
+
+
+def _complexity_scores_post_tune(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    candidates: Sequence[CandidateSpec],
+    model_selection: ModelSelectionConfig,
+) -> Mapping[int, float]:
+    values_by_candidate = {
+        int(candidate.candidate_id): _load_complexity_values(
+            base_dir=base_dir,
+            outer_k=outer_k,
+            candidate_id=int(candidate.candidate_id),
+        )
+        for candidate in candidates
+    }
+    return _complexity_scores(
+        values_by_candidate=values_by_candidate,
+        candidates=candidates,
+        method=model_selection.complexity,
+    )
+
+
+def _load_complexity_values(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    candidate_id: int,
+) -> tuple[float, ...]:
+    pattern = (
+        base_dir
+        / "inner"
+        / f"outer_{outer_k}"
+        / "postprocessing"
+        / "debug"
+    )
+    paths = sorted(
+        pattern.glob(f"candidate_{candidate_id:04d}_split_*_state.pt")
+    )
+    values: list[float] = []
+    for path in paths:
+        values.append(_load_complexity_value(path))
+    return tuple(values)
+
+
+def _load_complexity_value(path: Path) -> float:
+    payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, Mapping):
+        return float("inf")
+    structural = payload.get("structural_posterior_means")
+    if not isinstance(structural, Mapping):
+        return float("inf")
+    tensors = _structural_complexity_tensors(structural)
+    if not tensors:
+        return float("inf")
+    total_abs = 0.0
+    total_numel = 0
+    for tensor in tensors:
+        total_abs += float(tensor.abs().sum().item())
+        total_numel += int(tensor.numel())
+    if total_numel <= 0:
+        return float("inf")
+    return total_abs / float(total_numel)
+
+
+def _structural_complexity_tensors(
+    structural: Mapping[str, Any],
+) -> list[torch.Tensor]:
+    excluded = {"alpha", "sigma_idio", "s_u_mean"}
+    tensors: list[torch.Tensor] = []
+    for key, value in structural.items():
+        if key in excluded or not isinstance(value, torch.Tensor):
+            continue
+        if value.numel() <= 0:
+            continue
+        tensors.append(value.detach().reshape(-1))
+    return tensors
+
+
+def _posterior_l1_complexity(
+    *,
+    values_by_candidate: Mapping[int, Sequence[float]],
+    candidates: Sequence[CandidateSpec],
+) -> Mapping[int, float]:
+    scores: dict[int, float] = {}
+    for candidate in candidates:
+        candidate_id = int(candidate.candidate_id)
+        values = [
+            float(value)
+            for value in values_by_candidate.get(candidate_id, ())
+            if np.isfinite(value)
+        ]
+        if values:
+            scores[candidate_id] = float(np.median(values))
+        else:
+            scores[candidate_id] = float("inf")
+    return scores
 
 
 def _collect_candidate_ids(

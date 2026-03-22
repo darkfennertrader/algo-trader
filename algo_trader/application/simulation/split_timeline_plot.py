@@ -8,6 +8,7 @@ import numpy as np
 from algo_trader.domain.simulation import CPCVSplit
 
 from .index_ranges import indices_to_ranges
+from .plotting_backend import require_pyplot
 
 
 _ROW_HEIGHT = 0.8
@@ -41,9 +42,7 @@ def write_splits_timeline_plot(
 
 
 def _require_matplotlib():
-    import matplotlib.pyplot as plt  # pylint: disable=import-outside-toplevel
-
-    return plt
+    return require_pyplot()
 
 
 def _draw_split_rows(axis, splits: Sequence[CPCVSplit]) -> None:

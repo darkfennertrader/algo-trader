@@ -151,6 +151,7 @@ class ScalingInputSpec:
     impute_missing_to_zero: bool = True
     feature_names: list[str] | None = None
     append_mask_as_features: bool = False
+    append_exogenous_mask_as_features: bool = False
 
 
 @dataclass(frozen=True)
@@ -300,7 +301,7 @@ class ModelSelectionBatching:
 
 @dataclass(frozen=True)
 class ModelSelectionComplexity:
-    method: Literal["random"] = "random"
+    method: Literal["random", "posterior_l1"] = "posterior_l1"
     seed: int = 123
 
 

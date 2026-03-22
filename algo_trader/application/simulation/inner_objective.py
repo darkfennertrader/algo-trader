@@ -38,6 +38,7 @@ class InnerObjectiveData:
     X_global: torch.Tensor | None
     M_global: torch.Tensor | None
     global_feature_names: Sequence[str]
+    assets: Sequence[str]
     y: torch.Tensor
 
 
@@ -210,7 +211,10 @@ class _OnlineStepInputs:
 def _evaluate_split(context: SplitContext) -> SplitResult | None:
     started = time.perf_counter()
     split_config = _split_config(
-        context.config, context.params.outer_k, context.split_id
+        context.config,
+        context.params.outer_k,
+        context.split_id,
+        context.data.assets,
     )
     batches = _prepare_split_batches(context)
     if batches is None:
@@ -482,9 +486,8 @@ def _prepare_split_batches(
 
 
 def _select_targets(y: torch.Tensor, indices: np.ndarray) -> torch.Tensor:
-    return y[
-        torch.as_tensor(indices, dtype=torch.long, device=y.device)
-    ]
+    safe_indices = np.array(indices, dtype=np.int64, copy=True)
+    return y[torch.tensor(safe_indices, dtype=torch.long, device=y.device)]
 
 
 def _prepare_global_batches(
@@ -549,6 +552,7 @@ def _split_config(
     config: Mapping[str, Any],
     outer_k: int,
     split_id: int,
+    asset_names: Sequence[str],
 ) -> Mapping[str, Any]:
     run_context = config.get("run_context")
     if isinstance(run_context, Mapping):
@@ -557,6 +561,7 @@ def _split_config(
         merged_context = {}
     merged_context["outer_k"] = outer_k
     merged_context["split_id"] = split_id
+    merged_context["asset_names"] = list(asset_names)
     return {
         **config,
         "run_context": merged_context,

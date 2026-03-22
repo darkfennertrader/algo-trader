@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from algo_trader.domain import SimulationError
+from .plotting_backend import require_pyplot_and_seaborn
 
 
 @dataclass(frozen=True)
@@ -157,11 +158,4 @@ def coverage_level_tag(level: float) -> str:
 
 
 def _require_plotting():
-    try:
-        import matplotlib.pyplot as plt  # pylint: disable=import-outside-toplevel
-        import seaborn as sns  # pylint: disable=import-outside-toplevel
-    except ImportError as exc:  # pragma: no cover
-        raise SimulationError(
-            "Plotting dependencies missing for calibration diagnostics"
-        ) from exc
-    return plt, sns
+    return require_pyplot_and_seaborn()

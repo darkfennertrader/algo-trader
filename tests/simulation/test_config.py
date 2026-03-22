@@ -46,6 +46,35 @@ def test_build_model_config_parses_optional_predictor() -> None:
     assert dict(model.predict_params) == {}
 
 
+def test_build_preprocess_config_parses_exogenous_mask_flag() -> None:
+    spec = simulation_config._build_preprocess_spec(  # pylint: disable=protected-access
+        {
+            "preprocessing": {
+                "append_mask_as_features": False,
+                "append_exogenous_mask_as_features": True,
+            }
+        },
+        Path("simulation.yml"),
+    )
+
+    assert not spec.scaling.inputs.append_mask_as_features
+    assert spec.scaling.inputs.append_exogenous_mask_as_features
+
+
+def test_build_model_selection_complexity_parses_posterior_l1() -> None:
+    selection = simulation_config._build_model_selection_config(  # pylint: disable=protected-access
+        {
+            "model_selection": {
+                "complexity": {"method": "posterior_l1", "seed": 7}
+            }
+        },
+        Path("simulation.yml"),
+    )
+
+    assert selection.complexity.method == "posterior_l1"
+    assert selection.complexity.seed == 7
+
+
 def test_build_training_config_rejects_online_filtering_target_norm() -> None:
     with pytest.raises(ConfigError):
         simulation_config._build_training_config(  # pylint: disable=protected-access

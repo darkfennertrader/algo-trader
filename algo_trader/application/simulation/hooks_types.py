@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import torch
 
@@ -45,6 +45,7 @@ class _TBPTTInputs:
     y_obs: torch.Tensor
     valid_mask: torch.BoolTensor
     window_len: int
+    asset_names: Sequence[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,7 @@ class _FitInputs:
     X_train: torch.Tensor
     X_train_global: torch.Tensor | None
     y_train: torch.Tensor
+    asset_names: Sequence[str] | None = None
 
 
 @dataclass(frozen=True)

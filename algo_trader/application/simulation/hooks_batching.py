@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from dataclasses import dataclass
 import inspect
-from typing import Any, Mapping, cast
+from typing import Any, Mapping, Sequence, cast
 
 import torch
 
@@ -12,6 +12,7 @@ from algo_trader.pipeline.stages import modeling
 
 from .hooks_types import (
     _DebugConfig,
+    _FitInputs,
     _TBPTTInputs,
     _TargetNormState,
     _TrainingParams,
@@ -31,30 +32,30 @@ class _DebugParticipants:
 
 
 def _prepare_training_batches(
-    X_train: torch.Tensor,
-    X_train_global: torch.Tensor | None,
-    y_train: torch.Tensor,
+    inputs: _FitInputs,
     params: _TrainingParams,
     debug_log_shapes: bool,
 ) -> tuple[list[modeling.ModelBatch], _TargetNormState | None]:
     y_train_norm, norm_state = _maybe_normalize_targets(
-        y_train, params.target_normalization
+        inputs.y_train, params.target_normalization
+    )
+    training_inputs = _FitInputs(
+        X_train=inputs.X_train,
+        X_train_global=inputs.X_train_global,
+        y_train=y_train_norm,
+        asset_names=inputs.asset_names,
     )
     if params.method == "online_filtering":
         batches = _build_online_filtering_batches(
-            X_train,
-            y_train_norm,
+            training_inputs,
             params,
             debug_log_shapes,
-            X_train_global=X_train_global,
         )
     else:
         batches = _build_tbptt_batches(
-            X_train,
-            y_train_norm,
+            training_inputs,
             params,
             debug_log_shapes,
-            X_train_global=X_train_global,
         )
     if not batches:
         raise SimulationError("No valid targets for training")
@@ -106,42 +107,40 @@ def _apply_target_denorm(
 
 
 def _build_tbptt_batches(
-    X_train: torch.Tensor,
-    y_train: torch.Tensor,
+    fit_inputs: _FitInputs,
     params: _TrainingParams,
     debug_log_shapes: bool = False,
-    *,
-    X_train_global: torch.Tensor | None = None,
 ) -> list[modeling.ModelBatch]:
-    _validate_training_inputs(X_train, X_train_global, y_train)
-    inputs = _prepare_training_observations(
-        X_train, X_train_global, y_train, params
+    _validate_training_inputs(
+        fit_inputs.X_train, fit_inputs.X_train_global, fit_inputs.y_train
     )
-    if not inputs.valid_mask.any():
+    training_inputs = _prepare_training_observations(
+        fit_inputs, params
+    )
+    if not training_inputs.valid_mask.any():
         return []
     return _slice_tbptt_windows(
-        inputs=inputs,
+        inputs=training_inputs,
         params=params,
         debug_log_shapes=debug_log_shapes,
     )
 
 
 def _build_online_filtering_batches(
-    X_train: torch.Tensor,
-    y_train: torch.Tensor,
+    fit_inputs: _FitInputs,
     params: _TrainingParams,
     debug_log_shapes: bool = False,
-    *,
-    X_train_global: torch.Tensor | None = None,
 ) -> list[modeling.ModelBatch]:
-    _validate_training_inputs(X_train, X_train_global, y_train)
-    inputs = _prepare_training_observations(
-        X_train, X_train_global, y_train, params
+    _validate_training_inputs(
+        fit_inputs.X_train, fit_inputs.X_train_global, fit_inputs.y_train
     )
-    if not inputs.valid_mask.any():
+    training_inputs = _prepare_training_observations(
+        fit_inputs, params
+    )
+    if not training_inputs.valid_mask.any():
         return []
     return _slice_online_filtering_batches(
-        inputs=inputs,
+        inputs=training_inputs,
         log_prob_scaling=params.log_prob_scaling,
         debug_log_shapes=debug_log_shapes,
     )
@@ -177,28 +176,27 @@ def _resolve_window_len(
 
 
 def _prepare_training_observations(
-    X_train: torch.Tensor,
-    X_train_global: torch.Tensor | None,
-    y_train: torch.Tensor,
+    inputs: _FitInputs,
     params: _TrainingParams,
 ) -> _TBPTTInputs:
-    valid_mask = cast(torch.BoolTensor, torch.isfinite(y_train))
-    X_asset_obs = X_train.to(dtype=torch.float32)
+    valid_mask = cast(torch.BoolTensor, torch.isfinite(inputs.y_train))
+    X_asset_obs = inputs.X_train.to(dtype=torch.float32)
     X_global_obs = (
         None
-        if X_train_global is None
-        else X_train_global.to(dtype=torch.float32)
+        if inputs.X_train_global is None
+        else inputs.X_train_global.to(dtype=torch.float32)
     )
     y_obs = torch.nan_to_num(
-        y_train, nan=0.0, posinf=0.0, neginf=0.0
+        inputs.y_train, nan=0.0, posinf=0.0, neginf=0.0
     ).to(dtype=torch.float32)
-    window_len = _resolve_window_len(y_train, params)
+    window_len = _resolve_window_len(inputs.y_train, params)
     return _TBPTTInputs(
         X_asset_obs=X_asset_obs,
         X_global_obs=X_global_obs,
         y_obs=y_obs,
         valid_mask=valid_mask,
         window_len=window_len,
+        asset_names=inputs.asset_names,
     )
 
 
@@ -270,6 +268,7 @@ def _build_training_batch(
         y=inputs.y_obs[span],
         M=mask,
         obs_scale=_resolve_obs_scale(mask, log_prob_scaling),
+        asset_names=inputs.asset_names,
         debug=debug_log_shapes,
     )
 
@@ -335,6 +334,7 @@ def _build_prediction_batch(
     X_pred: torch.Tensor,
     X_pred_global: torch.Tensor | None,
     filtering_state: object | None = None,
+    asset_names: Sequence[str] | None = None,
 ) -> modeling.ModelBatch:
     if X_pred.ndim != 3:
         raise SimulationError("X_pred must be [T, A, F]")
@@ -351,4 +351,5 @@ def _build_prediction_batch(
         M=None,
         obs_scale=None,
         filtering_state=filtering_state,
+        asset_names=asset_names,
     )

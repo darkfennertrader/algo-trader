@@ -65,6 +65,16 @@ class TrialCheckpointState:
     split_scores: tuple[float, ...]
 
 
+@dataclass(frozen=True)
+class _PreparedTrialRun:
+    candidate_id: int
+    fingerprint: str
+    merged_config: Mapping[str, Any]
+    checkpoint_state: TrialCheckpointState | None
+    start_split_id: int
+    prior_scores: list[float]
+
+
 def select_best_with_ray(context: RayTuneContext) -> Mapping[str, Any]:
     if not context.spec.candidates:
         raise ConfigError("No candidates available for Ray Tune")
@@ -295,57 +305,84 @@ def _write_checkpoint_state(
         tune.report({"score": float(score)}, checkpoint=checkpoint)
 
 
+def _prepare_trial_run(
+    *,
+    config: Mapping[str, Any],
+    base_config: Mapping[str, Any],
+    tune: Any,
+) -> _PreparedTrialRun:
+    candidate = _require_candidate_payload(config)
+    candidate_id = int(candidate["candidate_id"])
+    candidate_params = candidate["params"]
+    merged_config = apply_param_updates(base_config, candidate_params)
+    merged_config = with_candidate_context(merged_config, candidate_id)
+    fingerprint = _candidate_fingerprint(candidate_params)
+    checkpoint_state = _load_checkpoint_state(
+        tune.get_checkpoint(), candidate_id, fingerprint
+    )
+    return _PreparedTrialRun(
+        candidate_id=candidate_id,
+        fingerprint=fingerprint,
+        merged_config=merged_config,
+        checkpoint_state=checkpoint_state,
+        start_split_id=_resolve_start_split_id(checkpoint_state),
+        prior_scores=_resolve_prior_scores(checkpoint_state),
+    )
+
+
+def _train_candidate(
+    config: Mapping[str, Any],
+    *,
+    base_config: Mapping[str, Any],
+    inner_context: InnerObjectiveContext,
+    hooks: SimulationHooks,
+) -> None:
+    _, tune = _import_tune()
+    prepared = _prepare_trial_run(
+        config=config,
+        base_config=base_config,
+        tune=tune,
+    )
+    _maybe_report_bootstrap_checkpoint(
+        tune=tune,
+        state=prepared.checkpoint_state,
+        candidate_id=prepared.candidate_id,
+        fingerprint=prepared.fingerprint,
+    )
+
+    def on_split(split_id: int, scores: list[float]) -> None:
+        aggregate = _aggregate_for_context(scores, inner_context)
+        state = TrialCheckpointState(
+            candidate_id=prepared.candidate_id,
+            candidate_fingerprint=prepared.fingerprint,
+            last_completed_split_id=split_id,
+            split_scores=tuple(scores),
+        )
+        _write_checkpoint_state(tune, state, aggregate)
+
+    request = SplitEvaluationRequest(
+        context=inner_context,
+        hooks=hooks,
+        config=prepared.merged_config,
+        candidate_id=prepared.candidate_id,
+    )
+    resume = SplitEvaluationResume(
+        start_split_id=prepared.start_split_id,
+        prior_scores=prepared.prior_scores,
+        on_split=on_split,
+    )
+    fold_scores = evaluate_inner_splits(request, resume=resume)
+    score = _aggregate_for_context(fold_scores, inner_context)
+    tune.report({"score": score})
+
+
 def _build_trainable(context: RayTuneContext, tune: Any):
-    def trainable(config: Mapping[str, Any]) -> None:
-        candidate = _require_candidate_payload(config)
-        candidate_id = int(candidate["candidate_id"])
-        candidate_params = candidate["params"]
-        merged = apply_param_updates(
-            context.spec.base_config, candidate_params
-        )
-        merged = with_candidate_context(merged, candidate_id)
-        fingerprint = _candidate_fingerprint(candidate_params)
-        checkpoint_state = _load_checkpoint_state(
-            tune.get_checkpoint(), candidate_id, fingerprint
-        )
-        start_split_id = _resolve_start_split_id(checkpoint_state)
-        prior_scores = _resolve_prior_scores(checkpoint_state)
-        _maybe_report_bootstrap_checkpoint(
-            tune=tune,
-            state=checkpoint_state,
-            candidate_id=candidate_id,
-            fingerprint=fingerprint,
-        )
-
-        def on_split(split_id: int, scores: list[float]) -> None:
-            aggregate = _aggregate_for_context(
-                scores, context.inputs.inner_context
-            )
-            state = TrialCheckpointState(
-                candidate_id=candidate_id,
-                candidate_fingerprint=fingerprint,
-                last_completed_split_id=split_id,
-                split_scores=tuple(scores),
-            )
-            _write_checkpoint_state(tune, state, aggregate)
-
-        request = SplitEvaluationRequest(
-            context=context.inputs.inner_context,
-            hooks=context.inputs.hooks,
-            config=merged,
-            candidate_id=candidate_id,
-        )
-        resume = SplitEvaluationResume(
-            start_split_id=start_split_id,
-            prior_scores=prior_scores,
-            on_split=on_split,
-        )
-        fold_scores = evaluate_inner_splits(request, resume=resume)
-        score = _aggregate_for_context(
-            fold_scores, context.inputs.inner_context
-        )
-        tune.report({"score": score})
-
+    trainable = tune.with_parameters(
+        _train_candidate,
+        base_config=context.spec.base_config,
+        inner_context=context.inputs.inner_context,
+        hooks=context.inputs.hooks,
+    )
     return _with_resources(
         trainable=trainable,
         resources=context.spec.resources,

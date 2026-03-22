@@ -144,6 +144,9 @@ def _evaluate_week(
     state: Mapping[str, Any] | None,
     w_prev: torch.Tensor | None,
 ) -> tuple[Mapping[str, Any] | None, torch.Tensor, torch.Tensor]:
+    config = _with_asset_names(
+        loop_context.best_config, loop_context.eval_context.assets
+    )
     train_idx_t = _expanding_train(
         loop_context.base_train, loop_context.test_weeks, current_t
     )
@@ -164,7 +167,7 @@ def _evaluate_week(
         X_train=X_train_t,
         X_train_global=X_train_global_t,
         y_train=y_train_t,
-        config=loop_context.best_config,
+        config=config,
         init_state=state,
     )
 
@@ -172,7 +175,7 @@ def _evaluate_week(
         X_pred=X_pred_t,
         X_pred_global=X_pred_global_t,
         state=state,
-        config=loop_context.best_config,
+        config=config,
         num_samples=loop_context.eval_context.num_pp_samples,
     )
 
@@ -191,6 +194,21 @@ def _evaluate_week(
     )
 
     return state, w, pnl_t
+
+
+def _with_asset_names(
+    config: Mapping[str, Any], asset_names: Sequence[str]
+) -> Mapping[str, Any]:
+    run_context = config.get("run_context")
+    if isinstance(run_context, Mapping):
+        merged_context = dict(run_context)
+    else:
+        merged_context = {}
+    merged_context["asset_names"] = list(asset_names)
+    return {
+        **config,
+        "run_context": merged_context,
+    }
 
 
 def _prepare_batches(
@@ -222,7 +240,11 @@ def _prepare_batches(
         eval_context.X, eval_context.M, train_idx, state_t, validate=True
     )
     y_train_t = eval_context.y[
-        torch.as_tensor(train_idx, dtype=torch.long, device=eval_context.y.device)
+        torch.tensor(
+            np.array(train_idx, dtype=np.int64, copy=True),
+            dtype=torch.long,
+            device=eval_context.y.device,
+        )
     ]
     X_pred_t = transform_X(
         eval_context.X,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping, Protocol, Sequence
 
 import torch
 
@@ -16,6 +16,7 @@ class ModelBatch:
     M: torch.BoolTensor | None = None
     obs_scale: float | None = None
     filtering_state: object | None = None
+    asset_names: Sequence[str] | None = None
     debug: bool = False
 
     def __post_init__(self) -> None:

@@ -12,6 +12,7 @@ from algo_trader.domain import SimulationError
 from algo_trader.domain.simulation import FanChartsConfig
 from algo_trader.infrastructure import ensure_directory
 from . import calibration_summary_diagnostics as calibration_diags
+from .plotting_backend import require_pyplot_and_seaborn
 
 @dataclass(frozen=True)
 class FanChartDiagnosticsContext:
@@ -862,14 +863,7 @@ def _compute_coverage_band(
 
 
 def _require_plotting():
-    try:
-        import matplotlib.pyplot as plt  # pylint: disable=import-outside-toplevel
-        import seaborn as sns  # pylint: disable=import-outside-toplevel
-    except ImportError as exc:
-        raise SimulationError(
-            "Diagnostics require matplotlib and seaborn"
-        ) from exc
-    return plt, sns
+    return require_pyplot_and_seaborn()
 
 
 def _match_quantile_key(

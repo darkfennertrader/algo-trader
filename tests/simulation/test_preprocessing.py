@@ -2,9 +2,13 @@ import numpy as np
 import torch
 
 from algo_trader.application.simulation.preprocessing import (
+    GlobalBlockInputs,
     TransformState,
     fit_feature_cleaning,
+    fit_global_feature_cleaning,
+    fit_global_robust_scaler,
     fit_robust_scaler,
+    transform_global_X,
     transform_X,
 )
 from algo_trader.domain.simulation import (
@@ -222,4 +226,67 @@ def test_winsorization_clips_before_scaling() -> None:
     )
     assert torch.allclose(
         transformed[:, 0, 0], torch.zeros(4, dtype=torch.float64)
+    )
+
+
+def test_transform_global_appends_only_exogenous_mask_when_enabled() -> None:
+    X = torch.tensor(
+        [
+            [1.0, 10.0],
+            [2.0, 12.0],
+        ],
+        dtype=torch.float64,
+    )
+    M = torch.tensor(
+        [
+            [False, True],
+            [False, False],
+        ]
+    )
+    spec = PreprocessSpec(
+        cleaning=CleaningSpec(
+            min_usable_ratio=0.0,
+            min_variance=0.0,
+            max_abs_corr=0.99,
+            corr_subsample=None,
+        ),
+        scaling=ScalingSpec(
+            mad_eps=1e-12,
+            inputs=ScalingInputSpec(
+                impute_missing_to_zero=True,
+                append_mask_as_features=False,
+                append_exogenous_mask_as_features=True,
+            ),
+        ),
+    )
+    inputs = GlobalBlockInputs(
+        X=X,
+        M=M,
+        feature_names=["global::a", "global::b"],
+    )
+    cleaning = fit_global_feature_cleaning(
+        inputs=inputs,
+        train_idx=np.array([0, 1]),
+        spec=spec,
+    )
+    scaler = fit_global_robust_scaler(
+        inputs=inputs,
+        train_idx=np.array([0, 1]),
+        cleaning=cleaning,
+        spec=spec,
+    )
+    transformed = transform_global_X(
+        inputs,
+        idx=np.array([0, 1]),
+        state=TransformState(cleaning=cleaning, scaler=scaler, spec=spec),
+    )
+    assert transformed.shape == (2, 4)
+    assert torch.equal(
+        transformed[:, 2:].to(dtype=torch.bool),
+        torch.tensor(
+            [
+                [True, False],
+                [True, True],
+            ]
+        ),
     )

@@ -37,7 +37,12 @@ def test_build_tbptt_batches_masks_burn_in_and_invalid_targets() -> None:
     )
 
     batches = hooks._build_tbptt_batches(  # pylint: disable=protected-access
-        X_train, y_train, params
+        hooks._FitInputs(  # pylint: disable=protected-access
+            X_train=X_train,
+            X_train_global=None,
+            y_train=y_train,
+        ),
+        params,
     )
 
     assert len(batches) == 2
@@ -83,7 +88,12 @@ def test_build_online_filtering_batches_preserves_time_order() -> None:
     )
 
     batches = hooks._build_online_filtering_batches(  # pylint: disable=protected-access
-        X_train, y_train, params
+        hooks._FitInputs(  # pylint: disable=protected-access
+            X_train=X_train,
+            X_train_global=None,
+            y_train=y_train,
+        ),
+        params,
     )
 
     assert len(batches) == 3

@@ -75,6 +75,29 @@ def test_build_model_selection_complexity_parses_posterior_l1() -> None:
     assert selection.complexity.seed == 7
 
 
+def test_build_model_selection_calibration_parses_custom_values() -> None:
+    selection = simulation_config._build_model_selection_config(  # pylint: disable=protected-access
+        {
+            "model_selection": {
+                "calibration": {
+                    "top_k": 2,
+                    "coverage_levels": [0.5, 0.8, 0.95],
+                    "mean_abs_weight": 2.0,
+                    "max_abs_weight": 3.0,
+                    "pit_weight": 4.0,
+                }
+            }
+        },
+        Path("simulation.yml"),
+    )
+
+    assert selection.calibration.top_k == 2
+    assert selection.calibration.coverage_levels == (0.5, 0.8, 0.95)
+    assert selection.calibration.mean_abs_weight == 2.0
+    assert selection.calibration.max_abs_weight == 3.0
+    assert selection.calibration.pit_weight == 4.0
+
+
 def test_build_training_config_rejects_online_filtering_target_norm() -> None:
     with pytest.raises(ConfigError):
         simulation_config._build_training_config(  # pylint: disable=protected-access

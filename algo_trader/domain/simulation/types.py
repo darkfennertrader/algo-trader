@@ -294,6 +294,15 @@ class ModelSelectionTail:
 
 
 @dataclass(frozen=True)
+class ModelSelectionCalibration:
+    top_k: int = 3
+    coverage_levels: tuple[float, ...] = (0.5, 0.9, 0.95)
+    mean_abs_weight: float = 1.0
+    max_abs_weight: float = 1.0
+    pit_weight: float = 1.0
+
+
+@dataclass(frozen=True)
 class ModelSelectionBatching:
     candidates: int = 1
     splits: int = 1
@@ -335,9 +344,13 @@ class DiagnosticsConfig:
 
 
 @dataclass(frozen=True)
+# pylint: disable=too-many-instance-attributes
 class ModelSelectionConfig:
     enable: bool = False
     phase_name: str = "post_tune_model_selection"
+    calibration: ModelSelectionCalibration = field(
+        default_factory=ModelSelectionCalibration
+    )
     es_band: ModelSelectionESBand = field(
         default_factory=ModelSelectionESBand
     )

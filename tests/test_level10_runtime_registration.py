@@ -324,3 +324,27 @@ def test_v2_l5_runtime_guide_accepts_prediction_batch() -> None:
 
     pyro.clear_param_store()
     poutine.trace(guide).get_trace(predict_batch)
+
+
+def test_v2_l6_runtime_registry_builds_model_and_guide() -> None:
+    model = modeling.default_model_registry().get(
+        "fx_currency_factor_model_v2_l6_online_filtering"
+    )
+    guide = modeling.default_guide_registry().get(
+        "fx_currency_factor_guide_v2_l6_online_filtering"
+    )
+    train_batch = _runtime_batch_fx(with_targets=True)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(train_batch)
+    poutine.trace(model).get_trace(train_batch)
+
+
+def test_v2_l6_runtime_guide_accepts_prediction_batch() -> None:
+    guide = modeling.default_guide_registry().get(
+        "fx_currency_factor_guide_v2_l6_online_filtering"
+    )
+    predict_batch = _runtime_batch_fx(with_targets=False)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(predict_batch)

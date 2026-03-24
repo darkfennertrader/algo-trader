@@ -6,9 +6,12 @@ import torch
 
 from algo_trader.application.simulation.model_selection import (
     _complexity_scores_post_tune,
+    FinalSelectionInputs,
+    _select_final_candidate,
 )
 from algo_trader.domain.simulation import (
     CandidateSpec,
+    ModelSelectionCalibration,
     ModelSelectionComplexity,
     ModelSelectionConfig,
 )
@@ -57,3 +60,38 @@ def _write_debug_payload(path: Path, *, weight_scale: float) -> None:
         }
     }
     torch.save(payload, path)
+
+
+def test_select_final_candidate_prefers_more_calibrated_survivor() -> None:
+    selection = _select_final_candidate(
+        inputs=FinalSelectionInputs(
+            es_metrics={
+                0: {"es_model": 1.0, "se_es": 0.1},
+                1: {"es_model": 1.05, "se_es": 0.1},
+            },
+            calibration_metrics={
+                0: {
+                    "calibration_score": 0.50,
+                    "mean_abs_coverage_error": 0.30,
+                    "max_abs_coverage_error": 0.40,
+                    "pit_uniform_rmse": 0.08,
+                },
+                1: {
+                    "calibration_score": 0.12,
+                    "mean_abs_coverage_error": 0.08,
+                    "max_abs_coverage_error": 0.15,
+                    "pit_uniform_rmse": 0.03,
+                },
+            },
+            crps_metrics={1: 1.0},
+            ql_metrics={1: 1.0},
+            complexity={0: 0.1, 1: 0.2},
+        ),
+        model_selection=ModelSelectionConfig(
+            calibration=ModelSelectionCalibration(top_k=1)
+        ),
+    )
+
+    assert selection["best_candidate_id"] == 1
+    assert selection["survivors_calibration"] == [1]
+    assert selection["survivors_es"] == [1]

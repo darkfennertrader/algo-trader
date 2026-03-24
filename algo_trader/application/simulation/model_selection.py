@@ -1,4 +1,5 @@
 from __future__ import annotations
+# pylint: disable=too-many-lines
 
 from dataclasses import dataclass
 import json
@@ -15,6 +16,7 @@ from algo_trader.domain.simulation import (
     ModelSelectionConfig,
 )
 from .artifacts import SimulationArtifacts
+from . import calibration_summary_diagnostics as calibration_diags
 from .metrics.inner import energy_score_terms
 
 
@@ -59,6 +61,31 @@ class SecondaryAccumulators:
     ql_count: torch.Tensor
 
 
+@dataclass
+class CalibrationAccumulators:
+    coverage_sum: dict[float, torch.Tensor]
+    coverage_count: dict[float, torch.Tensor]
+    pit_sum: torch.Tensor
+    pit_count: torch.Tensor
+
+
+@dataclass(frozen=True)
+class FinalSelectionInputs:
+    es_metrics: Mapping[int, Mapping[str, float]]
+    calibration_metrics: Mapping[int, Mapping[str, float]]
+    crps_metrics: Mapping[int, float]
+    ql_metrics: Mapping[int, float]
+    complexity: Mapping[int, float]
+
+
+@dataclass(frozen=True)
+class CoverageErrorSummary:
+    coverage_by_level: Mapping[float, float]
+    abs_error_by_level: Mapping[float, float]
+    mean_error: float
+    max_error: float
+
+
 def select_best_candidate_post_tune(
     context: PostTuneSelectionContext,
 ) -> PostTuneSelectionResult:
@@ -70,8 +97,20 @@ def select_best_candidate_post_tune(
         model_selection=context.model_selection,
         device=device,
     )
+    calibration_metrics = _compute_calibration_metrics(
+        base_dir=context.artifacts.base_dir,
+        outer_k=context.outer_k,
+        candidates=context.candidates,
+        model_selection=context.model_selection,
+        device=device,
+    )
+    calibration_survivors = _select_calibration_survivors(
+        calibration_metrics, context.model_selection
+    )
     survivors = _select_es_survivors(
-        es_metrics, context.model_selection
+        es_metrics,
+        context.model_selection,
+        candidate_ids=calibration_survivors,
     )
     crps_metrics, ql_metrics = _compute_secondary_metrics(
         base_dir=context.artifacts.base_dir,
@@ -87,14 +126,18 @@ def select_best_candidate_post_tune(
         model_selection=context.model_selection,
     )
     selection = _select_final_candidate(
-        es_metrics=es_metrics,
-        crps_metrics=crps_metrics,
-        ql_metrics=ql_metrics,
+        inputs=FinalSelectionInputs(
+            es_metrics=es_metrics,
+            calibration_metrics=calibration_metrics,
+            crps_metrics=crps_metrics,
+            ql_metrics=ql_metrics,
+            complexity=complexity,
+        ),
         model_selection=context.model_selection,
-        complexity=complexity,
     )
     metrics_payload = _build_metrics_payload(
         es_metrics=es_metrics,
+        calibration_metrics=calibration_metrics,
         crps_metrics=crps_metrics,
         ql_metrics=ql_metrics,
         complexity=complexity,
@@ -119,18 +162,22 @@ def select_best_candidate_global(
         base_dir=context.artifacts.base_dir,
         outer_ids=context.outer_ids,
     )
-    es_metrics, crps_metrics, ql_metrics, complexity = _aggregate_global_metrics(
-        outer_metrics
+    es_metrics, calibration_metrics, crps_metrics, ql_metrics, complexity = (
+        _aggregate_global_metrics(outer_metrics)
     )
     selection = _select_final_candidate(
-        es_metrics=es_metrics,
-        crps_metrics=crps_metrics,
-        ql_metrics=ql_metrics,
+        inputs=FinalSelectionInputs(
+            es_metrics=es_metrics,
+            calibration_metrics=calibration_metrics,
+            crps_metrics=crps_metrics,
+            ql_metrics=ql_metrics,
+            complexity=complexity,
+        ),
         model_selection=context.model_selection,
-        complexity=complexity,
     )
     metrics_payload = _build_metrics_payload(
         es_metrics=es_metrics,
+        calibration_metrics=calibration_metrics,
         crps_metrics=crps_metrics,
         ql_metrics=ql_metrics,
         complexity=complexity,
@@ -205,6 +252,28 @@ def _compute_secondary_metrics(
     return crps, ql
 
 
+def _compute_calibration_metrics(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    candidates: Sequence[CandidateSpec],
+    model_selection: ModelSelectionConfig,
+    device: torch.device,
+) -> Mapping[int, Mapping[str, float]]:
+    metrics: dict[int, Mapping[str, float]] = {}
+    batch_size = max(1, int(model_selection.batching.candidates))
+    for batch in _iter_candidate_batches(candidates, batch_size):
+        for candidate in batch:
+            metrics[int(candidate.candidate_id)] = _evaluate_calibration_for_candidate(
+                base_dir=base_dir,
+                outer_k=outer_k,
+                candidate_id=int(candidate.candidate_id),
+                model_selection=model_selection,
+                device=device,
+            )
+    return metrics
+
+
 def _iter_candidate_batches(
     candidates: Sequence[CandidateSpec], batch_size: int
 ) -> Sequence[Sequence[CandidateSpec]]:
@@ -270,6 +339,32 @@ def _evaluate_secondary_for_candidate(
     crps_model = _median_over_assets(crps_group)
     ql_model = _median_over_assets(ql_group)
     return crps_model, ql_model
+
+
+def _evaluate_calibration_for_candidate(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    candidate_id: int,
+    model_selection: ModelSelectionConfig,
+    device: torch.device,
+) -> Mapping[str, float]:
+    payloads = _load_candidate_payloads(
+        base_dir=base_dir,
+        outer_k=outer_k,
+        candidate_id=candidate_id,
+    )
+    coverage_group, pit_group = _aggregate_calibration_groups(
+        payloads=payloads,
+        coverage_levels=model_selection.calibration.coverage_levels,
+        device=device,
+        batch_splits=int(model_selection.batching.splits),
+    )
+    return _summarize_calibration_metrics(
+        coverage_group=coverage_group,
+        pit_group=pit_group,
+        model_selection=model_selection,
+    )
 
 
 def _load_candidate_payloads(
@@ -348,6 +443,38 @@ def _aggregate_secondary_groups(
         accumulators.ql_sum, accumulators.ql_count
     )
     return crps_group, ql_group
+
+
+def _aggregate_calibration_groups(
+    *,
+    payloads: Sequence[Mapping[str, Any]],
+    coverage_levels: Sequence[float],
+    device: torch.device,
+    batch_splits: int,
+) -> tuple[Mapping[float, torch.Tensor], torch.Tensor]:
+    accumulators, group_count = _init_calibration_accumulators(
+        payloads=payloads,
+        coverage_levels=coverage_levels,
+        device=device,
+    )
+    for batch in _iter_payload_batches(payloads, batch_splits):
+        for payload in batch:
+            _update_calibration_accumulators(
+                accumulators=accumulators,
+                payload=payload,
+                coverage_levels=coverage_levels,
+                device=device,
+                group_count=group_count,
+            )
+    coverage_group = {
+        level: _safe_divide(
+            accumulators.coverage_sum[level],
+            accumulators.coverage_count[level],
+        )
+        for level in coverage_levels
+    }
+    pit_group = _safe_divide(accumulators.pit_sum, accumulators.pit_count)
+    return coverage_group, pit_group
 
 
 def _prepare_u_payload(
@@ -454,6 +581,39 @@ def _init_secondary_accumulators(
     )
 
 
+def _init_calibration_accumulators(
+    *,
+    payloads: Sequence[Mapping[str, Any]],
+    coverage_levels: Sequence[float],
+    device: torch.device,
+) -> tuple[CalibrationAccumulators, int]:
+    group_count = _infer_group_count(payloads)
+    dtype = _infer_payload_dtype(payloads)
+    return (
+        CalibrationAccumulators(
+            coverage_sum={
+                float(level): torch.zeros(
+                    group_count,
+                    device=device,
+                    dtype=dtype,
+                )
+                for level in coverage_levels
+            },
+            coverage_count={
+                float(level): torch.zeros(
+                    group_count,
+                    device=device,
+                    dtype=dtype,
+                )
+                for level in coverage_levels
+            },
+            pit_sum=torch.zeros(group_count, device=device, dtype=dtype),
+            pit_count=torch.zeros(group_count, device=device, dtype=dtype),
+        ),
+        group_count,
+    )
+
+
 def _update_secondary_accumulators(
     accumulators: SecondaryAccumulators,
     payload: Mapping[str, Any],
@@ -484,6 +644,44 @@ def _update_secondary_accumulators(
     )
 
 
+def _update_calibration_accumulators(
+    *,
+    accumulators: CalibrationAccumulators,
+    payload: Mapping[str, Any],
+    coverage_levels: Sequence[float],
+    device: torch.device,
+    group_count: int,
+) -> None:
+    z_true, z_samples, group_ids = _prepare_z_payload(payload, device)
+    pit_values = _compute_pit_values(z_true=z_true, z_samples=z_samples)
+    pit_group, pit_present = _group_pit_rmse(
+        pit_values=pit_values,
+        group_ids=group_ids,
+        group_count=group_count,
+    )
+    accumulators.pit_sum[pit_present] = (
+        accumulators.pit_sum[pit_present] + pit_group[pit_present]
+    )
+    accumulators.pit_count[pit_present] = (
+        accumulators.pit_count[pit_present] + 1
+    )
+    for level in coverage_levels:
+        coverage_group, coverage_present = _coverage_group_values(
+            z_true=z_true,
+            z_samples=z_samples,
+            group_ids=group_ids,
+            group_count=group_count,
+            level=float(level),
+        )
+        accumulators.coverage_sum[level][coverage_present] = (
+            accumulators.coverage_sum[level][coverage_present]
+            + coverage_group[coverage_present]
+        )
+        accumulators.coverage_count[level][coverage_present] = (
+            accumulators.coverage_count[level][coverage_present] + 1
+        )
+
+
 def _crps_weekly(
     z_true: torch.Tensor, z_samples: torch.Tensor
 ) -> torch.Tensor:
@@ -500,6 +698,112 @@ def _quantile_loss_weekly(
     error = z_true - q_hat
     indicator = (error < 0).to(error.dtype)
     return (alpha - indicator) * error
+
+
+def _coverage_group_values(
+    *,
+    z_true: torch.Tensor,
+    z_samples: torch.Tensor,
+    group_ids: torch.Tensor,
+    group_count: int,
+    level: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    lower_q, upper_q = _coverage_quantile_bounds(
+        z_samples=z_samples,
+        level=level,
+    )
+    valid = (
+        torch.isfinite(z_true)
+        & torch.isfinite(lower_q)
+        & torch.isfinite(upper_q)
+    )
+    indicator = (
+        (z_true >= lower_q) & (z_true <= upper_q) & valid
+    ).to(z_true.dtype)
+    row_count = valid.to(z_true.dtype).sum(dim=1)
+    row_mean = _safe_divide(indicator.sum(dim=1), row_count)
+    return _group_scalar_mean(
+        values=row_mean,
+        group_ids=group_ids,
+        group_count=group_count,
+    )
+
+
+def _coverage_quantile_bounds(
+    *,
+    z_samples: torch.Tensor,
+    level: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    alpha = (1.0 - float(level)) / 2.0
+    lower_q = torch.quantile(z_samples, alpha, dim=0)
+    upper_q = torch.quantile(z_samples, 1.0 - alpha, dim=0)
+    return lower_q, upper_q
+
+
+def _group_scalar_mean(
+    *,
+    values: torch.Tensor,
+    group_ids: torch.Tensor,
+    group_count: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    sum_values = torch.zeros(
+        group_count,
+        device=values.device,
+        dtype=values.dtype,
+    )
+    count = torch.zeros(
+        group_count,
+        device=values.device,
+        dtype=values.dtype,
+    )
+    mask = torch.isfinite(values)
+    safe_values = torch.where(mask, values, torch.zeros_like(values))
+    sum_values.index_add_(0, group_ids, safe_values)
+    count.index_add_(0, group_ids, mask.to(values.dtype))
+    present = count > 0
+    mean = _safe_divide(sum_values, count)
+    return mean, present
+
+
+def _compute_pit_values(
+    *, z_true: torch.Tensor, z_samples: torch.Tensor
+) -> torch.Tensor:
+    sample_valid = torch.isfinite(z_samples)
+    truth_valid = torch.isfinite(z_true)
+    indicator = ((z_samples <= z_true.unsqueeze(0)) & sample_valid).to(
+        z_samples.dtype
+    )
+    counts = sample_valid.to(z_samples.dtype).sum(dim=0)
+    pit = _safe_divide(indicator.sum(dim=0), counts)
+    missing = torch.full_like(pit, float("nan"))
+    return torch.where(truth_valid, pit, missing)
+
+
+def _group_pit_rmse(
+    *,
+    pit_values: torch.Tensor,
+    group_ids: torch.Tensor,
+    group_count: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    result = torch.full_like(
+        torch.zeros(group_count, device=pit_values.device, dtype=pit_values.dtype),
+        float("nan"),
+    )
+    present = torch.zeros(group_count, device=pit_values.device, dtype=torch.bool)
+    pit_np = pit_values.detach().cpu().numpy()
+    groups_np = group_ids.detach().cpu().numpy()
+    for group_id in range(group_count):
+        rows = pit_np[groups_np == group_id]
+        if rows.size == 0:
+            continue
+        values = rows.reshape(-1)
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            continue
+        score, _, _ = calibration_diags.pit_uniform_rmse(finite)
+        result[group_id] = float(score)
+        present[group_id] = True
+    return result, present
 
 
 def _group_mean(
@@ -572,10 +876,20 @@ def _median_over_assets(group_values: torch.Tensor) -> float:
 def _select_es_survivors(
     es_metrics: Mapping[int, Mapping[str, float]],
     model_selection: ModelSelectionConfig,
+    *,
+    candidate_ids: Sequence[int] | None = None,
 ) -> list[int]:
     if not es_metrics:
         raise SimulationError("Postprocess ES metrics missing")
-    ordered = sorted(es_metrics.items(), key=lambda item: item[1]["es_model"])
+    allowed = set(candidate_ids) if candidate_ids is not None else None
+    filtered = [
+        (candidate_id, values)
+        for candidate_id, values in es_metrics.items()
+        if allowed is None or candidate_id in allowed
+    ]
+    if not filtered:
+        raise SimulationError("Postprocess ES survivors received no candidates")
+    ordered = sorted(filtered, key=lambda item: item[1]["es_model"])
     best_vals = ordered[0][1]
     threshold = (
         best_vals["es_model"]
@@ -583,7 +897,7 @@ def _select_es_survivors(
     )
     survivors = [
         candidate_id
-        for candidate_id, values in es_metrics.items()
+        for candidate_id, values in filtered
         if values["es_model"] <= threshold
     ]
     if not survivors:
@@ -601,25 +915,64 @@ def _select_es_survivors(
 
 def _select_final_candidate(
     *,
-    es_metrics: Mapping[int, Mapping[str, float]],
-    crps_metrics: Mapping[int, float],
-    ql_metrics: Mapping[int, float],
+    inputs: FinalSelectionInputs,
     model_selection: ModelSelectionConfig,
-    complexity: Mapping[int, float],
 ) -> Mapping[str, Any]:
-    survivors = _select_es_survivors(es_metrics, model_selection)
-    secondary = _secondary_scores(survivors, crps_metrics, ql_metrics)
+    calibration_survivors = _select_calibration_survivors(
+        inputs.calibration_metrics,
+        model_selection,
+    )
+    survivors = _select_es_survivors(
+        inputs.es_metrics,
+        model_selection,
+        candidate_ids=calibration_survivors,
+    )
+    secondary = _secondary_scores(
+        survivors, inputs.crps_metrics, inputs.ql_metrics
+    )
     survivors2 = _secondary_survivors(secondary)
     best_id = _pick_best_by_complexity(
-        survivors2, complexity, es_metrics
+        survivors2, inputs.complexity, inputs.es_metrics
     )
     return {
         "best_candidate_id": int(best_id),
+        "survivors_calibration": calibration_survivors,
         "survivors_es": survivors,
         "survivors_secondary": survivors2,
+        "calibration_scores": {
+            candidate_id: inputs.calibration_metrics[candidate_id][
+                "calibration_score"
+            ]
+            for candidate_id in calibration_survivors
+        },
         "secondary_scores": secondary,
-        "complexity": complexity,
+        "complexity": inputs.complexity,
     }
+
+
+def _select_calibration_survivors(
+    calibration_metrics: Mapping[int, Mapping[str, float]],
+    model_selection: ModelSelectionConfig,
+) -> list[int]:
+    if not calibration_metrics:
+        raise SimulationError("Postprocess calibration metrics missing")
+    ordered = sorted(
+        calibration_metrics.items(),
+        key=lambda item: (
+            _sort_metric(item[1], "calibration_score"),
+            _sort_metric(item[1], "max_abs_coverage_error"),
+            _sort_metric(item[1], "mean_abs_coverage_error"),
+            _sort_metric(item[1], "pit_uniform_rmse"),
+            item[0],
+        ),
+    )
+    top_k = min(int(model_selection.calibration.top_k), len(ordered))
+    return [candidate_id for candidate_id, _ in ordered[:top_k]]
+
+
+def _sort_metric(values: Mapping[str, float], key: str) -> float:
+    value = float(values.get(key, float("inf")))
+    return value if np.isfinite(value) else float("inf")
 
 
 def _secondary_scores(
@@ -702,15 +1055,21 @@ def _complexity_scores(
 def _build_metrics_payload(
     *,
     es_metrics: Mapping[int, Mapping[str, float]],
+    calibration_metrics: Mapping[int, Mapping[str, float]],
     crps_metrics: Mapping[int, float],
     ql_metrics: Mapping[int, float],
     complexity: Mapping[int, float],
 ) -> Mapping[str, Any]:
     payload: dict[str, Any] = {}
     for candidate_id, values in es_metrics.items():
+        calibration = calibration_metrics.get(candidate_id, {})
         payload[str(candidate_id)] = {
             "es_model": float(values["es_model"]),
             "se_es": float(values["se_es"]),
+            **{
+                key: float(val)
+                for key, val in calibration.items()
+            },
             "crps_model": float(crps_metrics.get(candidate_id, float("nan"))),
             "ql_model": float(ql_metrics.get(candidate_id, float("nan"))),
             "complexity": float(
@@ -761,15 +1120,18 @@ def _aggregate_global_metrics(
     metrics_list: Sequence[Mapping[str, Mapping[str, float]]],
 ) -> tuple[
     Mapping[int, Mapping[str, float]],
+    Mapping[int, Mapping[str, float]],
     Mapping[int, float],
     Mapping[int, float],
     Mapping[int, float],
 ]:
     candidate_ids = _collect_candidate_ids(metrics_list)
     es_metrics: dict[int, Mapping[str, float]] = {}
+    calibration_metrics: dict[int, Mapping[str, float]] = {}
     crps_metrics: dict[int, float] = {}
     ql_metrics: dict[int, float] = {}
     complexity_metrics: dict[int, float] = {}
+    calibration_keys = _collect_calibration_metric_keys(metrics_list)
     for candidate_id in candidate_ids:
         es_vals = _collect_metric(metrics_list, candidate_id, "es_model")
         se_vals = _collect_metric(metrics_list, candidate_id, "se_es")
@@ -782,10 +1144,119 @@ def _aggregate_global_metrics(
             "es_model": _median_or_nan(es_vals),
             "se_es": _median_or_nan(se_vals),
         }
+        calibration_metrics[candidate_id] = {
+            key: _median_or_nan(_collect_metric(metrics_list, candidate_id, key))
+            for key in calibration_keys
+        }
         crps_metrics[candidate_id] = _median_or_nan(crps_vals)
         ql_metrics[candidate_id] = _median_or_nan(ql_vals)
         complexity_metrics[candidate_id] = _median_or_nan(complexity_vals)
-    return es_metrics, crps_metrics, ql_metrics, complexity_metrics
+    return (
+        es_metrics,
+        calibration_metrics,
+        crps_metrics,
+        ql_metrics,
+        complexity_metrics,
+    )
+
+
+def _collect_calibration_metric_keys(
+    metrics_list: Sequence[Mapping[str, Mapping[str, float]]],
+) -> tuple[str, ...]:
+    fixed = {
+        "calibration_score",
+        "mean_abs_coverage_error",
+        "max_abs_coverage_error",
+        "pit_uniform_rmse",
+    }
+    dynamic: set[str] = set()
+    for metrics in metrics_list:
+        for entry in metrics.values():
+            if not isinstance(entry, Mapping):
+                continue
+            for key in entry.keys():
+                if (
+                    str(key) in fixed
+                    or str(key).startswith("coverage_")
+                    or str(key).startswith("abs_error_")
+                ):
+                    dynamic.add(str(key))
+    ordered = sorted(fixed | dynamic)
+    return tuple(ordered)
+
+
+def _summarize_calibration_metrics(
+    *,
+    coverage_group: Mapping[float, torch.Tensor],
+    pit_group: torch.Tensor,
+    model_selection: ModelSelectionConfig,
+) -> Mapping[str, float]:
+    coverage_summary = _summarize_coverage_errors(
+        coverage_group=coverage_group,
+        coverage_levels=model_selection.calibration.coverage_levels,
+    )
+    pit_values = pit_group[torch.isfinite(pit_group)]
+    if pit_values.numel() == 0:
+        raise SimulationError("Postprocess PIT has no defined groups")
+    pit_rmse = float(pit_values.median().item())
+    calibration_score = _calibration_score(
+        mean_error=coverage_summary.mean_error,
+        max_error=coverage_summary.max_error,
+        pit_rmse=pit_rmse,
+        model_selection=model_selection,
+    )
+    payload: dict[str, float] = {
+        "calibration_score": calibration_score,
+        "mean_abs_coverage_error": coverage_summary.mean_error,
+        "max_abs_coverage_error": coverage_summary.max_error,
+        "pit_uniform_rmse": pit_rmse,
+    }
+    for level, empirical in coverage_summary.coverage_by_level.items():
+        tag = calibration_diags.coverage_level_tag(level)
+        payload[f"coverage_{tag}"] = empirical
+        payload[f"abs_error_{tag}"] = (
+            coverage_summary.abs_error_by_level[level]
+        )
+    return payload
+
+
+def _summarize_coverage_errors(
+    *,
+    coverage_group: Mapping[float, torch.Tensor],
+    coverage_levels: Sequence[float],
+) -> CoverageErrorSummary:
+    coverage_by_level: dict[float, float] = {}
+    abs_error_by_level: dict[float, float] = {}
+    finite_errors: list[float] = []
+    for level in coverage_levels:
+        level_value = float(level)
+        empirical = _median_over_defined(coverage_group[level_value])
+        coverage_by_level[level_value] = empirical
+        abs_error = abs(empirical - level_value)
+        abs_error_by_level[level_value] = abs_error
+        if np.isfinite(abs_error):
+            finite_errors.append(abs_error)
+    return CoverageErrorSummary(
+        coverage_by_level=coverage_by_level,
+        abs_error_by_level=abs_error_by_level,
+        mean_error=float(np.mean(np.asarray(finite_errors, dtype=float))),
+        max_error=float(np.max(np.asarray(finite_errors, dtype=float))),
+    )
+
+
+def _calibration_score(
+    *,
+    mean_error: float,
+    max_error: float,
+    pit_rmse: float,
+    model_selection: ModelSelectionConfig,
+) -> float:
+    calibration = model_selection.calibration
+    return (
+        calibration.mean_abs_weight * mean_error
+        + calibration.max_abs_weight * max_error
+        + calibration.pit_weight * pit_rmse
+    )
 
 
 def _complexity_scores_post_tune(

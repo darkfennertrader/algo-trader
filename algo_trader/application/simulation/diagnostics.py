@@ -10,8 +10,13 @@ import torch
 
 from algo_trader.domain import SimulationError
 from algo_trader.domain.simulation import FanChartsConfig
-from algo_trader.infrastructure import ensure_directory
 from . import calibration_summary_diagnostics as calibration_diags
+from .diagnostics_output import (
+    ensure_calibration_output_dir,
+    ensure_fan_output_dir,
+    plot_coverage_curve,
+    resolve_diagnostics_root,
+)
 from .plotting_backend import require_pyplot_and_seaborn
 
 @dataclass(frozen=True)
@@ -20,6 +25,7 @@ class FanChartDiagnosticsContext:
     outer_ids: Sequence[int]
     candidate_id: int
     config: FanChartsConfig
+    diagnostics_root: Path | None = None
 
 @dataclass(frozen=True)
 class FanChartData:
@@ -44,6 +50,10 @@ def run_fan_chart_diagnostics(
 ) -> None:
     if not context.config.enable:
         return
+    diagnostics_root = resolve_diagnostics_root(
+        base_dir=context.base_dir,
+        diagnostics_root=context.diagnostics_root,
+    )
     timestamps = _load_timestamps(context.base_dir)
     assets = _load_asset_names(context.base_dir)
     selected_assets = _resolve_assets(assets, context.config)
@@ -70,13 +80,13 @@ def run_fan_chart_diagnostics(
         asset_names=selected_assets,
         quantiles=required_quantiles,
     )
-    output_dir = _ensure_output_dir(context.base_dir)
+    output_dir = ensure_fan_output_dir(diagnostics_root)
     _render_asset_fan_charts(
         data=data,
         quantile_levels=context.config.quantiles,
         output_dir=output_dir,
     )
-    calibration_dir = _ensure_calibration_output_dir(context.base_dir)
+    calibration_dir = ensure_calibration_output_dir(diagnostics_root)
     _render_calibration_charts(
         data=data,
         coverage_levels=context.config.coverage_levels,
@@ -484,30 +494,6 @@ def _resolve_timestamps(
     return resolved
 
 
-def _ensure_output_dir(base_dir: Path) -> Path:
-    target_dir = base_dir / "outer" / "diagnostics" / "fan_charts"
-    ensure_directory(
-        target_dir,
-        error_type=SimulationError,
-        invalid_message="Diagnostics path is not a directory",
-        create_message="Failed to create diagnostics output",
-        context={"path": str(target_dir)},
-    )
-    return target_dir
-
-
-def _ensure_calibration_output_dir(base_dir: Path) -> Path:
-    target_dir = base_dir / "outer" / "diagnostics" / "calibration_cpcv_ensemble"
-    ensure_directory(
-        target_dir,
-        error_type=SimulationError,
-        invalid_message="Calibration path is not a directory",
-        create_message="Failed to create calibration output",
-        context={"path": str(target_dir)},
-    )
-    return target_dir
-
-
 def _render_asset_fan_charts(
     *,
     data: FanChartData,
@@ -604,7 +590,7 @@ def _run_calibration_diagnostics(
         data=fan_chart_data,
         coverage_levels=coverage_levels,
     )
-    _plot_coverage_curve(curve, output_dir)
+    plot_coverage_curve(curve=curve, output_dir=output_dir)
     summary = calibration_diags.build_calibration_summary(
         curve=curve,
         pit_values=pit_values,
@@ -968,27 +954,3 @@ def _coverage_curve_from_raw(
         else:
             curve[float(level)] = float(np.mean(finite.astype(float)))
     return curve
-
-
-def _plot_coverage_curve(
-    curve: Mapping[float, float], output_dir: Path
-) -> None:
-    plt, sns = _require_plotting()
-    sns.set_theme(style="whitegrid")
-    levels = sorted(curve.keys())
-    coverage = [curve[level] for level in levels]
-    fig, ax = plt.subplots(figsize=(6, 4))
-    sns.lineplot(x=levels, y=coverage, marker="o", ax=ax)
-    ax.plot([0.0, 1.0], [0.0, 1.0], linestyle="--", color="black")
-    ax.set_xlim(0.0, 1.0)
-    ax.set_ylim(0.0, 1.0)
-    ax.set_title("Coverage vs nominal")
-    ax.set_xlabel("nominal p")
-    ax.set_ylabel("coverage")
-    fig.tight_layout()
-    fig.savefig(
-        output_dir / "coverage_curve.png",
-        dpi=150,
-        bbox_inches="tight",
-    )
-    plt.close(fig)

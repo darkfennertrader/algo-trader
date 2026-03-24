@@ -11,9 +11,10 @@ from algo_trader.domain.simulation import (
     TuningConfig,
 )
 
-from .diagnostics import (
-    FanChartDiagnosticsContext,
-    run_fan_chart_diagnostics,
+from .diagnostics import FanChartDiagnosticsContext, run_fan_chart_diagnostics
+from .diagnostics_output import (
+    cleanup_global_diagnostics_root,
+    write_aggregate_calibration_diagnostics,
 )
 from .svi_loss_diagnostics import run_svi_loss_diagnostics
 from .posterior_scale_diagnostics import run_posterior_scale_diagnostics
@@ -173,18 +174,32 @@ def run_global_diagnostics(
             raise SimulationError(
                 "Diagnostics require model_selection.enable"
             )
-        run_fan_chart_diagnostics(
-            FanChartDiagnosticsContext(
-                base_dir=base_dir,
-                outer_ids=outer_ids,
-                candidate_id=candidate_id,
-                config=diagnostics.fan_charts,
+        cleanup_global_diagnostics_root(base_dir=base_dir)
+        for outer_k in outer_ids:
+            diagnostics_root = (
+                base_dir
+                / "outer"
+                / "diagnostics"
+                / f"outer_{int(outer_k)}"
             )
-        )
-        run_posterior_scale_diagnostics(
+            run_fan_chart_diagnostics(
+                FanChartDiagnosticsContext(
+                    base_dir=base_dir,
+                    outer_ids=[int(outer_k)],
+                    candidate_id=candidate_id,
+                    config=diagnostics.fan_charts,
+                    diagnostics_root=diagnostics_root,
+                )
+            )
+            run_posterior_scale_diagnostics(
+                base_dir=base_dir,
+                outer_ids=[int(outer_k)],
+                candidate_id=candidate_id,
+                diagnostics_root=diagnostics_root,
+            )
+        write_aggregate_calibration_diagnostics(
             base_dir=base_dir,
             outer_ids=outer_ids,
-            candidate_id=candidate_id,
         )
 
 

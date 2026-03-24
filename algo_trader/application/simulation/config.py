@@ -40,6 +40,7 @@ from algo_trader.domain.simulation import (
     TrainingTBPTTConfig,
     ModelSelectionBatching,
     ModelSelectionBootstrap,
+    ModelSelectionCalibration,
     ModelSelectionComplexity,
     ModelSelectionConfig,
     ModelSelectionESBand,
@@ -558,6 +559,7 @@ def _build_model_selection_config(
         section.get("phase_name", "post_tune_model_selection")
     )
     es_band = _build_model_selection_es_band(section, config_path)
+    calibration = _build_model_selection_calibration(section, config_path)
     bootstrap = _build_model_selection_bootstrap(section, config_path)
     tail = _build_model_selection_tail(section, config_path)
     batching = _build_model_selection_batching(section, config_path)
@@ -565,6 +567,7 @@ def _build_model_selection_config(
     return ModelSelectionConfig(
         enable=enable,
         phase_name=phase_name,
+        calibration=calibration,
         es_band=es_band,
         bootstrap=bootstrap,
         tail=tail,
@@ -788,6 +791,55 @@ def _build_model_selection_es_band(
             f"model_selection.es_band.min_keep must be <= max_keep in {config_path}"
         )
     return ModelSelectionESBand(c=c, min_keep=min_keep, max_keep=max_keep)
+
+
+def _build_model_selection_calibration(
+    section: Mapping[str, Any], config_path: Path
+) -> ModelSelectionCalibration:
+    raw_calibration = section.get("calibration", {})
+    if raw_calibration is None:
+        raw_calibration = {}
+    if not isinstance(raw_calibration, Mapping):
+        raise ConfigError(
+            f"model_selection.calibration must be a mapping in {config_path}"
+        )
+    defaults = ModelSelectionCalibration()
+    top_k = int(raw_calibration.get("top_k", defaults.top_k))
+    coverage_levels = _parse_float_list(
+        raw_calibration.get("coverage_levels"),
+        field="model_selection.calibration.coverage_levels",
+        config_path=config_path,
+        default=defaults.coverage_levels,
+    )
+    mean_abs_weight = float(
+        raw_calibration.get("mean_abs_weight", defaults.mean_abs_weight)
+    )
+    max_abs_weight = float(
+        raw_calibration.get("max_abs_weight", defaults.max_abs_weight)
+    )
+    pit_weight = float(raw_calibration.get("pit_weight", defaults.pit_weight))
+    if top_k <= 0:
+        raise ConfigError(
+            f"model_selection.calibration.top_k must be positive in {config_path}"
+        )
+    weights = (mean_abs_weight, max_abs_weight, pit_weight)
+    if any(weight < 0.0 for weight in weights):
+        raise ConfigError(
+            "model_selection.calibration weights must be non-negative "
+            f"in {config_path}"
+        )
+    if all(weight == 0.0 for weight in weights):
+        raise ConfigError(
+            "model_selection.calibration requires at least one positive weight "
+            f"in {config_path}"
+        )
+    return ModelSelectionCalibration(
+        top_k=top_k,
+        coverage_levels=coverage_levels,
+        mean_abs_weight=mean_abs_weight,
+        max_abs_weight=max_abs_weight,
+        pit_weight=pit_weight,
+    )
 
 
 def _build_model_selection_bootstrap(

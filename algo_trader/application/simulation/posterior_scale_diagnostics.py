@@ -56,9 +56,16 @@ class _SplitContext:
 
 
 def run_posterior_scale_diagnostics(
-    *, base_dir: Path, outer_ids: Sequence[int], candidate_id: int
+    *,
+    base_dir: Path,
+    outer_ids: Sequence[int],
+    candidate_id: int,
+    diagnostics_root: Path | None = None,
 ) -> None:
-    output_dir = _ensure_output_dir(base_dir)
+    output_dir = _ensure_output_dir(
+        base_dir=base_dir,
+        diagnostics_root=diagnostics_root,
+    )
     run_inputs = _build_run_inputs(
         base_dir=base_dir,
         outer_ids=outer_ids,
@@ -78,10 +85,15 @@ def run_posterior_scale_diagnostics(
     )
 
 
-def _ensure_output_dir(base_dir: Path) -> Path:
-    target_dir = (
-        base_dir / "outer" / "diagnostics" / "calibration_cpcv_ensemble"
+def _ensure_output_dir(
+    *, base_dir: Path, diagnostics_root: Path | None
+) -> Path:
+    root = (
+        diagnostics_root
+        if diagnostics_root is not None
+        else base_dir / "outer" / "diagnostics"
     )
+    target_dir = root / "calibration_cpcv_ensemble"
     ensure_directory(
         target_dir,
         error_type=SimulationError,

@@ -478,6 +478,171 @@ def test_v2_l2_rejects_tbptt_training_method() -> None:
         )
 
 
+def test_v2_l3_prediction_supports_explicit_predictor_config() -> None:
+    config = _v2_l3_online_filtering_config(
+        predict_name="fx_currency_factor_predict_v2_l3_online_filtering"
+    )
+    X_train = torch.randn((3, 2, 1), dtype=torch.float32)
+    X_train_global = torch.randn((3, 1), dtype=torch.float32)
+    y_train = torch.randn((3, 2), dtype=torch.float32)
+    X_pred = torch.randn((2, 2, 1), dtype=torch.float32)
+    X_pred_global = torch.randn((2, 1), dtype=torch.float32)
+
+    state = hooks._fit_pyro(  # pylint: disable=protected-access
+        X_train=X_train,
+        X_train_global=X_train_global,
+        y_train=y_train,
+        config=config,
+    )
+    pred = hooks._predict_pyro(  # pylint: disable=protected-access
+        X_pred=X_pred,
+        X_pred_global=X_pred_global,
+        state=state,
+        config=config,
+        num_samples=4,
+    )
+
+    assert pred["samples"].shape == (4, 2, 2)
+    assert pred["mean"].shape == (2, 2)
+    assert pred["covariance"].shape == (2, 2, 2)
+    assert state["filtering_state"]["steps_seen"] == 3
+    assert torch.is_tensor(state["structural_posterior_means"]["omega_currency"])
+
+
+def test_v2_l3_rejects_tbptt_training_method() -> None:
+    config = _v2_l3_online_filtering_config()
+    config["training"]["method"] = "tbptt"
+    config["training"]["target_normalization"] = True
+    X_train = torch.randn((2, 2, 1), dtype=torch.float32)
+    X_train_global = torch.randn((2, 1), dtype=torch.float32)
+    y_train = torch.randn((2, 2), dtype=torch.float32)
+
+    with pytest.raises(
+        ConfigError,
+        match=(
+            "fx_currency_factor_model_v2_l3_online_filtering "
+            "does not support training.method=tbptt"
+        ),
+    ):
+        hooks._fit_pyro(  # pylint: disable=protected-access
+            X_train=X_train,
+            X_train_global=X_train_global,
+            y_train=y_train,
+            config=config,
+        )
+
+
+def test_v2_l4_prediction_supports_explicit_predictor_config() -> None:
+    config = _v2_l4_online_filtering_config(
+        predict_name="fx_currency_factor_predict_v2_l4_online_filtering"
+    )
+    X_train = torch.randn((3, 2, 1), dtype=torch.float32)
+    X_train_global = torch.randn((3, 1), dtype=torch.float32)
+    y_train = torch.randn((3, 2), dtype=torch.float32)
+    X_pred = torch.randn((2, 2, 1), dtype=torch.float32)
+    X_pred_global = torch.randn((2, 1), dtype=torch.float32)
+
+    state = hooks._fit_pyro(  # pylint: disable=protected-access
+        X_train=X_train,
+        X_train_global=X_train_global,
+        y_train=y_train,
+        config=config,
+    )
+    pred = hooks._predict_pyro(  # pylint: disable=protected-access
+        X_pred=X_pred,
+        X_pred_global=X_pred_global,
+        state=state,
+        config=config,
+        num_samples=4,
+    )
+
+    assert pred["samples"].shape == (4, 2, 2)
+    assert pred["mean"].shape == (2, 2)
+    assert pred["covariance"].shape == (2, 2, 2)
+    assert state["filtering_state"]["steps_seen"] == 3
+    assert torch.is_tensor(state["structural_posterior_means"]["alpha_currency"])
+    assert torch.is_tensor(state["structural_posterior_means"]["theta_currency"])
+
+
+def test_v2_l4_rejects_tbptt_training_method() -> None:
+    config = _v2_l4_online_filtering_config()
+    config["training"]["method"] = "tbptt"
+    config["training"]["target_normalization"] = True
+    X_train = torch.randn((2, 2, 1), dtype=torch.float32)
+    X_train_global = torch.randn((2, 1), dtype=torch.float32)
+    y_train = torch.randn((2, 2), dtype=torch.float32)
+
+    with pytest.raises(
+        ConfigError,
+        match=(
+            "fx_currency_factor_model_v2_l4_online_filtering "
+            "does not support training.method=tbptt"
+        ),
+    ):
+        hooks._fit_pyro(  # pylint: disable=protected-access
+            X_train=X_train,
+            X_train_global=X_train_global,
+            y_train=y_train,
+            config=config,
+        )
+
+
+def test_v2_l5_prediction_supports_explicit_predictor_config() -> None:
+    config = _v2_l5_online_filtering_config(
+        predict_name="fx_currency_factor_predict_v2_l5_online_filtering"
+    )
+    X_train = torch.randn((3, 2, 1), dtype=torch.float32)
+    X_train_global = torch.randn((3, 1), dtype=torch.float32)
+    y_train = torch.randn((3, 2), dtype=torch.float32)
+    X_pred = torch.randn((2, 2, 1), dtype=torch.float32)
+    X_pred_global = torch.randn((2, 1), dtype=torch.float32)
+
+    state = hooks._fit_pyro(  # pylint: disable=protected-access
+        X_train=X_train,
+        X_train_global=X_train_global,
+        y_train=y_train,
+        config=config,
+    )
+    pred = hooks._predict_pyro(  # pylint: disable=protected-access
+        X_pred=X_pred,
+        X_pred_global=X_pred_global,
+        state=state,
+        config=config,
+        num_samples=4,
+    )
+
+    assert pred["samples"].shape == (4, 2, 2)
+    assert pred["mean"].shape == (2, 2)
+    assert pred["covariance"].shape == (2, 2, 2)
+    assert state["filtering_state"]["steps_seen"] == 3
+    assert torch.is_tensor(state["structural_posterior_means"]["alpha"])
+    assert torch.is_tensor(state["structural_posterior_means"]["alpha_currency"])
+    assert torch.is_tensor(state["structural_posterior_means"]["theta_currency"])
+
+
+def test_v2_l5_rejects_tbptt_training_method() -> None:
+    config = _v2_l5_online_filtering_config()
+    config["training"]["method"] = "tbptt"
+    config["training"]["target_normalization"] = True
+    X_train = torch.randn((2, 2, 1), dtype=torch.float32)
+    X_train_global = torch.randn((2, 1), dtype=torch.float32)
+    y_train = torch.randn((2, 2), dtype=torch.float32)
+
+    with pytest.raises(
+        ConfigError,
+        match=(
+            "fx_currency_factor_model_v2_l5_online_filtering "
+            "does not support training.method=tbptt"
+        ),
+    ):
+        hooks._fit_pyro(  # pylint: disable=protected-access
+            X_train=X_train,
+            X_train_global=X_train_global,
+            y_train=y_train,
+            config=config,
+        )
+
+
 def _level10_online_filtering_config(
     *, predict_name: str | None = None
 ) -> dict[str, Any]:
@@ -717,6 +882,108 @@ def _v2_l2_online_filtering_config(
         "model": {
             "model_name": "fx_currency_factor_model_v2_l2_online_filtering",
             "guide_name": "fx_currency_factor_guide_v2_l2_online_filtering",
+            "predict_name": predict_name,
+        },
+        "run_context": {
+            "asset_names": list(_TEST_FX_ASSET_NAMES_2),
+        },
+        "training": {
+            "method": "online_filtering",
+            "svi_shared": {
+                "learning_rate": 1e-3,
+                "num_elbo_particles": 1,
+                "grad_accum_steps": 1,
+                "log_every": None,
+            },
+            "tbptt": {
+                "num_steps": 1,
+                "window_len": None,
+                "burn_in_len": 0,
+            },
+            "online_filtering": {
+                "steps_per_observation": 1,
+            },
+            "log_prob_scaling": False,
+            "target_normalization": False,
+        },
+    }
+
+
+def _v2_l3_online_filtering_config(
+    *, predict_name: str | None = None
+) -> dict[str, Any]:
+    return {
+        "model": {
+            "model_name": "fx_currency_factor_model_v2_l3_online_filtering",
+            "guide_name": "fx_currency_factor_guide_v2_l3_online_filtering",
+            "predict_name": predict_name,
+        },
+        "run_context": {
+            "asset_names": list(_TEST_FX_ASSET_NAMES_2),
+        },
+        "training": {
+            "method": "online_filtering",
+            "svi_shared": {
+                "learning_rate": 1e-3,
+                "num_elbo_particles": 1,
+                "grad_accum_steps": 1,
+                "log_every": None,
+            },
+            "tbptt": {
+                "num_steps": 1,
+                "window_len": None,
+                "burn_in_len": 0,
+            },
+            "online_filtering": {
+                "steps_per_observation": 1,
+            },
+            "log_prob_scaling": False,
+            "target_normalization": False,
+        },
+    }
+
+
+def _v2_l4_online_filtering_config(
+    *, predict_name: str | None = None
+) -> dict[str, Any]:
+    return {
+        "model": {
+            "model_name": "fx_currency_factor_model_v2_l4_online_filtering",
+            "guide_name": "fx_currency_factor_guide_v2_l4_online_filtering",
+            "predict_name": predict_name,
+        },
+        "run_context": {
+            "asset_names": list(_TEST_FX_ASSET_NAMES_2),
+        },
+        "training": {
+            "method": "online_filtering",
+            "svi_shared": {
+                "learning_rate": 1e-3,
+                "num_elbo_particles": 1,
+                "grad_accum_steps": 1,
+                "log_every": None,
+            },
+            "tbptt": {
+                "num_steps": 1,
+                "window_len": None,
+                "burn_in_len": 0,
+            },
+            "online_filtering": {
+                "steps_per_observation": 1,
+            },
+            "log_prob_scaling": False,
+            "target_normalization": False,
+        },
+    }
+
+
+def _v2_l5_online_filtering_config(
+    *, predict_name: str | None = None
+) -> dict[str, Any]:
+    return {
+        "model": {
+            "model_name": "fx_currency_factor_model_v2_l5_online_filtering",
+            "guide_name": "fx_currency_factor_guide_v2_l5_online_filtering",
             "predict_name": predict_name,
         },
         "run_context": {

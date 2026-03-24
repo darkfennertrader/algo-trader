@@ -17,20 +17,20 @@ from algo_trader.pipeline.stages.modeling.protocols import (
 )
 from algo_trader.pipeline.stages.modeling.registry_core import register_predictor
 
-from .guide_l11 import (
-    FactorGuideL11OnlineFiltering,
+from .guide_v2_l2 import (
     FilteringState,
-    Level11RuntimeBatch,
+    FXCurrencyFactorGuideV2L2OnlineFiltering,
     StructuralPosteriorMeans,
-    build_level11_runtime_batch,
+    V2L2RuntimeBatch,
+    build_v2_l2_runtime_batch,
 )
 
 if TYPE_CHECKING:
-    from .model_l11 import FactorModelL11OnlineFiltering
+    from .model_v2_l2 import FXCurrencyFactorModelV2L2OnlineFiltering
 
 
 @dataclass(frozen=True)
-class Level11PredictiveOutputs:
+class V2L2PredictiveOutputs:
     samples: torch.Tensor
     mean: torch.Tensor
     covariance: torch.Tensor
@@ -42,69 +42,40 @@ class _PredictiveRegimeState:
     regime_var: torch.Tensor
 
 
-class _Level11Predictor:
+class _V2L2Predictor:
     def __call__(self, request: PredictiveRequest) -> Mapping[str, Any] | None:
-        return predict_factor_l11(
+        return predict_fx_currency_factor_v2_l2(
             model=cast(Any, request.model),
-            guide=cast(FactorGuideL11OnlineFiltering, request.guide),
+            guide=cast(FXCurrencyFactorGuideV2L2OnlineFiltering, request.guide),
             batch=request.batch,
             num_samples=request.num_samples,
             state=request.state,
         )
 
 
-def predict_factor_l11(
+def predict_fx_currency_factor_v2_l2(
     *,
-    model: FactorModelL11OnlineFiltering,
-    guide: FactorGuideL11OnlineFiltering,
+    model: FXCurrencyFactorModelV2L2OnlineFiltering,
+    guide: FXCurrencyFactorGuideV2L2OnlineFiltering,
     batch: ModelBatch,
     num_samples: int,
     state: Mapping[str, Any] | None = None,
 ) -> Mapping[str, torch.Tensor] | None:
-    runtime_batch = build_level11_runtime_batch(batch)
+    structural = _resolve_structural_means(state=state, guide=guide)
+    runtime_batch = build_v2_l2_runtime_batch(
+        batch,
+        currency_names=structural.currency_names,
+        anchor_currency=structural.anchor_currency,
+    )
     if runtime_batch.filtering_state is None:
         return None
-    structural = _resolve_structural_means(state=state, guide=guide)
-    return _prediction_mapping_from_rollout(
+    samples = _rollout_samples(
         model=model,
         structural=structural,
         batch=runtime_batch,
         num_samples=num_samples,
     )
-
-
-@register_predictor("factor_predict_l11_online_filtering")
-def build_factor_predict_l11_online_filtering(
-    params: Mapping[str, Any],
-) -> _Level11Predictor:
-    if params:
-        unknown = ", ".join(sorted(str(key) for key in params))
-        raise ConfigError(
-            "Unknown factor_predict_l11_online_filtering params: "
-            f"{unknown}"
-        )
-    return _Level11Predictor()
-
-
-def _resolve_structural_means(
-    *,
-    state: Mapping[str, Any] | None,
-    guide: FactorGuideL11OnlineFiltering,
-) -> StructuralPosteriorMeans:
-    if state is not None:
-        payload = state.get("structural_posterior_means")
-        if isinstance(payload, Mapping):
-            return StructuralPosteriorMeans.from_mapping(payload)
-    predictive_summaries = getattr(guide, "structural_predictive_summaries", None)
-    if callable(predictive_summaries):
-        return cast(StructuralPosteriorMeans, predictive_summaries())
-    return guide.structural_posterior_means()
-
-
-def _prediction_mapping_from_samples(
-    samples: torch.Tensor,
-) -> Mapping[str, torch.Tensor]:
-    outputs = Level11PredictiveOutputs(
+    outputs = V2L2PredictiveOutputs(
         samples=samples,
         mean=samples.mean(dim=0),
         covariance=predictive_covariance(samples),
@@ -116,31 +87,43 @@ def _prediction_mapping_from_samples(
     }
 
 
-def _prediction_mapping_from_rollout(
+@register_predictor("fx_currency_factor_predict_v2_l2_online_filtering")
+def build_fx_currency_factor_predict_v2_l2_online_filtering(
+    params: Mapping[str, Any],
+) -> _V2L2Predictor:
+    if params:
+        unknown = ", ".join(sorted(str(key) for key in params))
+        raise ConfigError(
+            "Unknown fx_currency_factor_predict_v2_l2_online_filtering params: "
+            f"{unknown}"
+        )
+    return _V2L2Predictor()
+
+
+def _resolve_structural_means(
     *,
-    model: FactorModelL11OnlineFiltering,
-    structural: StructuralPosteriorMeans,
-    batch: Level11RuntimeBatch,
-    num_samples: int,
-) -> Mapping[str, torch.Tensor]:
-    samples = _rollout_samples(
-        model=model,
-        structural=structural,
-        batch=batch,
-        num_samples=num_samples,
-    )
-    return _prediction_mapping_from_samples(samples)
+    state: Mapping[str, Any] | None,
+    guide: FXCurrencyFactorGuideV2L2OnlineFiltering,
+) -> StructuralPosteriorMeans:
+    if state is not None:
+        payload = state.get("structural_posterior_means")
+        if isinstance(payload, Mapping):
+            return StructuralPosteriorMeans.from_mapping(payload)
+    predictive_summaries = getattr(guide, "structural_predictive_summaries", None)
+    if callable(predictive_summaries):
+        return cast(StructuralPosteriorMeans, predictive_summaries())
+    return guide.structural_posterior_means()
 
 
 def _rollout_samples(
     *,
-    model: FactorModelL11OnlineFiltering,
+    model: FXCurrencyFactorModelV2L2OnlineFiltering,
     structural: StructuralPosteriorMeans,
-    batch: Level11RuntimeBatch,
+    batch: V2L2RuntimeBatch,
     num_samples: int,
 ) -> torch.Tensor:
     if batch.filtering_state is None:
-        raise ValueError("Level 11 rollout requires filtering_state")
+        raise ValueError("V2 L2 rollout requires filtering_state")
     filtering_state = _move_filtering_state(
         batch=batch, filtering_state=batch.filtering_state
     )
@@ -156,7 +139,7 @@ def _rollout_samples(
         regime_var=_initial_regime_variance(filtering_state=filtering_state),
     )
     draws = []
-    for t in range(int(batch.X_asset.shape[0])):
+    for time_index in range(int(batch.X_asset.shape[0])):
         next_regime_var = _forecast_regime_variance(
             model=model,
             regime_var=regime_state.regime_var,
@@ -175,16 +158,16 @@ def _rollout_samples(
             _sample_observation_step(
                 model=model,
                 structural=structural,
-                X_asset_t=batch.X_asset[t],
-                X_global_t=batch.X_global[t],
+                batch=batch,
                 regime_state=regime_state,
+                time_index=time_index,
             )
         )
     return torch.stack(draws, dim=1)
 
 
 def _move_filtering_state(
-    *, batch: Level11RuntimeBatch, filtering_state: FilteringState
+    *, batch: V2L2RuntimeBatch, filtering_state: FilteringState
 ) -> FilteringState:
     return FilteringState(
         h_loc=filtering_state.h_loc.to(
@@ -207,10 +190,11 @@ def _move_structural_means(
         alpha=structural.alpha.to(device=device, dtype=dtype),
         sigma_idio=structural.sigma_idio.to(device=device, dtype=dtype),
         w=structural.w.to(device=device, dtype=dtype),
-        beta=structural.beta.to(device=device, dtype=dtype),
-        B=structural.B.to(device=device, dtype=dtype),
+        gamma_currency=structural.gamma_currency.to(device=device, dtype=dtype),
+        B_currency=structural.B_currency.to(device=device, dtype=dtype),
         s_u_mean=structural.s_u_mean.to(device=device, dtype=dtype),
-        lambda_h=structural.lambda_h.to(device=device, dtype=dtype),
+        currency_names=structural.currency_names,
+        anchor_currency=structural.anchor_currency,
     )
 
 
@@ -228,7 +212,7 @@ def _initial_regime_variance(*, filtering_state: FilteringState) -> torch.Tensor
 
 def _forecast_regime_variance(
     *,
-    model: FactorModelL11OnlineFiltering,
+    model: FXCurrencyFactorModelV2L2OnlineFiltering,
     regime_var: torch.Tensor,
     structural: StructuralPosteriorMeans,
 ) -> torch.Tensor:
@@ -242,7 +226,7 @@ def _forecast_regime_variance(
 
 def _sample_next_regime(
     *,
-    model: FactorModelL11OnlineFiltering,
+    model: FXCurrencyFactorModelV2L2OnlineFiltering,
     regime: torch.Tensor,
     structural: StructuralPosteriorMeans,
 ) -> torch.Tensor:
@@ -254,29 +238,30 @@ def _sample_next_regime(
 
 def _sample_observation_step(
     *,
-    model: FactorModelL11OnlineFiltering,
+    model: FXCurrencyFactorModelV2L2OnlineFiltering,
     structural: StructuralPosteriorMeans,
-    X_asset_t: torch.Tensor,
-    X_global_t: torch.Tensor,
+    batch: V2L2RuntimeBatch,
     regime_state: _PredictiveRegimeState,
+    time_index: int,
 ) -> torch.Tensor:
     mu_t = _mean_step(
         structural=structural,
-        X_asset_t=X_asset_t,
-        X_global_t=X_global_t,
+        batch=batch,
+        time_index=time_index,
     )
     u_t = _sample_total_scale(
         model=model,
-        structural=structural,
+        batch=batch,
         regime=regime_state.regime,
         regime_var=regime_state.regime_var.to(
             device=mu_t.device, dtype=mu_t.dtype
         ),
     )
+    pair_factor = batch.exposure_matrix @ structural.B_currency
     predictive_dist = dist.LowRankMultivariateNormal(
         loc=mu_t.unsqueeze(0).expand(int(regime_state.regime.shape[0]), -1),
-        cov_factor=structural.B.unsqueeze(0) * torch.rsqrt(u_t).unsqueeze(-1),
-        cov_diag=structural.sigma_idio.pow(2).unsqueeze(0) / u_t,
+        cov_factor=pair_factor.unsqueeze(0) * torch.rsqrt(u_t).unsqueeze(-1),
+        cov_diag=structural.sigma_idio.pow(2).unsqueeze(0).expand_as(u_t),
     )
     return predictive_dist.rsample()
 
@@ -284,18 +269,21 @@ def _sample_observation_step(
 def _mean_step(
     *,
     structural: StructuralPosteriorMeans,
-    X_asset_t: torch.Tensor,
-    X_global_t: torch.Tensor,
+    batch: V2L2RuntimeBatch,
+    time_index: int,
 ) -> torch.Tensor:
+    X_asset_t = batch.X_asset[time_index]
+    X_global_t = batch.X_global[time_index]
     mu_asset = (X_asset_t * structural.w).sum(dim=-1)
-    mu_global = X_global_t @ structural.beta.transpose(0, 1)
+    currency_macro = X_global_t @ structural.gamma_currency.transpose(0, 1)
+    mu_global = batch.exposure_matrix @ currency_macro
     return structural.alpha + mu_asset + mu_global
 
 
 def _sample_total_scale(
     *,
-    model: FactorModelL11OnlineFiltering,
-    structural: StructuralPosteriorMeans,
+    model: FXCurrencyFactorModelV2L2OnlineFiltering,
+    batch: V2L2RuntimeBatch,
     regime: torch.Tensor,
     regime_var: torch.Tensor,
 ) -> torch.Tensor:
@@ -305,9 +293,5 @@ def _sample_total_scale(
         dtype=regime.dtype,
     )
     v_t = dist.Gamma(nu / 2.0, nu / 2.0).rsample((int(regime.shape[0]),))
-    lambda_h = structural.lambda_h.unsqueeze(0)
-    log_u = (
-        lambda_h * regime.unsqueeze(-1)
-        - 0.5 * lambda_h.pow(2) * regime_var.unsqueeze(-1)
-    )
-    return torch.exp(log_u) * v_t.unsqueeze(-1)
+    u_scalar = torch.exp(regime - 0.5 * regime_var) * v_t
+    return u_scalar.unsqueeze(-1).expand(-1, int(batch.X_asset.shape[1]))

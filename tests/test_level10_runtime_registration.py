@@ -1,10 +1,37 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pyro
 from pyro import poutine
 import torch
 
+from algo_trader.application.historical import HistoricalRequestConfig
+from algo_trader.infrastructure.data import symbol_directory
 from algo_trader.pipeline.stages import modeling
+
+
+_TICKERS_CONFIG = Path(__file__).resolve().parents[1] / "config" / "tickers.yml"
+
+
+def _configured_asset_names(count: int) -> tuple[str, ...]:
+    config = HistoricalRequestConfig.load(_TICKERS_CONFIG)
+    names = tuple(symbol_directory(ticker) for ticker in config.tickers)
+    if len(names) < count:
+        raise AssertionError("Not enough configured assets for runtime tests")
+    return names[:count]
+
+
+def _configured_fx_asset_names(count: int) -> tuple[str, ...]:
+    config = HistoricalRequestConfig.load(_TICKERS_CONFIG)
+    names = tuple(
+        symbol_directory(ticker)
+        for ticker in config.tickers
+        if "." in symbol_directory(ticker)
+    )
+    if len(names) < count:
+        raise AssertionError("Not enough configured FX assets for runtime tests")
+    return names[:count]
 
 
 def _runtime_batch(*, with_targets: bool) -> modeling.ModelBatch:
@@ -17,7 +44,21 @@ def _runtime_batch(*, with_targets: bool) -> modeling.ModelBatch:
         X_asset=X_asset,
         X_global=X_global,
         y=y,
-        asset_names=("AUD.CAD", "IBUS500", "XAG.USD"),
+        asset_names=_configured_asset_names(3),
+    )
+
+
+def _runtime_batch_fx(*, with_targets: bool) -> modeling.ModelBatch:
+    X_asset = torch.zeros((2, 2, 4), dtype=torch.float32)
+    X_global = torch.zeros((2, 2), dtype=torch.float32)
+    y = None
+    if with_targets:
+        y = torch.zeros((2, 2), dtype=torch.float32)
+    return modeling.ModelBatch(
+        X_asset=X_asset,
+        X_global=X_global,
+        y=y,
+        asset_names=_configured_fx_asset_names(2),
     )
 
 
@@ -112,6 +153,102 @@ def test_level13_runtime_guide_accepts_prediction_batch() -> None:
         "factor_guide_l13_online_filtering"
     )
     predict_batch = _runtime_batch(with_targets=False)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(predict_batch)
+
+
+def test_level14_runtime_registry_builds_model_and_guide() -> None:
+    model = modeling.default_model_registry().get(
+        "factor_model_l14_online_filtering"
+    )
+    guide = modeling.default_guide_registry().get(
+        "factor_guide_l14_online_filtering"
+    )
+    train_batch = _runtime_batch(with_targets=True)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(train_batch)
+    poutine.trace(model).get_trace(train_batch)
+
+
+def test_level14_runtime_guide_accepts_prediction_batch() -> None:
+    guide = modeling.default_guide_registry().get(
+        "factor_guide_l14_online_filtering"
+    )
+    predict_batch = _runtime_batch(with_targets=False)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(predict_batch)
+
+
+def test_level15_runtime_registry_builds_model_and_guide() -> None:
+    model = modeling.default_model_registry().get(
+        "factor_model_l15_online_filtering"
+    )
+    guide = modeling.default_guide_registry().get(
+        "factor_guide_l15_online_filtering"
+    )
+    train_batch = _runtime_batch_fx(with_targets=True)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(train_batch)
+    poutine.trace(model).get_trace(train_batch)
+
+
+def test_level15_runtime_guide_accepts_prediction_batch() -> None:
+    guide = modeling.default_guide_registry().get(
+        "factor_guide_l15_online_filtering"
+    )
+    predict_batch = _runtime_batch_fx(with_targets=False)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(predict_batch)
+
+
+def test_v2_l1_runtime_registry_builds_model_and_guide() -> None:
+    model = modeling.default_model_registry().get(
+        "fx_currency_factor_model_v2_l1_online_filtering"
+    )
+    guide = modeling.default_guide_registry().get(
+        "fx_currency_factor_guide_v2_l1_online_filtering"
+    )
+    train_batch = _runtime_batch_fx(with_targets=True)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(train_batch)
+    poutine.trace(model).get_trace(train_batch)
+
+
+def test_v2_l1_runtime_guide_accepts_prediction_batch() -> None:
+    guide = modeling.default_guide_registry().get(
+        "fx_currency_factor_guide_v2_l1_online_filtering"
+    )
+    predict_batch = _runtime_batch_fx(with_targets=False)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(predict_batch)
+
+
+def test_v2_l2_runtime_registry_builds_model_and_guide() -> None:
+    model = modeling.default_model_registry().get(
+        "fx_currency_factor_model_v2_l2_online_filtering"
+    )
+    guide = modeling.default_guide_registry().get(
+        "fx_currency_factor_guide_v2_l2_online_filtering"
+    )
+    train_batch = _runtime_batch_fx(with_targets=True)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(train_batch)
+    poutine.trace(model).get_trace(train_batch)
+
+
+def test_v2_l2_runtime_guide_accepts_prediction_batch() -> None:
+    guide = modeling.default_guide_registry().get(
+        "fx_currency_factor_guide_v2_l2_online_filtering"
+    )
+    predict_batch = _runtime_batch_fx(with_targets=False)
 
     pyro.clear_param_store()
     poutine.trace(guide).get_trace(predict_batch)

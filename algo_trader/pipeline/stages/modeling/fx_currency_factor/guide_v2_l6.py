@@ -14,6 +14,9 @@ from algo_trader.domain import ConfigError
 from algo_trader.pipeline.stages.modeling.batch_utils import resolve_batch_shape
 from algo_trader.pipeline.stages.modeling.protocols import ModelBatch, PyroGuide
 from algo_trader.pipeline.stages.modeling.registry_core import register_guide
+from algo_trader.pipeline.stages.modeling.runtime_support import (
+    build_runtime_observations,
+)
 
 from algo_trader.pipeline.stages.modeling.factor.guide_l11 import (
     _coerce_mapping,
@@ -39,7 +42,6 @@ from .shared_v2_l6 import (
     FilteringState,
     RegimePosteriorMeans,
     RuntimeCurrencyMetadata,
-    RuntimeObservations,
     StructuralPosteriorMeans,
     StructuralTensorMeans,
     V2L6RuntimeBatch,
@@ -335,7 +337,7 @@ def build_v2_l6_runtime_batch(
     return V2L6RuntimeBatch(
         X_asset=X_asset.to(device=shape.device, dtype=shape.dtype),
         X_global=batch.X_global.to(device=shape.device, dtype=shape.dtype),
-        observations=RuntimeObservations(
+        observations=build_runtime_observations(
             y_input=_resolve_y_input(shape),
             y_obs=shape.y_obs,
             time_mask=_resolve_time_mask(batch, shape.T, shape.A),

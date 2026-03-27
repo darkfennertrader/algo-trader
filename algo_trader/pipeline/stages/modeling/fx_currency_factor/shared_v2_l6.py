@@ -7,16 +7,12 @@ import torch
 
 from algo_trader.domain import ConfigError
 from algo_trader.pipeline.stages.modeling.factor.guide_l11 import FilteringState
+from algo_trader.pipeline.stages.modeling.runtime_support import (
+    RuntimeObservations,
+    require_tensor_entry,
+)
 
 from .guide_v2_l2 import _resolve_anchor_currency, _resolve_currency_names
-
-
-@dataclass(frozen=True)
-class RuntimeObservations:
-    y_input: torch.Tensor
-    y_obs: torch.Tensor | None
-    time_mask: torch.BoolTensor | None
-    obs_scale: float | None
 
 
 @dataclass(frozen=True)
@@ -168,15 +164,10 @@ class StructuralPosteriorMeans:
             "s_u_broad_mean",
             "s_u_cross_mean",
         )
-        values: dict[str, torch.Tensor] = {}
-        for key in tensor_keys:
-            value = payload.get(key)
-            if not isinstance(value, torch.Tensor):
-                raise ConfigError(
-                    "structural_posterior_means must include tensor entries",
-                    context={"field": key},
-                )
-            values[key] = value.detach()
+        values = {
+            key: require_tensor_entry(payload, key).detach()
+            for key in tensor_keys
+        }
         currency_names = _resolve_currency_names(payload.get("currency_names"))
         anchor_currency = _resolve_anchor_currency(
             payload.get("anchor_currency"),

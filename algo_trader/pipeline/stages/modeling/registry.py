@@ -25,6 +25,7 @@ def default_model_registry() -> ModelRegistry:
     from .fx_currency_factor import model_v2_l4  # pylint: disable=import-outside-toplevel
     from .fx_currency_factor import model_v2_l5  # pylint: disable=import-outside-toplevel
     from .fx_currency_factor import model_v2_l6  # pylint: disable=import-outside-toplevel
+    from .multi_asset_block import model_v3_l1_unified  # pylint: disable=import-outside-toplevel
 
     return _MODEL_REGISTRY
 
@@ -44,6 +45,7 @@ def default_guide_registry() -> GuideRegistry:
     from .fx_currency_factor import guide_v2_l4  # pylint: disable=import-outside-toplevel
     from .fx_currency_factor import guide_v2_l5  # pylint: disable=import-outside-toplevel
     from .fx_currency_factor import guide_v2_l6  # pylint: disable=import-outside-toplevel
+    from .multi_asset_block import guide_v3_l1_unified  # pylint: disable=import-outside-toplevel
 
     return _GUIDE_REGISTRY
 
@@ -62,5 +64,6 @@ def default_predictor_registry() -> PredictorRegistry:
     from .fx_currency_factor import predict_v2_l4  # pylint: disable=import-outside-toplevel
     from .fx_currency_factor import predict_v2_l5  # pylint: disable=import-outside-toplevel
     from .fx_currency_factor import predict_v2_l6  # pylint: disable=import-outside-toplevel
+    from .multi_asset_block import predict_v3_l1_unified  # pylint: disable=import-outside-toplevel
 
     return _PREDICTOR_REGISTRY

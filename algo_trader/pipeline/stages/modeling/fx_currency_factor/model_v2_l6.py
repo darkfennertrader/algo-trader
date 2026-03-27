@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
-from typing import Any, Mapping, cast
+from typing import Any, Mapping
 
 import pyro
 import pyro.distributions as dist
 import torch
-from pyro import poutine
 
 from algo_trader.domain import ConfigError
 from algo_trader.pipeline.stages.modeling.debug_utils import debug_log
@@ -18,6 +15,9 @@ from algo_trader.pipeline.stages.modeling.protocols import (
     PyroModel,
 )
 from algo_trader.pipeline.stages.modeling.registry_core import register_model
+from algo_trader.pipeline.stages.modeling.runtime_support import (
+    sample_time_observations,
+)
 
 from .guide_v2_l6 import (
     build_v2_l6_runtime_batch,
@@ -865,24 +865,13 @@ def _build_observation_distribution(
 def _sample_observations(
     context: _ModelContext, obs_dist: dist.LowRankMultivariateNormal
 ) -> None:
-    with pyro.plate("time", context.T, dim=-1):
-        if context.batch.time_mask is None and context.batch.obs_scale is None:
-            pyro.sample("obs", obs_dist, obs=context.batch.y_obs)
-            return
-        if context.batch.time_mask is None:
-            obs_scale = context.batch.obs_scale
-            if obs_scale is None:
-                pyro.sample("obs", obs_dist, obs=context.batch.y_obs)
-                return
-            with _scale_context(obs_scale):
-                pyro.sample("obs", obs_dist, obs=context.batch.y_obs)
-            return
-        with _mask_context(context.batch.time_mask):
-            if context.batch.obs_scale is None:
-                pyro.sample("obs", obs_dist, obs=context.batch.y_obs)
-                return
-            with _scale_context(context.batch.obs_scale):
-                pyro.sample("obs", obs_dist, obs=context.batch.y_obs)
+    sample_time_observations(
+        time_count=context.T,
+        obs_dist=obs_dist,
+        y_obs=context.batch.y_obs,
+        time_mask=context.batch.time_mask,
+        obs_scale=context.batch.obs_scale,
+    )
 
 
 def _phi_vector(context: _ModelContext) -> torch.Tensor:
@@ -913,6 +902,8 @@ def _scale_vector(
     return torch.stack(
         [regime_scales.broad, regime_scales.cross]
     ).to(device=context.device, dtype=context.dtype)
+
+
 def _half_student_t(
     *, df: float, scale: float, device: torch.device, dtype: torch.dtype
 ) -> dist.FoldedDistribution:
@@ -922,30 +913,3 @@ def _half_student_t(
         torch.tensor(scale, device=device, dtype=dtype),
     )
     return dist.FoldedDistribution(base)
-
-
-@contextmanager
-def _scale_context(scale: float) -> Iterator[None]:
-    with _managed_context(poutine.scale(scale=scale)):
-        yield
-
-
-@contextmanager
-def _mask_context(mask: torch.BoolTensor) -> Iterator[None]:
-    with _managed_context(poutine.mask(mask=mask)):
-        yield
-
-
-@contextmanager
-def _managed_context(handler_obj: object) -> Iterator[None]:
-    handler = cast(AbstractContextManager[None], handler_obj)
-    enter = cast(Callable[[], object], getattr(handler, "__enter__"))
-    exit_handler = cast(
-        Callable[[object | None, object | None, object | None], object],
-        getattr(handler, "__exit__"),
-    )
-    enter()
-    try:
-        yield
-    finally:
-        exit_handler(None, None, None)

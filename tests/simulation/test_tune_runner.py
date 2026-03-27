@@ -102,8 +102,6 @@ def test_build_scheduler_builds_median_rule_on_completed_splits() -> None:
 
     assert scheduler == {
         "time_attr": "completed_splits",
-        "metric": "score",
-        "mode": "max",
         "grace_period": 16,
         "min_samples_required": 4,
     }

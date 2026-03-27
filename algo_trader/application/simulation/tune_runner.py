@@ -469,8 +469,6 @@ def _build_scheduler(*, tune: Any, ray_config: TuningRayConfig) -> Any | None:
     if early_stopping.method == "median":
         return tune.schedulers.MedianStoppingRule(
             time_attr="completed_splits",
-            metric="score",
-            mode="max",
             grace_period=early_stopping.grace_period,
             min_samples_required=early_stopping.min_samples_required,
         )

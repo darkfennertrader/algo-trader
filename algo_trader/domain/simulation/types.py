@@ -254,11 +254,22 @@ class TuningResourcesConfig:
 
 
 @dataclass(frozen=True)
+class TuningRayEarlyStoppingConfig:
+    enabled: bool = False
+    method: Literal["median"] = "median"
+    grace_period: int = 16
+    min_samples_required: int = 3
+
+
+@dataclass(frozen=True)
 class TuningRayConfig:
     address: str | None = None
     logs_enabled: bool = True
     resources: TuningResourcesConfig = field(
         default_factory=TuningResourcesConfig
+    )
+    early_stopping: TuningRayEarlyStoppingConfig = field(
+        default_factory=TuningRayEarlyStoppingConfig
     )
 
 

@@ -89,6 +89,7 @@ def select_best_config(
                     base_config=context.base_config,
                     candidates=context.candidates,
                     resources=resources.tuning.ray.resources,
+                    ray_config=resources.tuning.ray,
                     use_gpu=resources.use_gpu,
                     runtime=RayTuneRuntimeSpec(
                         storage_path=ray_storage_path,

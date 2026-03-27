@@ -9,7 +9,11 @@ import tempfile
 from typing import Any, Mapping, Sequence
 
 from algo_trader.domain import ConfigError
-from algo_trader.domain.simulation import CandidateSpec, TuningResourcesConfig
+from algo_trader.domain.simulation import (
+    CandidateSpec,
+    TuningRayConfig,
+    TuningResourcesConfig,
+)
 from algo_trader.infrastructure.env import require_env
 
 from .hooks import SimulationHooks
@@ -38,6 +42,7 @@ class RayTuneSpec:
     base_config: Mapping[str, Any]
     candidates: Sequence[CandidateSpec]
     resources: TuningResourcesConfig
+    ray_config: TuningRayConfig
     use_gpu: bool
     runtime: "RayTuneRuntimeSpec"
 
@@ -95,6 +100,7 @@ def select_best_with_ray(context: RayTuneContext) -> Mapping[str, Any]:
             trainable=trainable,
             candidates=context.spec.candidates,
             tune=tune,
+            ray_config=context.spec.ray_config,
             runtime=context.spec.runtime,
         )
     best_candidate = _extract_best_candidate(tuner.fit())
@@ -302,7 +308,17 @@ def _write_checkpoint_state(
         path = Path(temp_dir) / "checkpoint.json"
         path.write_text(json.dumps(payload))
         checkpoint = tune.Checkpoint.from_directory(temp_dir)
-        tune.report({"score": float(score)}, checkpoint=checkpoint)
+        tune.report(
+            {
+                "score": float(score),
+                "completed_splits": _completed_splits_from_state(state),
+            },
+            checkpoint=checkpoint,
+        )
+
+
+def _completed_splits_from_state(state: TrialCheckpointState) -> int:
+    return max(0, int(state.last_completed_split_id) + 1)
 
 
 def _prepare_trial_run(
@@ -373,7 +389,12 @@ def _train_candidate(
     )
     fold_scores = evaluate_inner_splits(request, resume=resume)
     score = _aggregate_for_context(fold_scores, inner_context)
-    tune.report({"score": score})
+    tune.report(
+        {
+            "score": score,
+            "completed_splits": len(fold_scores),
+        }
+    )
 
 
 def _build_trainable(context: RayTuneContext, tune: Any):
@@ -396,12 +417,17 @@ def _build_tuner(
     trainable,
     candidates: Sequence[CandidateSpec],
     tune: Any,
+    ray_config: TuningRayConfig,
     runtime: RayTuneRuntimeSpec,
 ):
     return tune.Tuner(
         trainable,
         param_space=_build_param_space(candidates, tune),
-        tune_config=tune.TuneConfig(metric="score", mode="max"),
+        tune_config=tune.TuneConfig(
+            metric="score",
+            mode="max",
+            scheduler=_build_scheduler(tune=tune, ray_config=ray_config),
+        ),
         run_config=tune.RunConfig(
             name=runtime.experiment_name,
             storage_path=str(runtime.storage_path),
@@ -434,6 +460,24 @@ def _build_param_space(
     return {
         "candidate": tune.grid_search(_candidate_payloads(candidates))
     }
+
+
+def _build_scheduler(*, tune: Any, ray_config: TuningRayConfig) -> Any | None:
+    early_stopping = ray_config.early_stopping
+    if not early_stopping.enabled:
+        return None
+    if early_stopping.method == "median":
+        return tune.schedulers.MedianStoppingRule(
+            time_attr="completed_splits",
+            metric="score",
+            mode="max",
+            grace_period=early_stopping.grace_period,
+            min_samples_required=early_stopping.min_samples_required,
+        )
+    raise ConfigError(
+        "Unsupported Ray Tune early stopping method "
+        f"'{early_stopping.method}'"
+    )
 
 
 def _extract_best_candidate(results) -> Mapping[str, Any]:

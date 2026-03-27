@@ -59,6 +59,7 @@ from .types import (
     TuningParamSpec,
     TuningParamType,
     TuningTransform,
+    TuningRayEarlyStoppingConfig,
     TuningRayConfig,
     TuningResourcesConfig,
 )
@@ -121,6 +122,7 @@ __all__ = [
     "TuningParamSpec",
     "TuningParamType",
     "TuningTransform",
+    "TuningRayEarlyStoppingConfig",
     "TuningRayConfig",
     "TuningResourcesConfig",
     "PnLCalculator",

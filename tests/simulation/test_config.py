@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from algo_trader.application.simulation import config as simulation_config
+from algo_trader.application.simulation import config_tuning
 from algo_trader.domain import ConfigError
 
 
@@ -96,6 +97,52 @@ def test_build_model_selection_calibration_parses_custom_values() -> None:
     assert selection.calibration.mean_abs_weight == 2.0
     assert selection.calibration.max_abs_weight == 3.0
     assert selection.calibration.pit_weight == 4.0
+
+
+def test_build_tuning_config_parses_ray_early_stopping() -> None:
+    tuning = config_tuning.build_tuning_config(
+        {
+            "tuning": {
+                "engine": "ray",
+                "num_samples": 4,
+                "space": [],
+                "ray": {
+                    "early_stopping": {
+                        "enabled": True,
+                        "method": "median",
+                        "grace_period": 16,
+                        "min_samples_required": 4,
+                    }
+                },
+            }
+        },
+        Path("simulation.yml"),
+    )
+
+    assert tuning.ray.early_stopping.enabled
+    assert tuning.ray.early_stopping.method == "median"
+    assert tuning.ray.early_stopping.grace_period == 16
+    assert tuning.ray.early_stopping.min_samples_required == 4
+
+
+def test_build_tuning_config_rejects_invalid_ray_early_stopping_method() -> None:
+    with pytest.raises(ConfigError):
+        config_tuning.build_tuning_config(
+            {
+                "tuning": {
+                    "engine": "ray",
+                    "num_samples": 4,
+                    "space": [],
+                    "ray": {
+                        "early_stopping": {
+                            "enabled": True,
+                            "method": "asha",
+                        }
+                    },
+                }
+            },
+            Path("simulation.yml"),
+        )
 
 
 def test_build_training_config_rejects_online_filtering_target_norm() -> None:

@@ -10,6 +10,7 @@ from algo_trader.domain.simulation import (
     TuningConfig,
     TuningParamSpec,
     TuningParamType,
+    TuningRayEarlyStoppingConfig,
     TuningRayConfig,
     TuningResourcesConfig,
     TuningTransform,
@@ -361,10 +362,15 @@ def _build_tuning_ray_config(
     logs_enabled = _parse_logs_enabled(
         raw.get("logs_enabled", True), config_path
     )
+    early_stopping = _build_tuning_ray_early_stopping_config(
+        raw.get("early_stopping", {}),
+        config_path,
+    )
     return TuningRayConfig(
         address=address or None,
         logs_enabled=logs_enabled,
         resources=resources,
+        early_stopping=early_stopping,
     )
 
 
@@ -376,18 +382,33 @@ def _normalize_tuning_ray_config(
         ray.resources, config_path
     )
     if ray.address is None:
-        return replace(ray, resources=resources)
+        return replace(
+            ray,
+            resources=resources,
+            early_stopping=_normalize_tuning_ray_early_stopping_config(
+                ray.early_stopping,
+                config_path,
+            ),
+        )
     normalized = ray.address.strip()
     if not normalized:
         return TuningRayConfig(
             address=None,
             logs_enabled=ray.logs_enabled,
             resources=resources,
+            early_stopping=_normalize_tuning_ray_early_stopping_config(
+                ray.early_stopping,
+                config_path,
+            ),
         )
     return TuningRayConfig(
         address=normalized,
         logs_enabled=ray.logs_enabled,
         resources=resources,
+        early_stopping=_normalize_tuning_ray_early_stopping_config(
+            ray.early_stopping,
+            config_path,
+        ),
     )
 
 
@@ -396,6 +417,71 @@ def _parse_logs_enabled(value: object, config_path: Path) -> bool:
         return value
     raise ConfigError(
         f"tuning.ray.logs_enabled must be a boolean in {config_path}"
+    )
+
+
+def _build_tuning_ray_early_stopping_config(
+    raw: object,
+    config_path: Path,
+) -> TuningRayEarlyStoppingConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, Mapping):
+        raise ConfigError(
+            f"tuning.ray.early_stopping must be a mapping in {config_path}"
+        )
+    extra = set(raw) - {
+        "enabled",
+        "method",
+        "grace_period",
+        "min_samples_required",
+    }
+    if extra:
+        raise ConfigError(
+            f"tuning.ray.early_stopping contains unknown keys in {config_path}",
+            context={"keys": ", ".join(sorted(extra))},
+        )
+    return TuningRayEarlyStoppingConfig(
+        enabled=_parse_logs_enabled(raw.get("enabled", False), config_path),
+        method=_normalize_tuning_ray_early_stopping_method(
+            raw.get("method", "median"),
+            config_path,
+        ),
+        grace_period=int(raw.get("grace_period", 16)),
+        min_samples_required=int(raw.get("min_samples_required", 3)),
+    )
+
+
+def _normalize_tuning_ray_early_stopping_config(
+    config: TuningRayEarlyStoppingConfig,
+    config_path: Path,
+) -> TuningRayEarlyStoppingConfig:
+    method = _normalize_tuning_ray_early_stopping_method(
+        config.method,
+        config_path,
+    )
+    if config.grace_period < 0:
+        raise ConfigError(
+            f"tuning.ray.early_stopping.grace_period must be >= 0 in {config_path}"
+        )
+    if config.min_samples_required <= 0:
+        raise ConfigError(
+            "tuning.ray.early_stopping.min_samples_required must be > 0 "
+            f"in {config_path}"
+        )
+    return replace(config, method=method)
+
+
+def _normalize_tuning_ray_early_stopping_method(
+    value: object,
+    config_path: Path,
+) -> Literal["median"]:
+    raw = str(value).strip().lower()
+    if raw == "median":
+        return "median"
+    raise ConfigError(
+        "tuning.ray.early_stopping.method must be median "
+        f"in {config_path}"
     )
 
 

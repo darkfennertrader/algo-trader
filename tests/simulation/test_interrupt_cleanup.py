@@ -16,7 +16,7 @@ def test_cleanup_interrupt_local_ray_and_gpu(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(
         interrupt_cleanup,
         "_stop_local_ray_cluster",
-        lambda: calls.append("stop_local"),
+        lambda **_: calls.append("stop_local"),
     )
     monkeypatch.setattr(
         interrupt_cleanup,
@@ -56,7 +56,7 @@ def test_cleanup_interrupt_remote_ray_skips_local_stop(
     monkeypatch.setattr(
         interrupt_cleanup,
         "_stop_local_ray_cluster",
-        lambda: calls.append("stop_local"),
+        lambda **_: calls.append("stop_local"),
     )
     monkeypatch.setattr(
         interrupt_cleanup,
@@ -90,7 +90,7 @@ def test_cleanup_before_run_local_ray_and_gpu(
     monkeypatch.setattr(
         interrupt_cleanup,
         "_stop_local_ray_cluster",
-        lambda: calls.append("stop_local"),
+        lambda **_: calls.append("stop_local"),
     )
     monkeypatch.setattr(
         interrupt_cleanup,
@@ -141,3 +141,41 @@ def test_cleanup_interrupt_fallback_to_force_ray_stop(
 
     assert attempts == [["ray", "stop"], ["ray", "stop", "--force"]]
     assert "Forced local Ray cluster shutdown" in caplog.text
+    assert "after interruption" in caplog.text
+
+
+def test_cleanup_after_completion_logs_completion_context(
+    monkeypatch: MonkeyPatch,
+    caplog: LogCaptureFixture,
+) -> None:
+    attempts: list[list[str]] = []
+
+    def fake_run_ray_command(command: list[str]) -> bool:
+        attempts.append(command)
+        return command == ["ray", "stop"]
+
+    monkeypatch.setattr(
+        interrupt_cleanup, "_run_ray_command", fake_run_ray_command
+    )
+    monkeypatch.setattr(
+        interrupt_cleanup, "_safe_shutdown_ray_runtime", lambda: None
+    )
+    monkeypatch.setattr(
+        interrupt_cleanup, "_clear_cuda_memory", lambda **_: None
+    )
+    monkeypatch.setattr(
+        interrupt_cleanup,
+        "_cleanup_stopped_simulation_processes",
+        lambda: None,
+    )
+
+    with caplog.at_level("INFO"):
+        interrupt_cleanup.cleanup_after_simulation_run(
+            use_ray=True,
+            ray_address=None,
+            use_gpu=False,
+            interrupted=False,
+        )
+
+    assert attempts == [["ray", "stop"]]
+    assert "Stopped local Ray cluster after completion" in caplog.text

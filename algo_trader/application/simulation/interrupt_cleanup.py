@@ -29,7 +29,7 @@ def cleanup_before_simulation_run(
 ) -> None:
     _cleanup_stopped_simulation_processes()
     if use_ray and ray_address is None:
-        _stop_local_ray_cluster()
+        _stop_local_ray_cluster(context="before run")
     if use_gpu:
         _clear_cuda_memory(skip_if_recent=True)
 
@@ -44,7 +44,9 @@ def cleanup_after_simulation_run(
     if use_ray:
         _safe_shutdown_ray_runtime()
         if ray_address is None:
-            _stop_local_ray_cluster()
+            _stop_local_ray_cluster(
+                context="after interruption" if interrupted else "after completion"
+            )
     _cleanup_stopped_simulation_processes()
     if use_gpu:
         _clear_cuda_memory()
@@ -73,16 +75,14 @@ def _safe_shutdown_ray_runtime() -> None:
         logger.warning("Failed to shutdown Ray runtime cleanly: %s", exc)
 
 
-def _stop_local_ray_cluster() -> None:
+def _stop_local_ray_cluster(*, context: str) -> None:
     if _run_ray_command(["ray", "stop"]):
-        logger.info("Stopped local Ray cluster after interruption")
+        logger.info("Stopped local Ray cluster %s", context)
         return
     if _run_ray_command(["ray", "stop", "--force"]):
-        logger.warning(
-            "Forced local Ray cluster shutdown after interruption"
-        )
+        logger.warning("Forced local Ray cluster shutdown %s", context)
         return
-    logger.warning("Unable to stop local Ray cluster after interruption")
+    logger.warning("Unable to stop local Ray cluster %s", context)
 
 
 def _run_ray_command(command: list[str]) -> bool:

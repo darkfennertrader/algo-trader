@@ -198,7 +198,25 @@ class SimulationArtifacts:
         outer_k: int,
         inner_splits: Sequence[CPCVSplit],
         warmup_idx: np.ndarray,
-        best_config: Mapping[str, Any],
+        best_config: Mapping[str, Any] | None,
+    ) -> None:
+        self._write_inner_setup(
+            outer_k=outer_k,
+            inner_splits=inner_splits,
+            warmup_idx=warmup_idx,
+        )
+        if best_config is not None:
+            self._write_inner_best_config(
+                outer_k=outer_k,
+                best_config=best_config,
+            )
+
+    def _write_inner_setup(
+        self,
+        *,
+        outer_k: int,
+        inner_splits: Sequence[CPCVSplit],
+        warmup_idx: np.ndarray,
     ) -> None:
         target_dir = self._inner_dir / f"outer_{outer_k}"
         _ensure_dir(target_dir, message="Failed to create inner output")
@@ -222,6 +240,15 @@ class SimulationArtifacts:
             splits=inner_splits,
             warmup_idx=warmup_idx,
         )
+
+    def _write_inner_best_config(
+        self,
+        *,
+        outer_k: int,
+        best_config: Mapping[str, Any],
+    ) -> None:
+        target_dir = self._inner_dir / f"outer_{outer_k}"
+        _ensure_dir(target_dir, message="Failed to create inner output")
         _write_json(
             target_dir / "best_config.json",
             _to_serializable(best_config),

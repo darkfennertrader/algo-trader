@@ -878,6 +878,11 @@ def _run_outer_fold(
         inner_splits=inner_splits,
         candidates=candidates,
     )
+    _write_inner_setup_outputs(
+        outer_context=outer_context,
+        outer_fold=outer_fold,
+        inner_splits=inner_splits,
+    )
     if resume_tracker is not None:
         resume_tracker.mark_inner_started(outer_fold.k_test)
     ray_plan = resolve_ray_selection_plan(
@@ -973,6 +978,11 @@ def _run_outer_fold_inner_only(
         outer_fold=outer_fold,
         inner_splits=inner_splits,
         candidates=candidates,
+    )
+    _write_inner_setup_outputs(
+        outer_context=outer_context,
+        outer_fold=outer_fold,
+        inner_splits=inner_splits,
     )
     if resume_tracker is not None:
         resume_tracker.mark_inner_started(outer_fold.k_test)
@@ -1090,8 +1100,8 @@ def _write_inner_outputs(
     *,
     outer_context: OuterFoldContext,
     outer_fold: OuterFold,
-    inner_splits: list[CPCVSplit],
     best_config: Mapping[str, Any],
+    inner_splits: list[CPCVSplit],
 ) -> None:
     outer_context.artifacts.write_inner(
         outer_k=outer_fold.k_test,
@@ -1112,6 +1122,19 @@ def _write_inner_outputs(
     outer_context.artifacts.write_inner_cleaning_summary(
         outer_k=outer_fold.k_test,
         summary=inner_summary,
+    )
+
+def _write_inner_setup_outputs(
+    *,
+    outer_context: OuterFoldContext,
+    outer_fold: OuterFold,
+    inner_splits: list[CPCVSplit],
+) -> None:
+    outer_context.artifacts.write_inner(
+        outer_k=outer_fold.k_test,
+        inner_splits=inner_splits,
+        warmup_idx=outer_context.context.cv.warmup_idx,
+        best_config=None,
     )
 
 def _write_postprocess_metadata(

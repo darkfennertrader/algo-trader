@@ -32,6 +32,8 @@ def test_write_postprocess_basket_diagnostics_creates_expected_outputs(
     assert (output_dir / "basket_scores.csv").exists()
     assert (output_dir / "pit_histogram_us_index.csv").exists()
     assert payload["best_candidate_id"] == 3
+    assert payload["baskets"]["broad_mixed"]["status"] == "ok"
+    assert payload["baskets"]["broad_mixed"]["n_assets"] == 6.0
     assert payload["basket_definitions"]["broad_mixed"]["status"] == "ok"
     assert payload["basket_diagnostics"]["broad_mixed"]["n_assets"] == 6.0
     assert payload["basket_diagnostics"]["swiss_index"]["n_assets"] == 1.0
@@ -62,11 +64,15 @@ def test_write_postprocess_basket_diagnostics_skips_unavailable_basket(
     scores = pd.read_csv(output_dir / "basket_scores.csv")
 
     broad_mixed = payload["basket_definitions"]["broad_mixed"]
+    broad_mixed_entry = payload["baskets"]["broad_mixed"]
     broad_mixed_row = scores.loc[scores["basket"] == "broad_mixed"].iloc[0]
 
     assert broad_mixed["status"] == "unavailable"
     assert broad_mixed["assets_missing"] == ["XAU.USD"]
+    assert broad_mixed_entry["status"] == "unavailable"
+    assert broad_mixed_entry["assets_missing"] == ["XAU.USD"]
     assert pd.isna(payload["basket_diagnostics"]["broad_mixed"]["crps"])
+    assert pd.isna(broad_mixed_entry["crps"])
     assert broad_mixed_row["status"] == "unavailable"
     assert pd.isna(broad_mixed_row["crps"])
     assert not (output_dir / "pit_histogram_broad_mixed.csv").exists()
@@ -93,6 +99,7 @@ def test_write_global_basket_diagnostics_creates_manifest(
     assert (output_dir / "basket_scores.csv").exists()
     assert payload["outer_ids"] == [7, 8]
     assert manifest["scope"] == "selected_candidate_basket_diagnostics"
+    assert payload["baskets"]["us_minus_europe"]["status"] == "unavailable"
     assert payload["basket_definitions"]["us_minus_europe"]["status"] == "unavailable"
     assert not (output_dir / "pit_histogram_us_minus_europe.csv").exists()
     outer_fold_count = cast(float, histogram.loc[0, "n_outer_folds"])

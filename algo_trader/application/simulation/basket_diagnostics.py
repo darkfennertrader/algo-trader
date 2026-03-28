@@ -217,6 +217,7 @@ def _selection_payload(
 ) -> Mapping[str, Any]:
     payload: dict[str, Any] = {
         "best_candidate_id": int(candidate_id),
+        "baskets": _serialize_basket_entries(result),
         "basket_definitions": _serialize_basket_specs(result.basket_specs),
         "basket_diagnostics": _serialize_scores(result.scores),
     }
@@ -754,6 +755,20 @@ def _serialize_basket_specs(
             },
         }
         for basket_name, spec in basket_specs.items()
+    }
+
+
+def _serialize_basket_entries(
+    result: BasketDiagnosticsResult,
+) -> Mapping[str, Mapping[str, Any]]:
+    basket_specs = _serialize_basket_specs(result.basket_specs)
+    basket_scores = _serialize_scores(result.scores)
+    return {
+        basket_name: {
+            **basket_specs[basket_name],
+            **basket_scores[basket_name],
+        }
+        for basket_name in BASKET_ORDER
     }
 
 

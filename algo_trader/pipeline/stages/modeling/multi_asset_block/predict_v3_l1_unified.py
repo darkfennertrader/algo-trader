@@ -25,10 +25,12 @@ from .shared_v3_l1_unified import (
     FilteringState,
     MeanTensorMeans,
     RegimePosteriorMeans,
+    RuntimeAssetMetadata,
     StructuralPosteriorMeans,
     StructuralTensorMeans,
     V3L1UnifiedRuntimeBatch,
     asset_class_mask,
+    build_index_group_block,
     coerce_four_state_tensor,
 )
 
@@ -214,10 +216,35 @@ def _cov_factor_step(
             structural.B_global.unsqueeze(0).expand(regime.shape[0], -1, -1),
             structural.B_fx_broad.unsqueeze(0) * fx_mask * torch.exp(0.5 * regime[:, 0]).view(-1, 1, 1),
             structural.B_fx_cross.unsqueeze(0) * fx_mask * torch.exp(0.5 * regime[:, 1]).view(-1, 1, 1),
+            structural.B_index_static.unsqueeze(0).expand(
+                regime.shape[0], -1, -1
+            )
+            * index_mask,
+            _index_group_block(
+                assets=batch.assets,
+                structural=structural,
+                device=batch.X_asset.device,
+                dtype=batch.X_asset.dtype,
+            ).unsqueeze(0).expand(regime.shape[0], -1, -1),
             structural.B_index.unsqueeze(0) * index_mask * torch.exp(0.5 * regime[:, 2]).view(-1, 1, 1),
             structural.B_commodity.unsqueeze(0) * commodity_mask * torch.exp(0.5 * regime[:, 3]).view(-1, 1, 1),
         ],
         dim=-1,
+    )
+
+
+def _index_group_block(
+    *,
+    assets: RuntimeAssetMetadata,
+    structural: StructuralPosteriorMeans,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    return build_index_group_block(
+        assets=assets,
+        group_scale=structural.index_group_scale,
+        device=device,
+        dtype=dtype,
     )
 
 
@@ -290,6 +317,12 @@ def _move_covariance_loadings(
         B_fx_broad=structural.B_fx_broad.to(device=device, dtype=dtype),
         B_fx_cross=structural.B_fx_cross.to(device=device, dtype=dtype),
         B_index=structural.B_index.to(device=device, dtype=dtype),
+        B_index_static=structural.B_index_static.to(
+            device=device, dtype=dtype
+        ),
+        index_group_scale=structural.index_group_scale.to(
+            device=device, dtype=dtype
+        ),
         B_commodity=structural.B_commodity.to(device=device, dtype=dtype),
     )
 

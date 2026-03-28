@@ -25,10 +25,12 @@ from .shared_v3_l1_unified import (
     FactorCountConfig,
     MeanTensorMeans,
     PanelDimensions,
+    RuntimeAssetMetadata,
     StructuralTensorMeans,
     V3L1UnifiedRuntimeBatch,
     asset_class_mask,
     build_factor_count_config,
+    build_index_group_block,
     build_panel_dimensions,
     coerce_four_state_tensor,
 )
@@ -52,6 +54,8 @@ class FactorScalePriors:
     fx_broad_b_scale: float = 0.10
     fx_cross_b_scale: float = 0.06
     index_b_scale: float = 0.08
+    index_static_b_scale: float = 0.10
+    index_group_scale: float = 0.0
     commodity_b_scale: float = 0.08
 
 
@@ -209,6 +213,18 @@ def _build_factor_priors(raw: object) -> FactorPriors:
             index_b_scale=float(
                 values.get("index_b_scale", base.scales.index_b_scale)
             ),
+            index_static_b_scale=float(
+                values.get(
+                    "index_static_b_scale",
+                    base.scales.index_static_b_scale,
+                )
+            ),
+            index_group_scale=float(
+                values.get(
+                    "index_group_scale",
+                    base.scales.index_group_scale,
+                )
+            ),
             commodity_b_scale=float(
                 values.get(
                     "commodity_b_scale", base.scales.commodity_b_scale
@@ -299,6 +315,13 @@ def _sample_structural_sites(context: _ModelContext) -> StructuralTensorMeans:
                 context.priors.factors.counts.index_factor_count,
                 context.priors.factors.scales.index_b_scale,
             ),
+            B_index_static=_sample_loading(
+                context,
+                "B_index_static",
+                context.priors.factors.counts.index_static_factor_count,
+                context.priors.factors.scales.index_static_b_scale,
+            ),
+            index_group_scale=_sample_index_group_scale(context),
             B_commodity=_sample_loading(
                 context,
                 "B_commodity",
@@ -382,6 +405,12 @@ def _sample_beta(context: _ModelContext) -> torch.Tensor:
 def _sample_loading(
     context: _ModelContext, name: str, factor_count: int, scale: float
 ) -> torch.Tensor:
+    if factor_count < 1:
+        return torch.zeros(
+            (context.shape.A, 0),
+            device=context.device,
+            dtype=context.dtype,
+        )
     with pyro.plate(f"{name}_asset", context.shape.A, dim=-2):
         with pyro.plate(f"{name}_k", factor_count, dim=-1):
             return pyro.sample(
@@ -391,6 +420,25 @@ def _sample_loading(
                     torch.tensor(scale, device=context.device, dtype=context.dtype),
                 ),
             )
+
+
+def _sample_index_group_scale(context: _ModelContext) -> torch.Tensor:
+    group_count = int(context.batch.assets.index_group_count)
+    scale = float(context.priors.factors.scales.index_group_scale)
+    if group_count < 1 or scale <= 0.0:
+        return torch.zeros(0, device=context.device, dtype=context.dtype)
+    with pyro.plate("index_group", group_count, dim=-1):
+        return pyro.sample(
+            "index_group_scale",
+            dist.HalfNormal(
+                torch.full(
+                    (group_count,),
+                    scale,
+                    device=context.device,
+                    dtype=context.dtype,
+                )
+            ),
+        )
 
 
 def _sample_regime_scales(context: _ModelContext) -> _RegimeScales:
@@ -491,6 +539,13 @@ def _cov_factor_path(
     loadings = structural.loadings
     fx_broad = loadings.B_fx_broad.unsqueeze(0) * fx_mask.unsqueeze(0) * torch.exp(0.5 * regime_path[:, 0]).view(-1, 1, 1)
     fx_cross = loadings.B_fx_cross.unsqueeze(0) * fx_mask.unsqueeze(0) * torch.exp(0.5 * regime_path[:, 1]).view(-1, 1, 1)
+    index_static = loadings.B_index_static.unsqueeze(0) * index_mask.unsqueeze(0)
+    index_group_block = _index_group_block(
+        assets=context.batch.assets,
+        loadings=loadings,
+        device=context.device,
+        dtype=context.dtype,
+    )
     index_block = loadings.B_index.unsqueeze(0) * index_mask.unsqueeze(0) * torch.exp(0.5 * regime_path[:, 2]).view(-1, 1, 1)
     commodity_block = loadings.B_commodity.unsqueeze(0) * commodity_mask.unsqueeze(0) * torch.exp(0.5 * regime_path[:, 3]).view(-1, 1, 1)
     return torch.cat(
@@ -498,10 +553,27 @@ def _cov_factor_path(
             loadings.B_global.unsqueeze(0).expand(context.shape.T, -1, -1),
             fx_broad,
             fx_cross,
+            index_static.expand(context.shape.T, -1, -1),
+            index_group_block.expand(context.shape.T, -1, -1),
             index_block,
             commodity_block,
         ],
         dim=-1,
+    )
+
+
+def _index_group_block(
+    *,
+    assets: RuntimeAssetMetadata,
+    loadings: CovarianceLoadings,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    return build_index_group_block(
+        assets=assets,
+        group_scale=loadings.index_group_scale,
+        device=device,
+        dtype=dtype,
     )
 
 

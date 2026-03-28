@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, cast
 
@@ -43,6 +44,74 @@ def build_asset_class_ids(
     return cast(torch.LongTensor, tensor)
 
 
+def build_index_group_ids(
+    asset_names: tuple[str, ...],
+    *,
+    class_ids: torch.LongTensor,
+    device: torch.device,
+) -> tuple[torch.LongTensor, int]:
+    group_codes = [_index_group_code(name) for name in asset_names]
+    ordered_codes = sorted({code for code in group_codes if code is not None})
+    group_lookup = {code: idx for idx, code in enumerate(ordered_codes)}
+    values = [
+        group_lookup[code]
+        if class_id == INDEX_CLASS_ID and code is not None
+        else -1
+        for code, class_id in zip(group_codes, class_ids.tolist(), strict=True)
+    ]
+    tensor = torch.tensor(values, device=device, dtype=torch.long)
+    return cast(torch.LongTensor, tensor), len(ordered_codes)
+
+
+def build_index_group_exposure(
+    *,
+    group_ids: torch.LongTensor,
+    group_count: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    asset_count = int(group_ids.shape[0])
+    if group_count < 1:
+        return torch.zeros((asset_count, 0), device=device, dtype=dtype)
+    exposure = torch.zeros((asset_count, group_count), device=device, dtype=dtype)
+    valid = cast(torch.BoolTensor, group_ids >= 0)
+    if bool(valid.any()):
+        asset_index = valid.nonzero(as_tuple=False).squeeze(-1)
+        group_index = group_ids[valid]
+        exposure[asset_index, group_index] = 1.0
+    return exposure
+
+
+def build_index_group_block(
+    *,
+    assets: "RuntimeAssetMetadata",
+    group_scale: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    if int(group_scale.numel()) < 1:
+        return torch.zeros(
+            (int(assets.class_ids.shape[0]), 0), device=device, dtype=dtype
+        )
+    exposure = build_index_group_exposure(
+        group_ids=assets.index_group_ids,
+        group_count=assets.index_group_count,
+        device=device,
+        dtype=dtype,
+    )
+    return exposure * group_scale.unsqueeze(0)
+
+
+def _index_group_code(name: str) -> str | None:
+    normalized = str(name).strip().upper()
+    if classify_asset_name(normalized) != INDEX_CLASS_ID:
+        return None
+    match = re.match(r"^IB([A-Z]+)\d", normalized)
+    if match is None:
+        return normalized
+    return match.group(1)
+
+
 def asset_class_mask(
     class_ids: torch.LongTensor, *, class_id: int, dtype: torch.dtype
 ) -> torch.Tensor:
@@ -53,6 +122,8 @@ def asset_class_mask(
 class RuntimeAssetMetadata:
     asset_names: tuple[str, ...]
     class_ids: torch.LongTensor
+    index_group_ids: torch.LongTensor
+    index_group_count: int
 
     @property
     def fx_mask(self) -> torch.BoolTensor:
@@ -73,6 +144,7 @@ class FactorCountConfig:
     fx_broad_factor_count: int = 1
     fx_cross_factor_count: int = 1
     index_factor_count: int = 1
+    index_static_factor_count: int = 0
     commodity_factor_count: int = 1
 
 
@@ -107,6 +179,8 @@ class CovarianceLoadings:
     B_fx_broad: torch.Tensor
     B_fx_cross: torch.Tensor
     B_index: torch.Tensor
+    B_index_static: torch.Tensor
+    index_group_scale: torch.Tensor
     B_commodity: torch.Tensor
 
 
@@ -172,6 +246,14 @@ class StructuralPosteriorMeans:
         return self.tensors.loadings.B_index
 
     @property
+    def B_index_static(self) -> torch.Tensor:
+        return self.tensors.loadings.B_index_static
+
+    @property
+    def index_group_scale(self) -> torch.Tensor:
+        return self.tensors.loadings.index_group_scale
+
+    @property
     def B_commodity(self) -> torch.Tensor:
         return self.tensors.loadings.B_commodity
 
@@ -201,6 +283,8 @@ class StructuralPosteriorMeans:
             "B_fx_broad": self.B_fx_broad.detach(),
             "B_fx_cross": self.B_fx_cross.detach(),
             "B_index": self.B_index.detach(),
+            "B_index_static": self.B_index_static.detach(),
+            "index_group_scale": self.index_group_scale.detach(),
             "B_commodity": self.B_commodity.detach(),
             "s_u_fx_broad_mean": self.s_u_fx_broad_mean.detach(),
             "s_u_fx_cross_mean": self.s_u_fx_cross_mean.detach(),
@@ -221,6 +305,8 @@ class StructuralPosteriorMeans:
             "B_fx_broad",
             "B_fx_cross",
             "B_index",
+            "B_index_static",
+            "index_group_scale",
             "B_commodity",
             "s_u_fx_broad_mean",
             "s_u_fx_cross_mean",
@@ -243,6 +329,8 @@ class StructuralPosteriorMeans:
                     B_fx_broad=values["B_fx_broad"],
                     B_fx_cross=values["B_fx_cross"],
                     B_index=values["B_index"],
+                    B_index_static=values["B_index_static"],
+                    index_group_scale=values["index_group_scale"],
                     B_commodity=values["B_commodity"],
                 ),
             ),
@@ -285,6 +373,12 @@ def build_factor_count_config(
         ),
         index_factor_count=int(
             values.get("index_factor_count", base.index_factor_count)
+        ),
+        index_static_factor_count=int(
+            values.get(
+                "index_static_factor_count",
+                base.index_static_factor_count,
+            )
         ),
         commodity_factor_count=int(
             values.get("commodity_factor_count", base.commodity_factor_count)

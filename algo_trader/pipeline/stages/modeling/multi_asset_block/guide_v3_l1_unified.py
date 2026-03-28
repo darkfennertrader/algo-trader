@@ -38,6 +38,7 @@ from .shared_v3_l1_unified import (
     V3L1UnifiedRuntimeBatch,
     build_asset_class_ids,
     build_factor_count_config,
+    build_index_group_ids,
     build_panel_dimensions,
     coerce_four_state_tensor,
 )
@@ -59,6 +60,7 @@ class RegimePhiConfig:
 class V3L1UnifiedGuideConfig:
     counts: FactorCountConfig = FactorCountConfig()
     phi: RegimePhiConfig = RegimePhiConfig()
+    index_group_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,12 @@ class MultiAssetBlockGuideV3L1UnifiedOnlineFiltering(PyroGuide):
                     B_fx_broad=store.get_param("B_fx_broad_loc").detach(),
                     B_fx_cross=store.get_param("B_fx_cross_loc").detach(),
                     B_index=store.get_param("B_index_loc").detach(),
+                    B_index_static=store.get_param("B_index_static_loc").detach(),
+                    index_group_scale=_optional_positive_summary(
+                        store=store,
+                        name="index_group_scale",
+                        use_median=False,
+                    ),
                     B_commodity=store.get_param("B_commodity_loc").detach(),
                 ),
             ),
@@ -126,6 +134,12 @@ class MultiAssetBlockGuideV3L1UnifiedOnlineFiltering(PyroGuide):
                     B_fx_broad=store.get_param("B_fx_broad_loc").detach(),
                     B_fx_cross=store.get_param("B_fx_cross_loc").detach(),
                     B_index=store.get_param("B_index_loc").detach(),
+                    B_index_static=store.get_param("B_index_static_loc").detach(),
+                    index_group_scale=_optional_positive_summary(
+                        store=store,
+                        name="index_group_scale",
+                        use_median=True,
+                    ),
                     B_commodity=store.get_param("B_commodity_loc").detach(),
                 ),
             ),
@@ -158,13 +172,21 @@ def build_v3_l1_unified_runtime_batch(
         time_mask=_resolve_time_mask(batch, shape.T, shape.A),
         obs_scale=batch.obs_scale,
     )
+    class_ids = build_asset_class_ids(asset_names, device=shape.device)
+    index_group_ids, index_group_count = build_index_group_ids(
+        asset_names,
+        class_ids=class_ids,
+        device=shape.device,
+    )
     return V3L1UnifiedRuntimeBatch(
         X_asset=X_asset.to(device=shape.device, dtype=shape.dtype),
         X_global=batch.X_global.to(device=shape.device, dtype=shape.dtype),
         observations=observations,
         assets=RuntimeAssetMetadata(
             asset_names=asset_names,
-            class_ids=build_asset_class_ids(asset_names, device=shape.device),
+            class_ids=class_ids,
+            index_group_ids=index_group_ids,
+            index_group_count=index_group_count,
         ),
         filtering_state=_resolve_filtering_state(
             batch.filtering_state,
@@ -194,11 +216,13 @@ def _build_guide_config(params: Mapping[str, Any]) -> V3L1UnifiedGuideConfig:
         "fx_broad_factor_count",
         "fx_cross_factor_count",
         "index_factor_count",
+        "index_static_factor_count",
         "commodity_factor_count",
         "phi_fx_broad",
         "phi_fx_cross",
         "phi_index",
         "phi_commodity",
+        "index_group_enabled",
     }
     if extra:
         raise ConfigError(
@@ -219,6 +243,9 @@ def _build_guide_config(params: Mapping[str, Any]) -> V3L1UnifiedGuideConfig:
             phi_commodity=float(
                 values.get("phi_commodity", base.phi.phi_commodity)
             ),
+        ),
+        index_group_enabled=bool(
+            values.get("index_group_enabled", base.index_group_enabled)
         ),
     )
 
@@ -248,6 +275,10 @@ def _sample_structural_sites(
         context, "B_fx_cross", config.counts.fx_cross_factor_count
     )
     _sample_loading_matrix(context, "B_index", config.counts.index_factor_count)
+    _sample_loading_matrix(
+        context, "B_index_static", config.counts.index_static_factor_count
+    )
+    _sample_index_group_scale(context=context, config=config)
     _sample_loading_matrix(
         context, "B_commodity", config.counts.commodity_factor_count
     )
@@ -369,6 +400,19 @@ def _sample_beta(context: _GuideContext) -> None:
 def _sample_loading_matrix(
     context: _GuideContext, name: str, factor_count: int
 ) -> None:
+    if factor_count < 1:
+        empty = torch.zeros(
+            (context.shape.A, 0),
+            device=context.device,
+            dtype=context.dtype,
+        )
+        pyro.param(f"{name}_loc", empty)
+        pyro.param(
+            f"{name}_scale",
+            empty,
+            constraint=constraints.positive,
+        )
+        return
     with pyro.plate(f"{name}_asset", context.shape.A, dim=-2):
         with pyro.plate(f"{name}_k", factor_count, dim=-1):
             loc = pyro.param(
@@ -390,6 +434,44 @@ def _sample_loading_matrix(
                 constraint=constraints.positive,
             )
             pyro.sample(name, dist.Normal(loc, scale))
+
+
+def _sample_index_group_scale(
+    *, context: _GuideContext, config: V3L1UnifiedGuideConfig
+) -> None:
+    group_count = int(context.batch.assets.index_group_count)
+    if not config.index_group_enabled or group_count < 1:
+        pyro.param(
+            "index_group_scale_loc",
+            torch.zeros(0, device=context.device, dtype=context.dtype),
+        )
+        pyro.param(
+            "index_group_scale_scale",
+            torch.zeros(0, device=context.device, dtype=context.dtype),
+            constraint=constraints.positive,
+        )
+        return
+    loc = pyro.param(
+        "index_group_scale_loc",
+        torch.full(
+            (group_count,),
+            _INIT_POSITIVE_LOC,
+            device=context.device,
+            dtype=context.dtype,
+        ),
+    )
+    scale = pyro.param(
+        "index_group_scale_scale",
+        torch.full(
+            (group_count,),
+            _INIT_LOGSCALE,
+            device=context.device,
+            dtype=context.dtype,
+        ),
+        constraint=constraints.positive,
+    )
+    with pyro.plate("index_group", group_count, dim=-1):
+        pyro.sample("index_group_scale", dist.LogNormal(loc, scale))
 
 
 def _sample_regime_scale_sites(context: _GuideContext) -> None:
@@ -485,6 +567,15 @@ def _positive_summary(*, store: Any, name: str, use_median: bool) -> torch.Tenso
         return _lognormal_median(loc).detach()
     scale = store.get_param(f"{name}_scale")
     return _lognormal_mean(loc, scale).detach()
+
+
+def _optional_positive_summary(
+    *, store: Any, name: str, use_median: bool
+) -> torch.Tensor:
+    loc_name = f"{name}_loc"
+    if loc_name not in set(store.keys()):
+        return torch.zeros(0)
+    return _positive_summary(store=store, name=name, use_median=use_median)
 
 
 def _next_steps_seen(batch: V3L1UnifiedRuntimeBatch) -> int:

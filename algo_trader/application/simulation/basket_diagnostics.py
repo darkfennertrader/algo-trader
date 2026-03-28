@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -8,8 +9,10 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import torch
 
+from algo_trader.application.historical import HistoricalRequestConfig
 from algo_trader.domain import INDICES_BLOCK, SimulationError, build_asset_block_index_map
 from algo_trader.infrastructure import ensure_directory
+from algo_trader.infrastructure.data import symbol_directory
 
 from . import calibration_summary_diagnostics as calibration_diags
 from .diagnostics import _iter_payload_paths, _load_asset_names, _load_payload
@@ -44,8 +47,10 @@ _COVERAGE_LEVELS = (0.5, 0.9, 0.95)
 _PIT_BIN_COUNT = 20
 _TRUE_TOL_ABS = 1e-8
 _TRUE_TOL_REL = 1e-6
-_US_INDEX_NAMES = ("IBUS30", "IBUS500", "IBUST100")
-_EUROPE_INDEX_NAMES = (
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_TICKERS_CONFIG_PATH = _REPO_ROOT / "config" / "tickers.yml"
+_US_INDEX_SYMBOLS = ("IBUS30", "IBUS500", "IBUST100")
+_EUROPE_INDEX_SYMBOLS = (
     "IBDE40",
     "IBES35",
     "IBEU50",
@@ -53,8 +58,8 @@ _EUROPE_INDEX_NAMES = (
     "IBGB100",
     "IBNL25",
 )
-_SWISS_INDEX_NAMES = ("IBCH20",)
-_BROAD_MIXED_NAMES = (
+_SWISS_INDEX_SYMBOLS = ("IBCH20",)
+_BROAD_MIXED_SYMBOLS = (
     "IBUS500",
     "IBEU50",
     "IBCH20",
@@ -228,6 +233,10 @@ def _selection_payload(
 def _build_basket_specs(asset_names: Sequence[str]) -> Mapping[str, BasketSpec]:
     names = tuple(str(name) for name in asset_names)
     block_map = build_asset_block_index_map(names)
+    us_index_names = _canonicalize_requested_assets(_US_INDEX_SYMBOLS)
+    europe_index_names = _canonicalize_requested_assets(_EUROPE_INDEX_SYMBOLS)
+    swiss_index_names = _canonicalize_requested_assets(_SWISS_INDEX_SYMBOLS)
+    broad_mixed_names = _canonicalize_requested_assets(_BROAD_MIXED_SYMBOLS)
     specs = {
         "index_equal_weight": _equal_weight_spec(
             name="index_equal_weight",
@@ -237,31 +246,47 @@ def _build_basket_specs(asset_names: Sequence[str]) -> Mapping[str, BasketSpec]:
         "us_index": _equal_weight_spec(
             name="us_index",
             asset_names=names,
-            requested=_US_INDEX_NAMES,
+            requested=us_index_names,
         ),
         "europe_index": _equal_weight_spec(
             name="europe_index",
             asset_names=names,
-            requested=_EUROPE_INDEX_NAMES,
+            requested=europe_index_names,
         ),
         "swiss_index": _equal_weight_spec(
             name="swiss_index",
             asset_names=names,
-            requested=_SWISS_INDEX_NAMES,
+            requested=swiss_index_names,
         ),
         "us_minus_europe": _spread_spec(
             name="us_minus_europe",
             asset_names=names,
-            long_assets=_US_INDEX_NAMES,
-            short_assets=_EUROPE_INDEX_NAMES,
+            long_assets=us_index_names,
+            short_assets=europe_index_names,
         ),
         "broad_mixed": _equal_weight_spec(
             name="broad_mixed",
             asset_names=names,
-            requested=_BROAD_MIXED_NAMES,
+            requested=broad_mixed_names,
         ),
     }
     return specs
+
+
+@lru_cache(maxsize=1)
+def _ticker_symbol_aliases() -> Mapping[str, str]:
+    config = HistoricalRequestConfig.load(_TICKERS_CONFIG_PATH)
+    aliases: dict[str, str] = {}
+    for ticker in config.tickers:
+        canonical_name = symbol_directory(ticker)
+        aliases[ticker.symbol] = canonical_name
+        aliases[canonical_name] = canonical_name
+    return aliases
+
+
+def _canonicalize_requested_assets(requested: Sequence[str]) -> tuple[str, ...]:
+    aliases = _ticker_symbol_aliases()
+    return tuple(str(aliases.get(asset, asset)) for asset in requested)
 
 
 def _equal_weight_spec(

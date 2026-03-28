@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 import torch
@@ -64,7 +65,7 @@ def test_write_postprocess_basket_diagnostics_skips_unavailable_basket(
     broad_mixed_row = scores.loc[scores["basket"] == "broad_mixed"].iloc[0]
 
     assert broad_mixed["status"] == "unavailable"
-    assert broad_mixed["assets_missing"] == ["XAUUSD"]
+    assert broad_mixed["assets_missing"] == ["XAU.USD"]
     assert pd.isna(payload["basket_diagnostics"]["broad_mixed"]["crps"])
     assert broad_mixed_row["status"] == "unavailable"
     assert pd.isna(broad_mixed_row["crps"])
@@ -94,7 +95,8 @@ def test_write_global_basket_diagnostics_creates_manifest(
     assert manifest["scope"] == "selected_candidate_basket_diagnostics"
     assert payload["basket_definitions"]["us_minus_europe"]["status"] == "unavailable"
     assert not (output_dir / "pit_histogram_us_minus_europe.csv").exists()
-    assert int(histogram.loc[0, "n_outer_folds"]) == 2
+    outer_fold_count = cast(float, histogram.loc[0, "n_outer_folds"])
+    assert int(outer_fold_count) == 2
 
 
 def _write_inputs(base_dir: Path, *, include_xau: bool = True) -> None:
@@ -113,7 +115,7 @@ def _write_inputs(base_dir: Path, *, include_xau: bool = True) -> None:
         "USD.JPY",
     ]
     if include_xau:
-        columns.append("XAUUSD")
+        columns.append("XAU.USD")
     frame = pd.DataFrame(
         columns=columns,
     )

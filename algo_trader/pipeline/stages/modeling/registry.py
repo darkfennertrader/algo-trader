@@ -31,6 +31,7 @@ _MODEL_MODULES = (
     "algo_trader.pipeline.stages.modeling.multi_asset_block.model_v3_l4_unified",
     "algo_trader.pipeline.stages.modeling.multi_asset_block.model_v3_l5_unified",
     "algo_trader.pipeline.stages.modeling.multi_asset_block.model_v3_l6_unified",
+    "algo_trader.pipeline.stages.modeling.multi_asset_block.model_v3_l7_unified",
 )
 
 _GUIDE_MODULES = (
@@ -53,6 +54,7 @@ _GUIDE_MODULES = (
     "algo_trader.pipeline.stages.modeling.multi_asset_block.guide_v3_l4_unified",
     "algo_trader.pipeline.stages.modeling.multi_asset_block.guide_v3_l5_unified",
     "algo_trader.pipeline.stages.modeling.multi_asset_block.guide_v3_l6_unified",
+    "algo_trader.pipeline.stages.modeling.multi_asset_block.guide_v3_l7_unified",
 )
 
 _PREDICTOR_MODULES = (
@@ -74,6 +76,7 @@ _PREDICTOR_MODULES = (
     "algo_trader.pipeline.stages.modeling.multi_asset_block.predict_v3_l4_unified",
     "algo_trader.pipeline.stages.modeling.multi_asset_block.predict_v3_l5_unified",
     "algo_trader.pipeline.stages.modeling.multi_asset_block.predict_v3_l6_unified",
+    "algo_trader.pipeline.stages.modeling.multi_asset_block.predict_v3_l7_unified",
 )
 
 

@@ -8,6 +8,7 @@ from algo_trader.application.simulation.model_selection import (
     _complexity_scores_post_tune,
     FinalSelectionInputs,
     _select_final_candidate,
+    _variogram_weekly,
 )
 from algo_trader.domain.simulation import (
     CandidateSpec,
@@ -95,3 +96,24 @@ def test_select_final_candidate_prefers_more_calibrated_survivor() -> None:
     assert selection["best_candidate_id"] == 1
     assert selection["survivors_calibration"] == [1]
     assert selection["survivors_es"] == [1]
+
+
+def test_variogram_weekly_matches_manual_two_asset_case() -> None:
+    z_true = torch.tensor([[1.0, 3.0]])
+    z_samples = torch.tensor(
+        [
+            [[0.0, 1.0]],
+            [[2.0, 5.0]],
+        ]
+    )
+
+    score = _variogram_weekly(
+        z_true=z_true,
+        z_samples=z_samples,
+        variogram_p=0.5,
+    )
+
+    expected = torch.tensor(
+        [(2.0 ** 0.5 - (1.0 + 3.0 ** 0.5) / 2.0) ** 2]
+    )
+    assert torch.allclose(score, expected)

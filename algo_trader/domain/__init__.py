@@ -1,3 +1,15 @@
+from .asset_blocks import (
+    BLOCK_ORDER,
+    COMMODITIES_BLOCK,
+    COMMODITY_CLASS_ID,
+    FULL_BLOCK,
+    FX_BLOCK,
+    FX_CLASS_ID,
+    INDICES_BLOCK,
+    INDEX_CLASS_ID,
+    build_asset_block_index_map,
+    classify_asset_name,
+)
 from .errors import (
     AlgoTraderError,
     ConfigError,
@@ -13,6 +25,16 @@ from .errors import (
 )
 
 __all__ = (
+    "BLOCK_ORDER",
+    "COMMODITIES_BLOCK",
+    "COMMODITY_CLASS_ID",
+    "FULL_BLOCK",
+    "FX_BLOCK",
+    "FX_CLASS_ID",
+    "INDICES_BLOCK",
+    "INDEX_CLASS_ID",
+    "build_asset_block_index_map",
+    "classify_asset_name",
     "AlgoTraderError",
     "ConfigError",
     "DataProcessingError",

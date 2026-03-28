@@ -18,6 +18,7 @@ from .diagnostics_output import (
 )
 from .svi_loss_diagnostics import run_svi_loss_diagnostics
 from .posterior_scale_diagnostics import run_posterior_scale_diagnostics
+from .residual_dependence_diagnostics import write_global_residual_dependence
 from .inner_objective import InnerObjectiveContext
 from .model_selection import (
     GlobalSelectionContext,
@@ -119,6 +120,7 @@ def select_best_config(
             outer_k=resources.outer_k,
             candidates=context.candidates,
             model_selection=resources.model_selection,
+            score_spec=context.inner_context.params.score_spec,
             use_gpu=resources.use_gpu,
         )
     )
@@ -201,6 +203,12 @@ def run_global_diagnostics(
         write_aggregate_calibration_diagnostics(
             base_dir=base_dir,
             outer_ids=outer_ids,
+        )
+    if model_selection_enabled:
+        write_global_residual_dependence(
+            base_dir=base_dir,
+            outer_ids=outer_ids,
+            candidate_id=candidate_id,
         )
 
 

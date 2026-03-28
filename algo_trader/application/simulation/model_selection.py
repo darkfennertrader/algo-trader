@@ -1,6 +1,7 @@
 from __future__ import annotations
-# pylint: disable=too-many-lines
+# pylint: disable=too-many-lines,duplicate-code
 
+import csv
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -9,7 +10,15 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import torch
 
-from algo_trader.domain import SimulationError
+from algo_trader.domain import (
+    BLOCK_ORDER,
+    COMMODITIES_BLOCK,
+    FULL_BLOCK,
+    FX_BLOCK,
+    INDICES_BLOCK,
+    SimulationError,
+    build_asset_block_index_map,
+)
 from algo_trader.domain.simulation import (
     CandidateSpec,
     ModelSelectionComplexity,
@@ -17,7 +26,23 @@ from algo_trader.domain.simulation import (
 )
 from .artifacts import SimulationArtifacts
 from . import calibration_summary_diagnostics as calibration_diags
+from .block_scoring_output import (
+    write_global_block_scores,
+    write_postprocess_block_scores,
+)
+from .dependence_scoring_output import (
+    write_global_dependence_scores,
+    write_postprocess_dependence_scores,
+)
+from .basket_diagnostics import (
+    BASKET_ORDER,
+    compute_candidate_basket_diagnostics,
+    write_global_basket_diagnostics,
+    write_postprocess_basket_diagnostics,
+)
+from .index_ranges import decode_indices_field
 from .metrics.inner import energy_score_terms
+from .residual_dependence_diagnostics import write_postprocess_residual_dependence
 
 
 @dataclass(frozen=True)
@@ -26,6 +51,7 @@ class PostTuneSelectionContext:
     outer_k: int
     candidates: Sequence[CandidateSpec]
     model_selection: ModelSelectionConfig
+    score_spec: Mapping[str, Any]
     use_gpu: bool
 
 
@@ -53,6 +79,34 @@ class SecondaryEvalContext:
     device: torch.device
 
 
+@dataclass(frozen=True)
+class BlockMetricContext:
+    alpha: float
+    batch_splits: int
+    score_spec: Mapping[str, Any]
+    device: torch.device
+    block_indices: Mapping[str, tuple[int, ...]]
+    panel_targets: torch.Tensor
+    splits: Sequence[Mapping[str, Any]]
+
+
+@dataclass(frozen=True)
+class BlockScoreInputs:
+    es_metrics: Mapping[int, Mapping[str, float]]
+    calibration_metrics: Mapping[int, Mapping[str, float]]
+    crps_metrics: Mapping[int, float]
+    ql_metrics: Mapping[int, float]
+
+
+@dataclass(frozen=True)
+class CandidateBlockMetricValues:
+    es_metrics: Mapping[str, float]
+    calibration_metrics: Mapping[str, float]
+    crps_model: float
+    ql_model: float
+    secondary_available: bool
+
+
 @dataclass
 class SecondaryAccumulators:
     crps_sum: torch.Tensor
@@ -67,6 +121,12 @@ class CalibrationAccumulators:
     coverage_count: dict[float, torch.Tensor]
     pit_sum: torch.Tensor
     pit_count: torch.Tensor
+
+
+@dataclass(frozen=True)
+class CandidatePayloadEntry:
+    split_id: int
+    payload: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -86,10 +146,21 @@ class CoverageErrorSummary:
     max_error: float
 
 
+_BLOCK_COVERAGE_LEVELS = (0.5, 0.9, 0.95)
+_DEPENDENCE_VARIOGRAM_P = 0.5
+
+
 def select_best_candidate_post_tune(
     context: PostTuneSelectionContext,
 ) -> PostTuneSelectionResult:
     device = _resolve_device(context.use_gpu)
+    block_context = _build_block_metric_context(
+        base_dir=context.artifacts.base_dir,
+        outer_k=context.outer_k,
+        model_selection=context.model_selection,
+        score_spec=context.score_spec,
+        device=device,
+    )
     es_metrics = _compute_es_metrics(
         base_dir=context.artifacts.base_dir,
         outer_k=context.outer_k,
@@ -119,6 +190,18 @@ def select_best_candidate_post_tune(
         model_selection=context.model_selection,
         device=device,
     )
+    block_scores, dependence_scores, basket_diagnostics = _compute_diagnostic_scores(
+        base_dir=context.artifacts.base_dir,
+        outer_k=context.outer_k,
+        context=block_context,
+        candidate_ids=[int(candidate.candidate_id) for candidate in context.candidates],
+        inputs=BlockScoreInputs(
+            es_metrics=es_metrics,
+            calibration_metrics=calibration_metrics,
+            crps_metrics=crps_metrics,
+            ql_metrics=ql_metrics,
+        ),
+    )
     complexity = _complexity_scores_post_tune(
         base_dir=context.artifacts.base_dir,
         outer_k=context.outer_k,
@@ -140,13 +223,48 @@ def select_best_candidate_post_tune(
         calibration_metrics=calibration_metrics,
         crps_metrics=crps_metrics,
         ql_metrics=ql_metrics,
+        block_scores=block_scores,
+        dependence_scores=dependence_scores,
+        basket_diagnostics=basket_diagnostics,
         complexity=complexity,
+    )
+    selection = _with_best_candidate_block_scores(
+        selection=selection,
+        metrics_payload=metrics_payload,
+    )
+    selection = _with_best_candidate_dependence_scores(
+        selection=selection,
+        metrics_payload=metrics_payload,
+    )
+    selection = _with_best_candidate_basket_diagnostics(
+        selection=selection,
+        metrics_payload=metrics_payload,
     )
     context.artifacts.write_postprocess_metrics(
         outer_k=context.outer_k, metrics=metrics_payload
     )
     context.artifacts.write_postprocess_selection(
         outer_k=context.outer_k, selection=selection
+    )
+    _write_postprocess_block_scores_report(
+        base_dir=context.artifacts.base_dir,
+        outer_k=context.outer_k,
+        selection=selection,
+    )
+    _write_postprocess_dependence_scores_report(
+        base_dir=context.artifacts.base_dir,
+        outer_k=context.outer_k,
+        selection=selection,
+    )
+    _write_postprocess_basket_diagnostics_report(
+        base_dir=context.artifacts.base_dir,
+        outer_k=context.outer_k,
+        selection=selection,
+    )
+    _write_postprocess_residual_dependence_report(
+        base_dir=context.artifacts.base_dir,
+        outer_k=context.outer_k,
+        selection=selection,
     )
     return PostTuneSelectionResult(
         best_candidate_id=int(selection["best_candidate_id"]),
@@ -162,9 +280,16 @@ def select_best_candidate_global(
         base_dir=context.artifacts.base_dir,
         outer_ids=context.outer_ids,
     )
-    es_metrics, calibration_metrics, crps_metrics, ql_metrics, complexity = (
-        _aggregate_global_metrics(outer_metrics)
-    )
+    (
+        es_metrics,
+        calibration_metrics,
+        crps_metrics,
+        ql_metrics,
+        block_scores,
+        dependence_scores,
+        basket_diagnostics,
+        complexity,
+    ) = _aggregate_global_metrics(outer_metrics)
     selection = _select_final_candidate(
         inputs=FinalSelectionInputs(
             es_metrics=es_metrics,
@@ -180,10 +305,40 @@ def select_best_candidate_global(
         calibration_metrics=calibration_metrics,
         crps_metrics=crps_metrics,
         ql_metrics=ql_metrics,
+        block_scores=block_scores,
+        dependence_scores=dependence_scores,
+        basket_diagnostics=basket_diagnostics,
         complexity=complexity,
+    )
+    selection = _with_best_candidate_block_scores(
+        selection=selection,
+        metrics_payload=metrics_payload,
+    )
+    selection = _with_best_candidate_dependence_scores(
+        selection=selection,
+        metrics_payload=metrics_payload,
+    )
+    selection = _with_best_candidate_basket_diagnostics(
+        selection=selection,
+        metrics_payload=metrics_payload,
     )
     context.artifacts.write_global_metrics(payload=metrics_payload)
     context.artifacts.write_global_selection(payload=selection)
+    _write_global_block_scores_report(
+        base_dir=context.artifacts.base_dir,
+        outer_ids=context.outer_ids,
+        selection=selection,
+    )
+    _write_global_dependence_scores_report(
+        base_dir=context.artifacts.base_dir,
+        outer_ids=context.outer_ids,
+        selection=selection,
+    )
+    _write_global_basket_diagnostics_report(
+        base_dir=context.artifacts.base_dir,
+        outer_ids=context.outer_ids,
+        selection=selection,
+    )
     return PostTuneSelectionResult(
         best_candidate_id=int(selection["best_candidate_id"]),
         metrics=metrics_payload,
@@ -272,6 +427,681 @@ def _compute_calibration_metrics(
                 device=device,
             )
     return metrics
+
+
+def _build_block_metric_context(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    model_selection: ModelSelectionConfig,
+    score_spec: Mapping[str, Any],
+    device: torch.device,
+) -> BlockMetricContext:
+    asset_names = _load_asset_names(base_dir)
+    return BlockMetricContext(
+        alpha=float(model_selection.tail.alpha),
+        batch_splits=max(1, int(model_selection.batching.splits)),
+        score_spec=score_spec,
+        device=device,
+        block_indices=build_asset_block_index_map(asset_names),
+        panel_targets=_load_panel_targets(base_dir),
+        splits=_load_outer_splits(base_dir=base_dir, outer_k=outer_k),
+    )
+
+
+def _compute_diagnostic_scores(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    context: BlockMetricContext,
+    candidate_ids: Sequence[int],
+    inputs: BlockScoreInputs,
+) -> tuple[
+    Mapping[int, Mapping[str, Mapping[str, float]]],
+    Mapping[int, Mapping[str, Mapping[str, float]]],
+    Mapping[int, Mapping[str, Mapping[str, float]]],
+]:
+    block_scores: dict[int, Mapping[str, Mapping[str, float]]] = {}
+    dependence_scores: dict[int, Mapping[str, Mapping[str, float]]] = {}
+    basket_diagnostics: dict[int, Mapping[str, Mapping[str, float]]] = {}
+    asset_names = _load_asset_names(base_dir)
+    for candidate_id in candidate_ids:
+        entries = _load_candidate_payload_entries(
+            base_dir=base_dir,
+            outer_k=outer_k,
+            candidate_id=int(candidate_id),
+        )
+        candidate_block_scores = _evaluate_block_scores_for_candidate(
+            context=context,
+            entries=entries,
+            values=_candidate_block_metric_values(
+                candidate_id=int(candidate_id),
+                inputs=inputs,
+            ),
+        )
+        block_scores[int(candidate_id)] = candidate_block_scores
+        dependence_scores[int(candidate_id)] = _evaluate_dependence_scores_for_candidate(
+            context=context,
+            entries=entries,
+            block_scores=candidate_block_scores,
+            variogram_p=_DEPENDENCE_VARIOGRAM_P,
+        )
+        basket_diagnostics[int(candidate_id)] = compute_candidate_basket_diagnostics(
+            asset_names=asset_names,
+            payloads=[entry.payload for entry in entries],
+        ).scores
+    return block_scores, dependence_scores, basket_diagnostics
+
+
+def _candidate_block_metric_values(
+    *, candidate_id: int, inputs: BlockScoreInputs
+) -> CandidateBlockMetricValues:
+    return CandidateBlockMetricValues(
+        es_metrics=inputs.es_metrics[candidate_id],
+        calibration_metrics=inputs.calibration_metrics[candidate_id],
+        crps_model=inputs.crps_metrics.get(candidate_id, float("nan")),
+        ql_model=inputs.ql_metrics.get(candidate_id, float("nan")),
+        secondary_available=(
+            candidate_id in inputs.crps_metrics and candidate_id in inputs.ql_metrics
+        ),
+    )
+
+
+def _evaluate_block_scores_for_candidate(
+    *,
+    context: BlockMetricContext,
+    entries: Sequence[CandidatePayloadEntry],
+    values: CandidateBlockMetricValues,
+) -> Mapping[str, Mapping[str, float]]:
+    block_scores = dict(
+        _evaluate_non_full_block_scores(
+            context=context,
+            entries=entries,
+            secondary_available=values.secondary_available,
+        )
+    )
+    block_scores[FULL_BLOCK] = _full_block_scores(
+        block_indices=context.block_indices,
+        es_metrics=values.es_metrics,
+        calibration_metrics=values.calibration_metrics,
+        crps_model=values.crps_model,
+        ql_model=values.ql_model,
+    )
+    return block_scores
+
+
+def _evaluate_non_full_block_scores(
+    *,
+    context: BlockMetricContext,
+    entries: Sequence[CandidatePayloadEntry],
+    secondary_available: bool,
+) -> Mapping[str, Mapping[str, float]]:
+    block_names = (FX_BLOCK, INDICES_BLOCK, COMMODITIES_BLOCK)
+    scores: dict[str, dict[str, float]] = {
+        block: _empty_block_scores(context.block_indices[block])
+        for block in block_names
+    }
+    if not entries:
+        return scores
+    es_values = {
+        block: _aggregate_block_es_groups(context=context, entries=entries, block=block)
+        for block in block_names
+    }
+    coverage_values = {
+        block: _aggregate_block_coverage_groups(
+            context=context,
+            entries=entries,
+            block=block,
+            coverage_levels=_BLOCK_COVERAGE_LEVELS,
+        )
+        for block in block_names
+    }
+    crps_group: torch.Tensor | None = None
+    ql_group: torch.Tensor | None = None
+    if secondary_available:
+        crps_group, ql_group = _aggregate_secondary_groups_from_entries(
+            entries=entries,
+            alpha=context.alpha,
+            device=context.device,
+            batch_splits=context.batch_splits,
+        )
+    for block in block_names:
+        block_scores = scores[block]
+        indices = context.block_indices[block]
+        if not indices:
+            continue
+        block_scores["es"] = _median_or_nan(es_values[block].tolist())
+        if crps_group is not None and ql_group is not None:
+            block_scores["crps"] = _median_over_asset_indices(crps_group, indices)
+            block_scores["ql"] = _median_over_asset_indices(ql_group, indices)
+        for level in _BLOCK_COVERAGE_LEVELS:
+            tag = calibration_diags.coverage_level_tag(level)
+            block_scores[f"coverage_{tag}"] = _median_over_defined(
+                coverage_values[block][float(level)]
+            )
+    return scores
+
+
+def _empty_block_scores(indices: Sequence[int]) -> dict[str, float]:
+    values = {
+        "es": float("nan"),
+        "crps": float("nan"),
+        "ql": float("nan"),
+        "coverage_p50": float("nan"),
+        "coverage_p90": float("nan"),
+        "coverage_p95": float("nan"),
+        "n_assets": float(len(indices)),
+    }
+    return values
+
+
+def _full_block_scores(
+    *,
+    block_indices: Mapping[str, tuple[int, ...]],
+    es_metrics: Mapping[str, float],
+    calibration_metrics: Mapping[str, float],
+    crps_model: float,
+    ql_model: float,
+) -> Mapping[str, float]:
+    return {
+        "es": float(es_metrics["es_model"]),
+        "crps": float(crps_model),
+        "ql": float(ql_model),
+        "coverage_p50": float(calibration_metrics.get("coverage_p50", float("nan"))),
+        "coverage_p90": float(calibration_metrics.get("coverage_p90", float("nan"))),
+        "coverage_p95": float(calibration_metrics.get("coverage_p95", float("nan"))),
+        "n_assets": float(len(block_indices[FULL_BLOCK])),
+    }
+
+
+def _evaluate_dependence_scores_for_candidate(
+    *,
+    context: BlockMetricContext,
+    entries: Sequence[CandidatePayloadEntry],
+    block_scores: Mapping[str, Mapping[str, float]],
+    variogram_p: float,
+) -> Mapping[str, Mapping[str, float]]:
+    scores: dict[str, dict[str, float]] = {
+        block: _empty_dependence_scores(
+            indices=context.block_indices[block],
+            variogram_p=variogram_p,
+        )
+        for block in BLOCK_ORDER
+    }
+    for block in BLOCK_ORDER:
+        scores[block]["energy_score"] = float(
+            block_scores.get(block, {}).get("es", float("nan"))
+        )
+    if not entries:
+        return scores
+    variogram_values = {
+        block: _aggregate_block_variogram_groups(
+            context=context,
+            entries=entries,
+            block=block,
+            variogram_p=variogram_p,
+        )
+        for block in BLOCK_ORDER
+    }
+    for block in BLOCK_ORDER:
+        scores[block]["variogram_score"] = _median_or_nan(
+            variogram_values[block].tolist()
+        )
+    return scores
+
+
+def _empty_dependence_scores(
+    *, indices: Sequence[int], variogram_p: float
+) -> dict[str, float]:
+    return {
+        "energy_score": float("nan"),
+        "variogram_score": float("nan"),
+        "variogram_p": float(variogram_p),
+        "n_assets": float(len(indices)),
+    }
+
+
+def _aggregate_block_variogram_groups(
+    *,
+    context: BlockMetricContext,
+    entries: Sequence[CandidatePayloadEntry],
+    block: str,
+    variogram_p: float,
+) -> np.ndarray:
+    _validate_variogram_p(variogram_p)
+    index_tensor = _block_pair_index_tensor(
+        indices=context.block_indices[block],
+        device=context.device,
+    )
+    if index_tensor is None:
+        return np.asarray([], dtype=float)
+    group_count, variogram_sum, variogram_count = _init_scalar_group_totals(
+        payloads=[entry.payload for entry in entries],
+        device=context.device,
+    )
+    for batch in _iter_entry_batches(entries, context.batch_splits):
+        for entry in batch:
+            variogram_week, group_ids = _prepare_block_variogram_payload(
+                context=context,
+                entry=entry,
+                index_tensor=index_tensor,
+                variogram_p=variogram_p,
+            )
+            _accumulate_scalar_group_mean(
+                total_sum=variogram_sum,
+                total_count=variogram_count,
+                values=variogram_week,
+                group_ids=group_ids,
+                group_count=group_count,
+            )
+    values = _safe_divide(variogram_sum, variogram_count)
+    return values.detach().cpu().numpy()
+
+
+def _validate_variogram_p(variogram_p: float) -> None:
+    if variogram_p <= 0.0:
+        raise SimulationError("Variogram exponent must be > 0")
+
+
+def _block_pair_index_tensor(
+    *, indices: Sequence[int], device: torch.device
+) -> torch.Tensor | None:
+    if len(indices) < 2:
+        return None
+    return torch.as_tensor(indices, device=device, dtype=torch.long)
+
+
+def _init_scalar_group_totals(
+    *, payloads: Sequence[Mapping[str, Any]], device: torch.device
+) -> tuple[int, torch.Tensor, torch.Tensor]:
+    group_count = _infer_group_count(payloads)
+    dtype = _infer_payload_dtype(payloads)
+    zeros = torch.zeros(group_count, device=device, dtype=dtype)
+    return group_count, zeros.clone(), zeros
+
+
+def _accumulate_scalar_group_mean(
+    *,
+    total_sum: torch.Tensor,
+    total_count: torch.Tensor,
+    values: torch.Tensor,
+    group_ids: torch.Tensor,
+    group_count: int,
+) -> None:
+    group_mean, present = _group_scalar_mean(
+        values=values,
+        group_ids=group_ids,
+        group_count=group_count,
+    )
+    total_sum[present] = total_sum[present] + group_mean[present]
+    total_count[present] = total_count[present] + 1
+
+
+def _prepare_block_variogram_payload(
+    *,
+    context: BlockMetricContext,
+    entry: CandidatePayloadEntry,
+    index_tensor: torch.Tensor,
+    variogram_p: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    z_true, z_samples, group_ids = _prepare_z_payload(entry.payload, context.device)
+    return (
+        _variogram_weekly(
+            z_true=z_true.index_select(1, index_tensor),
+            z_samples=z_samples.index_select(2, index_tensor),
+            variogram_p=variogram_p,
+        ),
+        group_ids,
+    )
+
+
+def _variogram_weekly(
+    *,
+    z_true: torch.Tensor,
+    z_samples: torch.Tensor,
+    variogram_p: float,
+) -> torch.Tensor:
+    pair_indices = _resolve_variogram_pair_indices(z_true=z_true, z_samples=z_samples)
+    if pair_indices is None:
+        return torch.full(
+            (z_true.shape[0],),
+            float("nan"),
+            device=z_true.device,
+            dtype=z_true.dtype,
+        )
+    pair_i, pair_j = pair_indices
+    true_pairs, true_valid = _variogram_true_pairs(
+        z_true=z_true,
+        pair_i=pair_i,
+        pair_j=pair_j,
+        variogram_p=variogram_p,
+    )
+    sample_mean = _variogram_sample_pair_mean(
+        z_samples=z_samples,
+        pair_i=pair_i,
+        pair_j=pair_j,
+        variogram_p=variogram_p,
+    )
+    return _mean_variogram_sq_error(
+        true_pairs=true_pairs,
+        true_valid=true_valid,
+        sample_mean=sample_mean,
+    )
+
+
+def _resolve_variogram_pair_indices(
+    *,
+    z_true: torch.Tensor,
+    z_samples: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if z_true.ndim != 2:
+        raise SimulationError("Variogram score requires z_true [T, A]")
+    if z_samples.ndim != 3:
+        raise SimulationError("Variogram score requires z_samples [S, T, A]")
+    if z_samples.shape[1] != z_true.shape[0] or z_samples.shape[2] != z_true.shape[1]:
+        raise SimulationError("Variogram score requires aligned z_true/z_samples")
+    asset_count = int(z_true.shape[1])
+    if asset_count < 2:
+        return None
+    pair_indices = torch.triu_indices(
+        asset_count,
+        asset_count,
+        offset=1,
+        device=z_true.device,
+    )
+    return pair_indices[0], pair_indices[1]
+
+
+def _variogram_true_pairs(
+    *,
+    z_true: torch.Tensor,
+    pair_i: torch.Tensor,
+    pair_j: torch.Tensor,
+    variogram_p: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    left = z_true.index_select(1, pair_i)
+    right = z_true.index_select(1, pair_j)
+    return (left - right).abs().pow(variogram_p), torch.isfinite(left) & torch.isfinite(
+        right
+    )
+
+
+def _variogram_sample_pair_mean(
+    *,
+    z_samples: torch.Tensor,
+    pair_i: torch.Tensor,
+    pair_j: torch.Tensor,
+    variogram_p: float,
+) -> torch.Tensor:
+    left = z_samples.index_select(2, pair_i)
+    right = z_samples.index_select(2, pair_j)
+    pair_values = (left - right).abs().pow(variogram_p)
+    valid = torch.isfinite(left) & torch.isfinite(right)
+    sample_sum = torch.where(valid, pair_values, torch.zeros_like(pair_values)).sum(dim=0)
+    sample_count = valid.to(z_samples.dtype).sum(dim=0)
+    return _safe_divide(sample_sum, sample_count)
+
+
+def _mean_variogram_sq_error(
+    *,
+    true_pairs: torch.Tensor,
+    true_valid: torch.Tensor,
+    sample_mean: torch.Tensor,
+) -> torch.Tensor:
+    pair_valid = true_valid & torch.isfinite(sample_mean)
+    sq_error = (sample_mean - true_pairs).pow(2)
+    pair_sum = torch.where(pair_valid, sq_error, torch.zeros_like(sq_error)).sum(dim=1)
+    pair_count = pair_valid.to(true_pairs.dtype).sum(dim=1)
+    return _safe_divide(pair_sum, pair_count)
+
+# pylint: disable=too-many-locals
+def _aggregate_block_es_groups(
+    *,
+    context: BlockMetricContext,
+    entries: Sequence[CandidatePayloadEntry],
+    block: str,
+) -> np.ndarray:  # pylint: disable=too-many-locals
+    indices = context.block_indices[block]
+    if not indices:
+        return np.asarray([], dtype=float)
+    payloads = [entry.payload for entry in entries]
+    group_count = _infer_group_count(payloads)
+    dtype = _infer_payload_dtype(payloads)
+    es_sum = torch.zeros(group_count, device=context.device, dtype=dtype)
+    es_count = torch.zeros(group_count, device=context.device, dtype=dtype)
+    index_tensor = torch.as_tensor(indices, device=context.device, dtype=torch.long)
+    for batch in _iter_entry_batches(entries, context.batch_splits):
+        for entry in batch:
+            z_true, z_samples, group_ids = _prepare_z_payload(entry.payload, context.device)
+            z_true_block = z_true.index_select(1, index_tensor)
+            z_samples_block = z_samples.index_select(2, index_tensor)
+            u_true, u_samples = _block_whitened_payload(
+                context=context,
+                entry=entry,
+                z_true=z_true_block,
+                z_samples=z_samples_block,
+                index_tensor=index_tensor,
+            )
+            es_week = energy_score_terms(u_true, u_samples)
+            group_mean, present = _group_scalar_mean(
+                values=es_week,
+                group_ids=group_ids,
+                group_count=group_count,
+            )
+            es_sum[present] = es_sum[present] + group_mean[present]
+            es_count[present] = es_count[present] + 1
+    values = _safe_divide(es_sum, es_count)
+    return values.detach().cpu().numpy()
+
+# pylint: disable=too-many-locals
+def _aggregate_block_coverage_groups(
+    *,
+    context: BlockMetricContext,
+    entries: Sequence[CandidatePayloadEntry],
+    block: str,
+    coverage_levels: Sequence[float],
+) -> Mapping[float, torch.Tensor]:  # pylint: disable=too-many-locals
+    indices = context.block_indices[block]
+    payloads = [entry.payload for entry in entries]
+    group_count = _infer_group_count(payloads)
+    dtype = _infer_payload_dtype(payloads)
+    sums = {
+        float(level): torch.zeros(group_count, device=context.device, dtype=dtype)
+        for level in coverage_levels
+    }
+    counts = {
+        float(level): torch.zeros(group_count, device=context.device, dtype=dtype)
+        for level in coverage_levels
+    }
+    if not indices:
+        return {
+            float(level): torch.full(
+                (group_count,), float("nan"), device=context.device, dtype=dtype
+            )
+            for level in coverage_levels
+        }
+    index_tensor = torch.as_tensor(indices, device=context.device, dtype=torch.long)
+    for batch in _iter_entry_batches(entries, context.batch_splits):
+        for entry in batch:
+            z_true, z_samples, group_ids = _prepare_z_payload(entry.payload, context.device)
+            z_true_block = z_true.index_select(1, index_tensor)
+            z_samples_block = z_samples.index_select(2, index_tensor)
+            for level in coverage_levels:
+                coverage_group, present = _coverage_group_values(
+                    z_true=z_true_block,
+                    z_samples=z_samples_block,
+                    group_ids=group_ids,
+                    group_count=group_count,
+                    level=float(level),
+                )
+                sums[float(level)][present] = sums[float(level)][present] + coverage_group[present]
+                counts[float(level)][present] = counts[float(level)][present] + 1
+    return {
+        float(level): _safe_divide(sums[float(level)], counts[float(level)])
+        for level in coverage_levels
+    }
+
+
+def _aggregate_secondary_groups_from_entries(
+    *,
+    entries: Sequence[CandidatePayloadEntry],
+    alpha: float,
+    device: torch.device,
+    batch_splits: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    payloads = [entry.payload for entry in entries]
+    return _aggregate_secondary_groups(
+        payloads=payloads,
+        alpha=alpha,
+        device=device,
+        batch_splits=batch_splits,
+    )
+
+
+def _block_whitened_payload(
+    *,
+    context: BlockMetricContext,
+    entry: CandidatePayloadEntry,
+    z_true: torch.Tensor,
+    z_samples: torch.Tensor,
+    index_tensor: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    scale = _require_tensor(entry.payload, "scale", context.device).index_select(
+        0, index_tensor
+    )
+    y_train = _train_targets_for_split(
+        context=context,
+        split_id=entry.split_id,
+    ).index_select(1, index_tensor)
+    whitener = _block_whitener(
+        y_train=y_train,
+        scale=scale,
+        score_spec=context.score_spec,
+    )
+    return (
+        torch.matmul(z_true, whitener.T),
+        torch.matmul(z_samples, whitener.T),
+    )
+
+
+def _block_whitener(
+    *,
+    y_train: torch.Tensor,
+    scale: torch.Tensor,
+    score_spec: Mapping[str, Any],
+) -> torch.Tensor:
+    if y_train.ndim != 2:
+        raise SimulationError("Block ES requires y_train [T, A]")
+    if not torch.isfinite(y_train).all():
+        raise SimulationError("Block ES requires fully observed training targets")
+    n_eff = int(y_train.shape[0])
+    if n_eff <= 1:
+        raise SimulationError("Block ES requires at least 2 training rows")
+    z_train = y_train / scale
+    z_centered = z_train - z_train.mean(dim=0, keepdim=True)
+    cov = (z_centered.T @ z_centered) / float(n_eff - 1)
+    shrinkage = _energy_score_shrinkage(n_eff)
+    diag = torch.diag(torch.diag(cov))
+    cov_shrunk = (1.0 - shrinkage) * cov + shrinkage * diag
+    var_floor = float(score_spec.get("var_floor", 0.0))
+    if var_floor < 0.0:
+        raise SimulationError("Energy score var_floor must be >= 0")
+    if var_floor > 0.0:
+        cov_shrunk = cov_shrunk + var_floor * torch.eye(
+            cov_shrunk.shape[0],
+            device=cov_shrunk.device,
+            dtype=cov_shrunk.dtype,
+        )
+    eps = float(score_spec.get("eps", 1e-5))
+    cov_shrunk = cov_shrunk + eps * torch.eye(
+        cov_shrunk.shape[0],
+        device=cov_shrunk.device,
+        dtype=cov_shrunk.dtype,
+    )
+    return _inverse_cholesky(cov_shrunk)
+
+
+def _train_targets_for_split(
+    *, context: BlockMetricContext, split_id: int
+) -> torch.Tensor:
+    split = _split_entry(context.splits, split_id)
+    train_idx = decode_indices_field(
+        split,
+        idx_key="train_idx",
+        ranges_key="train_ranges",
+        field="train",
+    )
+    return context.panel_targets.index_select(
+        0,
+        torch.as_tensor(train_idx, dtype=torch.long),
+    ).to(device=context.device)
+
+
+def _split_entry(
+    splits: Sequence[Mapping[str, Any]], split_id: int
+) -> Mapping[str, Any]:
+    if split_id < 0 or split_id >= len(splits):
+        raise SimulationError(
+            "Split id out of range for block scoring",
+            context={"split_id": str(split_id), "num_splits": str(len(splits))},
+        )
+    return splits[split_id]
+
+
+def _load_asset_names(base_dir: Path) -> tuple[str, ...]:
+    path = base_dir / "inputs" / "targets.csv"
+    payload = _read_json_headerless_csv_columns(path)
+    return tuple(payload)
+
+
+def _read_json_headerless_csv_columns(path: Path) -> list[str]:
+    if not path.exists():
+        raise SimulationError("Missing targets.csv for block scoring", context={"path": str(path)})
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle)
+        header = next(reader, [])
+    columns = [str(column) for column in header if str(column) != "timestamp"]
+    if not columns:
+        raise SimulationError("Targets CSV has no asset columns", context={"path": str(path)})
+    return columns
+
+
+def _load_panel_targets(base_dir: Path) -> torch.Tensor:
+    path = base_dir / "inputs" / "panel_tensor.pt"
+    if not path.exists():
+        raise SimulationError(
+            "Missing panel_tensor.pt for block scoring",
+            context={"path": str(path)},
+        )
+    payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, Mapping):
+        raise SimulationError("panel_tensor.pt payload is invalid")
+    targets = payload.get("targets")
+    if not isinstance(targets, torch.Tensor):
+        raise SimulationError("panel_tensor.pt missing targets tensor")
+    return targets
+
+
+def _load_outer_splits(
+    *, base_dir: Path, outer_k: int
+) -> Sequence[Mapping[str, Any]]:
+    path = base_dir / "inner" / f"outer_{outer_k}" / "splits.json"
+    payload = _read_json(path)
+    if not isinstance(payload, list):
+        raise SimulationError(
+            "splits.json payload must be a list",
+            context={"path": str(path)},
+        )
+    return payload
+
+
+def _iter_entry_batches(
+    entries: Sequence[CandidatePayloadEntry], batch_size: int
+) -> Sequence[Sequence[CandidatePayloadEntry]]:
+    batches: list[Sequence[CandidatePayloadEntry]] = []
+    for start in range(0, len(entries), batch_size):
+        batches.append(entries[start : start + batch_size])
+    return batches
 
 
 def _iter_candidate_batches(
@@ -393,6 +1223,50 @@ def _load_candidate_payloads(
             )
         payloads.append(payload)
     return payloads
+
+
+def _load_candidate_payload_entries(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    candidate_id: int,
+) -> list[CandidatePayloadEntry]:
+    candidates_dir = (
+        base_dir / "inner" / f"outer_{outer_k}" / "postprocessing" / "candidates"
+    )
+    pattern = f"candidate_{candidate_id:04d}_split_*.pt"
+    paths = sorted(candidates_dir.glob(pattern))
+    if not paths:
+        raise SimulationError(
+            "Missing postprocess candidate splits",
+            context={"candidate_id": str(candidate_id)},
+        )
+    entries: list[CandidatePayloadEntry] = []
+    for path in paths:
+        payload = torch.load(path, map_location="cpu")
+        if not isinstance(payload, Mapping):
+            raise SimulationError(
+                "Postprocess payload is invalid",
+                context={"path": str(path)},
+            )
+        entries.append(
+            CandidatePayloadEntry(
+                split_id=_split_id_from_candidate_payload_path(path),
+                payload=payload,
+            )
+        )
+    return entries
+
+
+def _split_id_from_candidate_payload_path(path: Path) -> int:
+    name = path.stem
+    parts = name.split("_")
+    if len(parts) < 4 or parts[-2] != "split":
+        raise SimulationError(
+            "Unable to parse split id from candidate payload path",
+            context={"path": str(path)},
+        )
+    return int(parts[-1])
 
 
 def _aggregate_es_groups(
@@ -873,6 +1747,16 @@ def _median_over_assets(group_values: torch.Tensor) -> float:
     return float(means[valid].median().item())
 
 
+def _median_over_asset_indices(
+    group_values: torch.Tensor, indices: Sequence[int]
+) -> float:
+    if not indices:
+        return float("nan")
+    index_tensor = torch.as_tensor(indices, device=group_values.device, dtype=torch.long)
+    selected = group_values.index_select(1, index_tensor)
+    return _median_over_assets(selected)
+
+
 def _select_es_survivors(
     es_metrics: Mapping[int, Mapping[str, float]],
     model_selection: ModelSelectionConfig,
@@ -948,6 +1832,199 @@ def _select_final_candidate(
         "secondary_scores": secondary,
         "complexity": inputs.complexity,
     }
+
+
+def _with_best_candidate_block_scores(
+    *,
+    selection: Mapping[str, Any],
+    metrics_payload: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    best_candidate_id = int(selection["best_candidate_id"])
+    entry = metrics_payload.get(str(best_candidate_id))
+    if not isinstance(entry, Mapping):
+        raise SimulationError(
+            "Best candidate metrics missing for block scoring",
+            context={"candidate_id": str(best_candidate_id)},
+        )
+    block_scores = entry.get("block_scores")
+    if not isinstance(block_scores, Mapping):
+        raise SimulationError(
+            "Best candidate block scores missing",
+            context={"candidate_id": str(best_candidate_id)},
+        )
+    updated = dict(selection)
+    updated["best_candidate_block_scores"] = block_scores
+    return updated
+
+
+def _with_best_candidate_dependence_scores(
+    *,
+    selection: Mapping[str, Any],
+    metrics_payload: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    best_candidate_id = int(selection["best_candidate_id"])
+    entry = metrics_payload.get(str(best_candidate_id))
+    if not isinstance(entry, Mapping):
+        raise SimulationError(
+            "Best candidate metrics missing for dependence scoring",
+            context={"candidate_id": str(best_candidate_id)},
+        )
+    dependence_scores = entry.get("dependence_scores")
+    if not isinstance(dependence_scores, Mapping):
+        raise SimulationError(
+            "Best candidate dependence scores missing",
+            context={"candidate_id": str(best_candidate_id)},
+        )
+    updated = dict(selection)
+    updated["best_candidate_dependence_scores"] = dependence_scores
+    return updated
+
+
+def _with_best_candidate_basket_diagnostics(
+    *,
+    selection: Mapping[str, Any],
+    metrics_payload: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    best_candidate_id = int(selection["best_candidate_id"])
+    entry = metrics_payload.get(str(best_candidate_id))
+    if not isinstance(entry, Mapping):
+        raise SimulationError(
+            "Best candidate metrics missing for basket diagnostics",
+            context={"candidate_id": str(best_candidate_id)},
+        )
+    basket_diagnostics = entry.get("basket_diagnostics")
+    if not isinstance(basket_diagnostics, Mapping):
+        raise SimulationError(
+            "Best candidate basket diagnostics missing",
+            context={"candidate_id": str(best_candidate_id)},
+        )
+    updated = dict(selection)
+    updated["best_candidate_basket_diagnostics"] = basket_diagnostics
+    return updated
+
+
+def _write_postprocess_block_scores_report(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    selection: Mapping[str, Any],
+) -> None:
+    best_candidate_id = int(selection["best_candidate_id"])
+    block_scores = selection.get("best_candidate_block_scores")
+    if not isinstance(block_scores, Mapping):
+        raise SimulationError(
+            "Postprocess selection missing best_candidate_block_scores",
+            context={"outer_k": str(outer_k)},
+        )
+    write_postprocess_block_scores(
+        base_dir=base_dir,
+        outer_k=outer_k,
+        candidate_id=best_candidate_id,
+        block_scores=block_scores,
+    )
+
+
+def _write_postprocess_dependence_scores_report(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    selection: Mapping[str, Any],
+) -> None:
+    best_candidate_id = int(selection["best_candidate_id"])
+    dependence_scores = selection.get("best_candidate_dependence_scores")
+    if not isinstance(dependence_scores, Mapping):
+        raise SimulationError(
+            "Postprocess selection missing best_candidate_dependence_scores",
+            context={"outer_k": str(outer_k)},
+        )
+    write_postprocess_dependence_scores(
+        base_dir=base_dir,
+        outer_k=outer_k,
+        candidate_id=best_candidate_id,
+        dependence_scores=dependence_scores,
+    )
+
+
+def _write_postprocess_basket_diagnostics_report(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    selection: Mapping[str, Any],
+) -> None:
+    if not isinstance(selection.get("best_candidate_basket_diagnostics"), Mapping):
+        raise SimulationError(
+            "Postprocess selection missing best_candidate_basket_diagnostics",
+            context={"outer_k": str(outer_k)},
+        )
+    write_postprocess_basket_diagnostics(
+        base_dir=base_dir,
+        outer_k=outer_k,
+        candidate_id=int(selection["best_candidate_id"]),
+    )
+
+
+def _write_global_block_scores_report(
+    *,
+    base_dir: Path,
+    outer_ids: Sequence[int],
+    selection: Mapping[str, Any],
+) -> None:
+    best_candidate_id = int(selection["best_candidate_id"])
+    block_scores = selection.get("best_candidate_block_scores")
+    if not isinstance(block_scores, Mapping):
+        raise SimulationError("Global selection missing best_candidate_block_scores")
+    write_global_block_scores(
+        base_dir=base_dir,
+        outer_ids=outer_ids,
+        candidate_id=best_candidate_id,
+        block_scores=block_scores,
+    )
+
+
+def _write_global_dependence_scores_report(
+    *,
+    base_dir: Path,
+    outer_ids: Sequence[int],
+    selection: Mapping[str, Any],
+) -> None:
+    best_candidate_id = int(selection["best_candidate_id"])
+    dependence_scores = selection.get("best_candidate_dependence_scores")
+    if not isinstance(dependence_scores, Mapping):
+        raise SimulationError("Global selection missing best_candidate_dependence_scores")
+    write_global_dependence_scores(
+        base_dir=base_dir,
+        outer_ids=outer_ids,
+        candidate_id=best_candidate_id,
+        dependence_scores=dependence_scores,
+    )
+
+
+def _write_global_basket_diagnostics_report(
+    *,
+    base_dir: Path,
+    outer_ids: Sequence[int],
+    selection: Mapping[str, Any],
+) -> None:
+    if not isinstance(selection.get("best_candidate_basket_diagnostics"), Mapping):
+        raise SimulationError("Global selection missing best_candidate_basket_diagnostics")
+    write_global_basket_diagnostics(
+        base_dir=base_dir,
+        outer_ids=outer_ids,
+        candidate_id=int(selection["best_candidate_id"]),
+    )
+
+
+def _write_postprocess_residual_dependence_report(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    selection: Mapping[str, Any],
+) -> None:
+    write_postprocess_residual_dependence(
+        base_dir=base_dir,
+        outer_k=outer_k,
+        candidate_id=int(selection["best_candidate_id"]),
+    )
 
 
 def _select_calibration_survivors(
@@ -1051,15 +2128,18 @@ def _complexity_scores(
         candidates=candidates,
     )
 
-
+# pylint: disable=too-many-arguments
 def _build_metrics_payload(
     *,
     es_metrics: Mapping[int, Mapping[str, float]],
     calibration_metrics: Mapping[int, Mapping[str, float]],
     crps_metrics: Mapping[int, float],
     ql_metrics: Mapping[int, float],
+    block_scores: Mapping[int, Mapping[str, Mapping[str, float]]],
+    dependence_scores: Mapping[int, Mapping[str, Mapping[str, float]]],
+    basket_diagnostics: Mapping[int, Mapping[str, Mapping[str, float]]],
     complexity: Mapping[int, float],
-) -> Mapping[str, Any]:
+) -> Mapping[str, Any]:  # pylint: disable=too-many-arguments
     payload: dict[str, Any] = {}
     for candidate_id, values in es_metrics.items():
         calibration = calibration_metrics.get(candidate_id, {})
@@ -1072,6 +2152,15 @@ def _build_metrics_payload(
             },
             "crps_model": float(crps_metrics.get(candidate_id, float("nan"))),
             "ql_model": float(ql_metrics.get(candidate_id, float("nan"))),
+            "block_scores": _serialize_candidate_block_scores(
+                block_scores.get(candidate_id, {})
+            ),
+            "dependence_scores": _serialize_candidate_block_scores(
+                dependence_scores.get(candidate_id, {})
+            ),
+            "basket_diagnostics": _serialize_candidate_nested_scores(
+                basket_diagnostics.get(candidate_id, {})
+            ),
             "complexity": float(
                 complexity.get(candidate_id, float("nan"))
             ),
@@ -1079,10 +2168,25 @@ def _build_metrics_payload(
     return payload
 
 
+def _serialize_candidate_block_scores(
+    block_scores: Mapping[str, Mapping[str, float]]
+) -> Mapping[str, Mapping[str, float]]:
+    return _serialize_candidate_nested_scores(block_scores)
+
+
+def _serialize_candidate_nested_scores(
+    nested_scores: Mapping[str, Mapping[str, float]]
+) -> Mapping[str, Mapping[str, float]]:
+    return {
+        block: {key: float(value) for key, value in values.items()}
+        for block, values in nested_scores.items()
+    }
+
+
 def _load_outer_metrics(
     *, base_dir: Path, outer_ids: Sequence[int]
-) -> list[Mapping[str, Mapping[str, float]]]:
-    metrics_list: list[Mapping[str, Mapping[str, float]]] = []
+) -> list[Mapping[str, Mapping[str, Any]]]:
+    metrics_list: list[Mapping[str, Mapping[str, Any]]] = []
     for outer_k in outer_ids:
         path = (
             base_dir
@@ -1106,7 +2210,7 @@ def _load_outer_metrics(
     return metrics_list
 
 
-def _read_json(path: Path) -> Mapping[str, Any]:
+def _read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -1117,12 +2221,15 @@ def _read_json(path: Path) -> Mapping[str, Any]:
 
 
 def _aggregate_global_metrics(
-    metrics_list: Sequence[Mapping[str, Mapping[str, float]]],
+    metrics_list: Sequence[Mapping[str, Mapping[str, Any]]],
 ) -> tuple[
     Mapping[int, Mapping[str, float]],
     Mapping[int, Mapping[str, float]],
     Mapping[int, float],
     Mapping[int, float],
+    Mapping[int, Mapping[str, Mapping[str, float]]],
+    Mapping[int, Mapping[str, Mapping[str, float]]],
+    Mapping[int, Mapping[str, Mapping[str, float]]],
     Mapping[int, float],
 ]:
     candidate_ids = _collect_candidate_ids(metrics_list)
@@ -1130,6 +2237,9 @@ def _aggregate_global_metrics(
     calibration_metrics: dict[int, Mapping[str, float]] = {}
     crps_metrics: dict[int, float] = {}
     ql_metrics: dict[int, float] = {}
+    block_score_metrics: dict[int, Mapping[str, Mapping[str, float]]] = {}
+    dependence_score_metrics: dict[int, Mapping[str, Mapping[str, float]]] = {}
+    basket_diagnostic_metrics: dict[int, Mapping[str, Mapping[str, float]]] = {}
     complexity_metrics: dict[int, float] = {}
     calibration_keys = _collect_calibration_metric_keys(metrics_list)
     for candidate_id in candidate_ids:
@@ -1150,18 +2260,33 @@ def _aggregate_global_metrics(
         }
         crps_metrics[candidate_id] = _median_or_nan(crps_vals)
         ql_metrics[candidate_id] = _median_or_nan(ql_vals)
+        block_score_metrics[candidate_id] = _aggregate_block_scores_for_candidate(
+            metrics_list=metrics_list,
+            candidate_id=candidate_id,
+        )
+        dependence_score_metrics[candidate_id] = _aggregate_dependence_scores_for_candidate(
+            metrics_list=metrics_list,
+            candidate_id=candidate_id,
+        )
+        basket_diagnostic_metrics[candidate_id] = _aggregate_basket_diagnostics_for_candidate(
+            metrics_list=metrics_list,
+            candidate_id=candidate_id,
+        )
         complexity_metrics[candidate_id] = _median_or_nan(complexity_vals)
     return (
         es_metrics,
         calibration_metrics,
         crps_metrics,
         ql_metrics,
+        block_score_metrics,
+        dependence_score_metrics,
+        basket_diagnostic_metrics,
         complexity_metrics,
     )
 
 
 def _collect_calibration_metric_keys(
-    metrics_list: Sequence[Mapping[str, Mapping[str, float]]],
+    metrics_list: Sequence[Mapping[str, Mapping[str, Any]]],
 ) -> tuple[str, ...]:
     fixed = {
         "calibration_score",
@@ -1183,6 +2308,98 @@ def _collect_calibration_metric_keys(
                     dynamic.add(str(key))
     ordered = sorted(fixed | dynamic)
     return tuple(ordered)
+
+
+def _aggregate_block_scores_for_candidate(
+    *,
+    metrics_list: Sequence[Mapping[str, Mapping[str, Any]]],
+    candidate_id: int,
+) -> Mapping[str, Mapping[str, float]]:
+    result: dict[str, dict[str, float]] = {}
+    for block in BLOCK_ORDER:
+        block_metrics = _collect_nested_block_metrics(
+            metrics_list=metrics_list,
+            candidate_id=candidate_id,
+            nested_key="block_scores",
+            block=block,
+        )
+        if not block_metrics:
+            continue
+        result[block] = {
+            key: _median_or_nan(values)
+            for key, values in block_metrics.items()
+        }
+    return result
+
+
+def _aggregate_dependence_scores_for_candidate(
+    *,
+    metrics_list: Sequence[Mapping[str, Mapping[str, Any]]],
+    candidate_id: int,
+) -> Mapping[str, Mapping[str, float]]:
+    result: dict[str, dict[str, float]] = {}
+    for block in BLOCK_ORDER:
+        block_metrics = _collect_nested_block_metrics(
+            metrics_list=metrics_list,
+            candidate_id=candidate_id,
+            nested_key="dependence_scores",
+            block=block,
+        )
+        if not block_metrics:
+            continue
+        result[block] = {
+            key: _median_or_nan(values)
+            for key, values in block_metrics.items()
+        }
+    return result
+
+
+def _aggregate_basket_diagnostics_for_candidate(
+    *,
+    metrics_list: Sequence[Mapping[str, Mapping[str, Any]]],
+    candidate_id: int,
+) -> Mapping[str, Mapping[str, float]]:
+    result: dict[str, dict[str, float]] = {}
+    for basket_name in BASKET_ORDER:
+        basket_metrics = _collect_nested_block_metrics(
+            metrics_list=metrics_list,
+            candidate_id=candidate_id,
+            nested_key="basket_diagnostics",
+            block=basket_name,
+        )
+        if not basket_metrics:
+            continue
+        result[basket_name] = {
+            key: _median_or_nan(values)
+            for key, values in basket_metrics.items()
+        }
+    return result
+
+
+def _collect_nested_block_metrics(
+    metrics_list: Sequence[Mapping[str, Mapping[str, Any]]],
+    candidate_id: int,
+    nested_key: str,
+    block: str,
+) -> Mapping[str, list[float]]:
+    result: dict[str, list[float]] = {}
+    for metrics in metrics_list:
+        entry = metrics.get(str(candidate_id))
+        if not isinstance(entry, Mapping):
+            continue
+        raw_block_scores = entry.get(nested_key)
+        if not isinstance(raw_block_scores, Mapping):
+            continue
+        block_values = raw_block_scores.get(block)
+        if not isinstance(block_values, Mapping):
+            continue
+        for key, raw_value in block_values.items():
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                value = float("nan")
+            result.setdefault(str(key), []).append(value)
+    return result
 
 
 def _summarize_calibration_metrics(
@@ -1357,8 +2574,26 @@ def _posterior_l1_complexity(
     return scores
 
 
+def _energy_score_shrinkage(n_eff: int) -> float:
+    if n_eff >= 300:
+        return 0.075
+    if n_eff >= 150:
+        return 0.15
+    return 0.30
+
+
+def _inverse_cholesky(matrix: torch.Tensor) -> torch.Tensor:
+    chol = torch.linalg.cholesky(matrix)  # pylint: disable=not-callable
+    identity = torch.eye(
+        chol.shape[0], device=chol.device, dtype=chol.dtype
+    )
+    return torch.linalg.solve_triangular(  # pylint: disable=not-callable
+        chol, identity, upper=False
+    )
+
+
 def _collect_candidate_ids(
-    metrics_list: Sequence[Mapping[str, Mapping[str, float]]],
+    metrics_list: Sequence[Mapping[str, Mapping[str, Any]]],
 ) -> list[int]:
     ids: set[int] = set()
     for metrics in metrics_list:
@@ -1369,7 +2604,7 @@ def _collect_candidate_ids(
 
 
 def _collect_metric(
-    metrics_list: Sequence[Mapping[str, Mapping[str, float]]],
+    metrics_list: Sequence[Mapping[str, Mapping[str, Any]]],
     candidate_id: int,
     key: str,
 ) -> list[float]:

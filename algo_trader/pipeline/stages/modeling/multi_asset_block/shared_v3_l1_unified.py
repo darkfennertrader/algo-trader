@@ -6,31 +6,19 @@ from typing import Any, Mapping, cast
 
 import torch
 
-from algo_trader.domain import ConfigError
+from algo_trader.domain import (
+    COMMODITY_CLASS_ID,
+    FX_CLASS_ID,
+    INDEX_CLASS_ID,
+    ConfigError,
+    classify_asset_name,
+)
 from algo_trader.pipeline.stages.modeling.factor.guide_l11 import FilteringState
 from algo_trader.pipeline.stages.modeling.runtime_support import (
     RuntimeObservations,
     require_tensor_entry,
 )
-
-FX_CLASS_ID = 0
-INDEX_CLASS_ID = 1
-COMMODITY_CLASS_ID = 2
 _STATE_COUNT = 4
-
-
-def classify_asset_name(name: str) -> int:
-    normalized = str(name).strip().upper()
-    if _is_fx_name(normalized):
-        return FX_CLASS_ID
-    if normalized.startswith(("XAU", "XAG", "XPT", "XPD")):
-        return COMMODITY_CLASS_ID
-    return INDEX_CLASS_ID
-
-
-def _is_fx_name(name: str) -> bool:
-    parts = name.split(".")
-    return len(parts) == 2 and all(len(part) == 3 and part.isalpha() for part in parts)
 
 
 def build_asset_class_ids(

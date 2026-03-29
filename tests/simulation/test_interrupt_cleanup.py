@@ -149,6 +149,7 @@ def test_cleanup_after_completion_logs_completion_context(
     caplog: LogCaptureFixture,
 ) -> None:
     attempts: list[list[str]] = []
+    calls: list[str] = []
 
     def fake_run_ray_command(command: list[str]) -> bool:
         attempts.append(command)
@@ -161,12 +162,14 @@ def test_cleanup_after_completion_logs_completion_context(
         interrupt_cleanup, "_safe_shutdown_ray_runtime", lambda: None
     )
     monkeypatch.setattr(
-        interrupt_cleanup, "_clear_cuda_memory", lambda **_: None
+        interrupt_cleanup,
+        "_clear_cuda_memory",
+        lambda **_: calls.append("clear_cuda"),
     )
     monkeypatch.setattr(
         interrupt_cleanup,
         "_cleanup_stopped_simulation_processes",
-        lambda: None,
+        lambda: calls.append("cleanup_stopped"),
     )
 
     with caplog.at_level("INFO"):
@@ -178,4 +181,5 @@ def test_cleanup_after_completion_logs_completion_context(
         )
 
     assert attempts == [["ray", "stop"]]
+    assert not calls
     assert "Stopped local Ray cluster after completion" in caplog.text

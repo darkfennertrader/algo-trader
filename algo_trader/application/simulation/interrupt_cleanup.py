@@ -47,7 +47,8 @@ def cleanup_after_simulation_run(
             _stop_local_ray_cluster(
                 context="after interruption" if interrupted else "after completion"
             )
-    _cleanup_stopped_simulation_processes()
+    if interrupted:
+        _cleanup_stopped_simulation_processes()
     if use_gpu:
         _clear_cuda_memory()
     if interrupted:

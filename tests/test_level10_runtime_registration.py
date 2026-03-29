@@ -412,6 +412,78 @@ def test_v3_l7_unified_runtime_guide_accepts_prediction_batch() -> None:
     poutine.trace(guide).get_trace(predict_batch)
 
 
+def test_v3_l8_unified_runtime_registry_builds_model_and_guide() -> None:
+    model = modeling.default_model_registry().get(
+        "multi_asset_block_model_v3_l8_unified_online_filtering"
+    )
+    guide = modeling.default_guide_registry().get(
+        "multi_asset_block_guide_v3_l8_unified_online_filtering"
+    )
+    train_batch = _runtime_batch_unified(with_targets=True)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(train_batch)
+    poutine.trace(model).get_trace(train_batch)
+
+
+def test_v3_l8_unified_runtime_guide_accepts_prediction_batch() -> None:
+    guide = modeling.default_guide_registry().get(
+        "multi_asset_block_guide_v3_l8_unified_online_filtering"
+    )
+    predict_batch = _runtime_batch_unified(with_targets=False)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(predict_batch)
+
+
+def test_v3_l9_unified_runtime_registry_builds_model_and_guide() -> None:
+    model = modeling.default_model_registry().get(
+        "multi_asset_block_model_v3_l9_unified_online_filtering"
+    )
+    guide = modeling.default_guide_registry().get(
+        "multi_asset_block_guide_v3_l9_unified_online_filtering"
+    )
+    train_batch = _runtime_batch_unified(with_targets=True)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(train_batch)
+    poutine.trace(model).get_trace(train_batch)
+
+
+def test_v3_l9_unified_runtime_guide_accepts_prediction_batch() -> None:
+    guide = modeling.default_guide_registry().get(
+        "multi_asset_block_guide_v3_l9_unified_online_filtering"
+    )
+    predict_batch = _runtime_batch_unified(with_targets=False)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(predict_batch)
+
+
+def test_v3_l10_unified_runtime_registry_builds_model_and_guide() -> None:
+    model = modeling.default_model_registry().get(
+        "multi_asset_block_model_v3_l10_unified_online_filtering"
+    )
+    guide = modeling.default_guide_registry().get(
+        "multi_asset_block_guide_v3_l10_unified_online_filtering"
+    )
+    train_batch = _runtime_batch_unified(with_targets=True)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(train_batch)
+    poutine.trace(model).get_trace(train_batch)
+
+
+def test_v3_l10_unified_runtime_guide_accepts_prediction_batch() -> None:
+    guide = modeling.default_guide_registry().get(
+        "multi_asset_block_guide_v3_l10_unified_online_filtering"
+    )
+    predict_batch = _runtime_batch_unified(with_targets=False)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(predict_batch)
+
+
 def test_v2_l3_runtime_registry_builds_model_and_guide() -> None:
     model = modeling.default_model_registry().get(
         "fx_currency_factor_model_v2_l3_online_filtering"

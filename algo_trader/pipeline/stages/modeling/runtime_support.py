@@ -50,7 +50,7 @@ def require_tensor_entry(payload: Mapping[str, Any], key: str) -> torch.Tensor:
 def sample_time_observations(
     *,
     time_count: int,
-    obs_dist: dist.LowRankMultivariateNormal,
+    obs_dist: dist.TorchDistribution,
     y_obs: torch.Tensor | None,
     time_mask: torch.BoolTensor | None,
     obs_scale: float | None,
@@ -89,7 +89,7 @@ def move_filtering_state(
 
 def _sample_with_optional_scale(
     *,
-    obs_dist: dist.LowRankMultivariateNormal,
+    obs_dist: dist.TorchDistribution,
     y_obs: torch.Tensor | None,
     obs_scale: float | None,
 ) -> None:

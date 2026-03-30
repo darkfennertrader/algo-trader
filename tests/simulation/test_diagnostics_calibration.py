@@ -117,7 +117,10 @@ def test_read_calibration_summary_round_trip(tmp_path: Path) -> None:
         pit_bin_count=20,
     )
     write_calibration_summary(summary=summary, output_dir=output_dir)
+    payload = (output_dir / "calibration_summary.json").read_text(encoding="utf-8")
     loaded = read_calibration_summary(output_dir / "calibration_summary.json")
+    assert '"p90": 0.93' in payload
+    assert '"abs_error_p90": 0.03' in payload
     assert loaded == summary
 
 

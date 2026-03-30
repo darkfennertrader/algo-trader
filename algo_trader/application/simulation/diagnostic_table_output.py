@@ -50,13 +50,15 @@ def write_postprocess_diagnostic_table(
         / spec.directory_name,
         spec=spec,
     )
+    serialized_scores = serialize_scores(scores=scores, fields=spec.fields)
     payload = {
         "scope": "outer_postprocess_selection",
         "outer_k": int(request.outer_k),
         "best_candidate_id": int(request.candidate_id),
         **dict(extra_payload or {}),
-        spec.payload_key: serialize_scores(scores=scores, fields=spec.fields),
+        spec.payload_key: serialized_scores,
     }
+    payload.update(_top_level_score_aliases(serialized_scores))
     _write_json(output_dir / f"{spec.file_stem}.json", payload)
     _write_csv(
         path=output_dir / f"{spec.file_stem}.csv",
@@ -77,14 +79,16 @@ def write_global_diagnostic_table(
         spec=spec,
     )
     extra = dict(extra_payload or {})
+    serialized_scores = serialize_scores(scores=scores, fields=spec.fields)
     payload = {
         "scope": "global_selection",
         "aggregation": "median_over_outer_folds",
         "outer_ids": [int(item) for item in request.outer_ids],
         "best_candidate_id": int(request.candidate_id),
         **extra,
-        spec.payload_key: serialize_scores(scores=scores, fields=spec.fields),
+        spec.payload_key: serialized_scores,
     }
+    payload.update(_top_level_score_aliases(serialized_scores))
     _write_json(output_dir / f"{spec.file_stem}.json", payload)
     _write_json(
         output_dir / "aggregate_manifest.json",
@@ -125,6 +129,12 @@ def ordered_block_items(
         if block not in BLOCK_ORDER:
             ordered.append((str(block), values))
     return ordered
+
+
+def _top_level_score_aliases(
+    serialized_scores: Mapping[str, Mapping[str, float]]
+) -> dict[str, Mapping[str, float]]:
+    return dict(serialized_scores.items())
 
 
 def _ensure_dir(path: Path, *, spec: DiagnosticTableSpec) -> Path:

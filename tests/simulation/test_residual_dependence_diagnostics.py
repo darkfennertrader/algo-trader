@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 import torch
@@ -33,11 +34,12 @@ def test_write_postprocess_residual_dependence_outputs_expected_files(
     assert (output_dir / "residual_dependence_summary.csv").exists()
     assert (output_dir / "index_residual_corr_matrix.csv").exists()
     assert (output_dir / "index_whitened_residual_corr_matrix.csv").exists()
+    assert summary["indices"]["summary"]["n_assets"] == 2.0
     assert summary["blocks"]["indices"]["hard_assets_present"] == ["IBEU50", "IBUS30"]
     assert summary["blocks"]["full"]["summary"]["n_assets"] == 3.0
     assert pairwise.loc[0, "left_asset"] == "IBEU50"
     assert pairwise.loc[0, "right_asset"] == "IBUS30"
-    assert float(pairwise.loc[0, "residual_corr"]) > 0.99
+    assert float(cast(float, pairwise.loc[0, "residual_corr"])) > 0.99
 
 
 def test_write_global_residual_dependence_aggregates_outer_folds(
@@ -65,8 +67,9 @@ def test_write_global_residual_dependence_aggregates_outer_folds(
     assert (output_dir / "residual_dependence_summary.csv").exists()
     assert (output_dir / "index_residual_corr_matrix.csv").exists()
     assert summary["outer_ids"] == [7, 8]
+    assert summary["full"]["summary"]["n_assets"] == 3.0
     assert manifest["scope"] == "selected_candidate_residual_dependence"
-    assert int(pairwise.loc[0, "n_outer_folds"]) == 2
+    assert int(cast(int, pairwise.loc[0, "n_outer_folds"])) == 2
 
 
 def _write_inputs(base_dir: Path) -> None:

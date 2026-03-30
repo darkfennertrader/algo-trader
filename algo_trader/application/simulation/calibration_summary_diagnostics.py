@@ -206,21 +206,25 @@ def _write_calibration_summary_csv(
 def _write_calibration_summary_json(
     *, summary: CalibrationSummary, output_dir: Path
 ) -> None:
+    coverage_by_level = {
+        coverage_level_tag(level): summary.coverage_by_level[level]
+        for level in sorted(summary.coverage_by_level.keys())
+    }
+    abs_error_by_level = {
+        coverage_level_tag(level): summary.abs_error_by_level[level]
+        for level in sorted(summary.abs_error_by_level.keys())
+    }
     payload = {
-        "coverage_by_level": {
-            coverage_level_tag(level): summary.coverage_by_level[level]
-            for level in sorted(summary.coverage_by_level.keys())
-        },
-        "abs_error_by_level": {
-            coverage_level_tag(level): summary.abs_error_by_level[level]
-            for level in sorted(summary.abs_error_by_level.keys())
-        },
+        "coverage_by_level": coverage_by_level,
+        "abs_error_by_level": abs_error_by_level,
         "mean_abs_coverage_error": summary.mean_abs_coverage_error,
         "max_abs_coverage_error": summary.max_abs_coverage_error,
         "pit_uniform_rmse": summary.pit_uniform_rmse,
         "pit_sample_count": summary.pit_sample_count,
         "pit_bin_count": summary.pit_bin_count,
     }
+    payload.update(coverage_by_level)
+    payload.update({f"abs_error_{tag}": value for tag, value in abs_error_by_level.items()})
     path = output_dir / "calibration_summary.json"
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",

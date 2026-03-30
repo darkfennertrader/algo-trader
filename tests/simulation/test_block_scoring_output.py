@@ -67,6 +67,7 @@ def test_write_postprocess_block_scores_creates_csv_and_json(
     assert payload["outer_k"] == 7
     assert payload["best_candidate_id"] == 11
     assert payload["block_scores"]["full"]["n_assets"] == 44.0
+    assert payload["indices"]["coverage_p90"] == 0.83
 
 
 def test_write_global_block_scores_creates_manifest(
@@ -88,4 +89,5 @@ def test_write_global_block_scores_creates_manifest(
     assert (output_dir / "block_scores.csv").exists()
     assert payload["best_candidate_id"] == 9
     assert payload["outer_ids"] == [17, 18]
+    assert payload["full"]["n_assets"] == 44.0
     assert manifest["scope"] == "selected_candidate_block_scores"

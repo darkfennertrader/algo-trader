@@ -733,7 +733,13 @@ def _write_summary_outputs(
     payload: Mapping[str, Any],
     block_results: Mapping[str, BlockResidualDiagnostics],
 ) -> None:
-    _write_json(output_dir / "residual_dependence_summary.json", payload)
+    full_payload = dict(payload)
+    blocks_payload = payload.get("blocks")
+    if isinstance(blocks_payload, Mapping):
+        full_payload.update(
+            {str(block): value for block, value in blocks_payload.items()}
+        )
+    _write_json(output_dir / "residual_dependence_summary.json", full_payload)
     _write_summary_csv(
         output_dir / "residual_dependence_summary.csv",
         block_results=block_results,

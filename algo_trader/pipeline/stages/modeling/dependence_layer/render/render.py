@@ -132,6 +132,63 @@ def _build_registry() -> dict[str, RenderSpec]:
                 ),
             ),
         },
+        "v4_l3": {
+            "version": "v4_l3",
+            "batch": {
+                "asset_names": ("EUR.USD", "IBUS500", "IBDE40", "XAU.USD"),
+                "state_size": 4,
+            },
+            "predict_graph": {
+                "name": "predict_v4_l3",
+                "nodes": (
+                    ("baseline", "baseline\ncorrected v3_l1 Gaussian unified model"),
+                    ("family", "v4 dependence-layer family"),
+                    ("index", "index block only"),
+                    ("broad", "broad shared scale"),
+                    ("regional", "regional shared scales\nUS + Europe"),
+                    ("spread", "shrunk US-vs-Europe\ndifferential scale"),
+                    ("out", "outputs\nsamples / mean / covariance"),
+                ),
+                "edges": (
+                    ("baseline", "family"),
+                    ("family", "index"),
+                    ("index", "broad"),
+                    ("broad", "regional"),
+                    ("regional", "spread"),
+                    ("spread", "out"),
+                ),
+            },
+            "concept_graph": {
+                "name": "concept_v4_l3",
+                "nodes": (
+                    ("family", "v4 dependence-layer family"),
+                    ("baseline", "corrected v3_l1 Gaussian backbone"),
+                    ("overlay", "regional t-copula overlay\nbroad + US + Europe +\nshrunk differential spread scale"),
+                    ("goal", "capture regional tail asymmetry\nwithout disturbing trusted marginals"),
+                    ("criteria", "must reduce US-side spread width\nwithout giving back Europe/equal-weight behavior"),
+                ),
+                "edges": (
+                    ("family", "baseline"),
+                    ("baseline", "overlay"),
+                    ("overlay", "goal"),
+                    ("goal", "criteria"),
+                ),
+            },
+            "model_module": "algo_trader.pipeline.stages.modeling.dependence_layer.versions.v4_l3.model",
+            "model_builder_attr": "build_dependence_layer_model_v4_l3_online_filtering",
+            "guide_module": "algo_trader.pipeline.stages.modeling.dependence_layer.versions.v4_l3.guide",
+            "guide_builder_attr": "build_dependence_layer_guide_v4_l3_online_filtering",
+            "split": build_v3_l1_based_split(
+                "algo_trader.pipeline.stages.modeling.dependence_layer.versions.v4_l3.model",
+                "V4L3ModelPriors",
+                ("base",),
+                (
+                    "algo_trader.pipeline.stages.modeling.dependence_layer.versions.v4_l3.model",
+                    "_sample_index_t_copula_mix",
+                    ("index_t_copula",),
+                ),
+            ),
+        },
     }
 
 

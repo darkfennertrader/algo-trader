@@ -5,12 +5,22 @@ import torch
 
 from algo_trader.application.research.residual_copula import (
     DEFAULT_RESEARCH_ROOT,
+    CopulaFitPhase3SplitConfig,
+    CopulaFitPhase3StudyConfig,
+    CopulaFitSplitConfig,
+    CopulaFitStudyConfig,
     ResidualStudyConfig,
     build_asset_region_series,
     build_residual_study_dataset,
     compute_tail_dependence_matrix,
+    default_fit_output_dir,
+    default_fit_phase3_output_dir,
     default_output_dir,
     load_selected_candidate_dataset,
+    run_phase3_fitted_copula_study,
+    run_selected_candidate_fit_phase3_study,
+    run_fitted_copula_study,
+    run_selected_candidate_fit_study,
     run_selected_candidate_study,
     run_residual_copula_study,
 )
@@ -113,6 +123,121 @@ def test_run_selected_candidate_study_writes_external_artifacts(
     )
     assert outputs.summary.rank_correlation_path.exists()
     assert outputs.summary.rank_correlation_path.parent.name == "unit_test_v4_l1"
+
+
+def test_default_fit_output_dir_uses_phase2_subdirectory() -> None:
+    path = default_fit_output_dir("v4_l1")
+    assert path == DEFAULT_RESEARCH_ROOT / "v4_l1" / "fit_phase2"
+
+
+def test_run_fitted_copula_study_writes_expected_artifacts(tmp_path: Path) -> None:
+    index = pd.date_range("2024-01-05", periods=10, freq="W-FRI")
+    residuals = pd.DataFrame(
+        {
+            "IBUS500": [0.2, -0.1, 0.3, -0.2, 0.25, -0.12, 0.18, -0.21, 0.22, -0.05],
+            "IBUS30": [0.15, -0.08, 0.25, -0.18, 0.21, -0.11, 0.16, -0.2, 0.19, -0.04],
+            "IBDE40": [0.1, -0.2, 0.2, -0.1, 0.12, -0.18, 0.16, -0.14, 0.18, -0.09],
+            "IBEU50": [0.15, -0.1, 0.25, -0.15, 0.19, -0.13, 0.2, -0.16, 0.21, -0.1],
+        },
+        index=index,
+    )
+    standardized = residuals / 0.1
+    pseudo = pd.DataFrame(
+        {
+            "IBUS500": [0.8, 0.2, 0.85, 0.15, 0.79, 0.21, 0.77, 0.19, 0.81, 0.23],
+            "IBUS30": [0.78, 0.22, 0.82, 0.18, 0.76, 0.24, 0.75, 0.2, 0.8, 0.26],
+            "IBDE40": [0.72, 0.28, 0.76, 0.24, 0.7, 0.3, 0.74, 0.26, 0.75, 0.25],
+            "IBEU50": [0.74, 0.26, 0.79, 0.21, 0.73, 0.27, 0.77, 0.23, 0.78, 0.22],
+        },
+        index=index,
+    )
+    dataset = build_residual_study_dataset(residuals, standardized, pseudo)
+    outputs = run_fitted_copula_study(
+        dataset,
+        CopulaFitStudyConfig(
+            output_dir=tmp_path / "study" / "fit_phase2",
+            split=CopulaFitSplitConfig(min_train_size=6, n_folds=2, min_regime_size=3),
+        ),
+    )
+    assert outputs.model_comparison_path.exists()
+    assert outputs.fold_scores_path.exists()
+    assert outputs.parameter_summary_path.exists()
+    assert outputs.question_summary_path.exists()
+
+
+def test_run_selected_candidate_fit_study_writes_external_artifacts(
+    tmp_path: Path,
+) -> None:
+    base_dir = _build_study_base_dir(tmp_path)
+    outputs = run_selected_candidate_fit_study(
+        base_dir,
+        study_label="unit_test_v4_l1",
+    )
+    assert outputs.model_comparison_path.exists()
+    assert outputs.model_comparison_path.parent.name == "fit_phase2"
+
+
+def test_default_fit_phase3_output_dir_uses_phase3_subdirectory() -> None:
+    path = default_fit_phase3_output_dir("v4_l1")
+    assert path == DEFAULT_RESEARCH_ROOT / "v4_l1" / "fit_phase3"
+
+
+def test_run_phase3_fitted_copula_study_writes_expected_artifacts(
+    tmp_path: Path,
+) -> None:
+    dataset = _build_fit_dataset()
+    outputs = run_phase3_fitted_copula_study(
+        dataset,
+        CopulaFitPhase3StudyConfig(
+            output_dir=tmp_path / "study" / "fit_phase3",
+            split=CopulaFitPhase3SplitConfig(
+                min_train_size=6,
+                n_folds=2,
+                min_component_size=3,
+                high_stress_quantile=0.7,
+            ),
+        ),
+    )
+    assert outputs.model_comparison_path.exists()
+    assert outputs.fold_scores_path.exists()
+    assert outputs.parameter_summary_path.exists()
+    assert outputs.question_summary_path.exists()
+
+
+def test_run_selected_candidate_fit_phase3_study_writes_external_artifacts(
+    tmp_path: Path,
+) -> None:
+    base_dir = _build_study_base_dir(tmp_path)
+    outputs = run_selected_candidate_fit_phase3_study(
+        base_dir,
+        study_label="unit_test_v4_l1",
+    )
+    assert outputs.model_comparison_path.exists()
+    assert outputs.model_comparison_path.parent.name == "fit_phase3"
+
+
+def _build_fit_dataset():
+    index = pd.date_range("2024-01-05", periods=12, freq="W-FRI")
+    residuals = pd.DataFrame(
+        {
+            "IBUS500": [0.2, -0.1, 0.3, -0.2, 0.25, -0.12, 0.18, -0.21, 0.22, -0.05, 0.31, -0.17],
+            "IBUS30": [0.15, -0.08, 0.25, -0.18, 0.21, -0.11, 0.16, -0.2, 0.19, -0.04, 0.28, -0.14],
+            "IBDE40": [0.1, -0.2, 0.2, -0.1, 0.12, -0.18, 0.16, -0.14, 0.18, -0.09, 0.22, -0.16],
+            "IBEU50": [0.15, -0.1, 0.25, -0.15, 0.19, -0.13, 0.2, -0.16, 0.21, -0.1, 0.26, -0.18],
+        },
+        index=index,
+    )
+    standardized = residuals / 0.1
+    pseudo = pd.DataFrame(
+        {
+            "IBUS500": [0.8, 0.2, 0.85, 0.15, 0.79, 0.21, 0.77, 0.19, 0.81, 0.23, 0.86, 0.18],
+            "IBUS30": [0.78, 0.22, 0.82, 0.18, 0.76, 0.24, 0.75, 0.2, 0.8, 0.26, 0.84, 0.21],
+            "IBDE40": [0.72, 0.28, 0.76, 0.24, 0.7, 0.3, 0.74, 0.26, 0.75, 0.25, 0.79, 0.22],
+            "IBEU50": [0.74, 0.26, 0.79, 0.21, 0.73, 0.27, 0.77, 0.23, 0.78, 0.22, 0.82, 0.19],
+        },
+        index=index,
+    )
+    return build_residual_study_dataset(residuals, standardized, pseudo)
 
 
 def _build_study_base_dir(tmp_path: Path) -> Path:

@@ -676,6 +676,54 @@ def test_v5_l2_runtime_guide_accepts_prediction_batch() -> None:
     poutine.trace(guide).get_trace(predict_batch)
 
 
+def test_v6_l1_runtime_registry_builds_model_and_guide() -> None:
+    model = modeling.default_model_registry().get(
+        "mixture_copula_model_v6_l1_online_filtering"
+    )
+    guide = modeling.default_guide_registry().get(
+        "mixture_copula_guide_v6_l1_online_filtering"
+    )
+    train_batch = _runtime_batch_unified(with_targets=True)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(train_batch)
+    poutine.trace(model).get_trace(train_batch)
+
+
+def test_v6_l1_runtime_guide_accepts_prediction_batch() -> None:
+    guide = modeling.default_guide_registry().get(
+        "mixture_copula_guide_v6_l1_online_filtering"
+    )
+    predict_batch = _runtime_batch_unified(with_targets=False)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(predict_batch)
+
+
+def test_v7_l1_runtime_registry_builds_model_and_guide() -> None:
+    model = modeling.default_model_registry().get(
+        "observable_state_dependence_model_v7_l1_online_filtering"
+    )
+    guide = modeling.default_guide_registry().get(
+        "observable_state_dependence_guide_v7_l1_online_filtering"
+    )
+    train_batch = _runtime_batch_unified(with_targets=True)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(train_batch)
+    poutine.trace(model).get_trace(train_batch)
+
+
+def test_v7_l1_runtime_guide_accepts_prediction_batch() -> None:
+    guide = modeling.default_guide_registry().get(
+        "observable_state_dependence_guide_v7_l1_online_filtering"
+    )
+    predict_batch = _runtime_batch_unified(with_targets=False)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(predict_batch)
+
+
 def test_v2_l3_runtime_registry_builds_model_and_guide() -> None:
     model = modeling.default_model_registry().get(
         "fx_currency_factor_model_v2_l3_online_filtering"

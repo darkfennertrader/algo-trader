@@ -8,6 +8,7 @@ from . import (
     feature_engineering,
     historical,
     modeling,
+    research,
     simulation,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "feature_engineering",
     "historical",
     "modeling",
+    "research",
     "simulation",
 ]

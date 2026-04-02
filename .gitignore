@@ -18,3 +18,4 @@ config/*
 
 # Research-only learning artifacts
 algo_trader/pipeline/stages/modeling/factor/learning/
+algo_trader/application/research

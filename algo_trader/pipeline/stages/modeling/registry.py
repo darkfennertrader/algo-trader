@@ -45,6 +45,7 @@ _MODEL_MODULES = (
     "algo_trader.pipeline.stages.modeling.residual_copula.versions.v5_l2.model",
     "algo_trader.pipeline.stages.modeling.mixture_copula.versions.v6_l1.model",
     "algo_trader.pipeline.stages.modeling.observable_state_dependence.versions.v7_l1.model",
+    "algo_trader.pipeline.stages.modeling.index_basis.versions.v8_l1.model",
 )
 
 _GUIDE_MODULES = (
@@ -81,6 +82,7 @@ _GUIDE_MODULES = (
     "algo_trader.pipeline.stages.modeling.residual_copula.versions.v5_l2.guide",
     "algo_trader.pipeline.stages.modeling.mixture_copula.versions.v6_l1.guide",
     "algo_trader.pipeline.stages.modeling.observable_state_dependence.versions.v7_l1.guide",
+    "algo_trader.pipeline.stages.modeling.index_basis.versions.v8_l1.guide",
 )
 
 _PREDICTOR_MODULES = (
@@ -116,6 +118,7 @@ _PREDICTOR_MODULES = (
     "algo_trader.pipeline.stages.modeling.residual_copula.versions.v5_l2.predict",
     "algo_trader.pipeline.stages.modeling.mixture_copula.versions.v6_l1.predict",
     "algo_trader.pipeline.stages.modeling.observable_state_dependence.versions.v7_l1.predict",
+    "algo_trader.pipeline.stages.modeling.index_basis.versions.v8_l1.predict",
 )
 
 

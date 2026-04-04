@@ -50,6 +50,7 @@ _MODEL_MODULES = (
     "algo_trader.pipeline.stages.modeling.hybrid_measurement.versions.v9_l2.model",
     "algo_trader.pipeline.stages.modeling.state_conditioned_measurement.versions.v10_l1.model",
     "algo_trader.pipeline.stages.modeling.state_conditioned_measurement.versions.v10_l2.model",
+    "algo_trader.pipeline.stages.modeling.index_subspace_consistency.versions.v11_l1.model",
 )
 
 _GUIDE_MODULES = (
@@ -91,6 +92,7 @@ _GUIDE_MODULES = (
     "algo_trader.pipeline.stages.modeling.hybrid_measurement.versions.v9_l2.guide",
     "algo_trader.pipeline.stages.modeling.state_conditioned_measurement.versions.v10_l1.guide",
     "algo_trader.pipeline.stages.modeling.state_conditioned_measurement.versions.v10_l2.guide",
+    "algo_trader.pipeline.stages.modeling.index_subspace_consistency.versions.v11_l1.guide",
 )
 
 _PREDICTOR_MODULES = (
@@ -131,6 +133,7 @@ _PREDICTOR_MODULES = (
     "algo_trader.pipeline.stages.modeling.hybrid_measurement.versions.v9_l2.predict",
     "algo_trader.pipeline.stages.modeling.state_conditioned_measurement.versions.v10_l1.predict",
     "algo_trader.pipeline.stages.modeling.state_conditioned_measurement.versions.v10_l2.predict",
+    "algo_trader.pipeline.stages.modeling.index_subspace_consistency.versions.v11_l1.predict",
 )
 
 

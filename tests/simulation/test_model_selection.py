@@ -86,6 +86,7 @@ def test_select_final_candidate_prefers_more_calibrated_survivor() -> None:
             },
             crps_metrics={1: 1.0},
             ql_metrics={1: 1.0},
+            basket_diagnostics={1: {}},
             complexity={0: 0.1, 1: 0.2},
         ),
         model_selection=ModelSelectionConfig(
@@ -96,6 +97,98 @@ def test_select_final_candidate_prefers_more_calibrated_survivor() -> None:
     assert selection["best_candidate_id"] == 1
     assert selection["survivors_calibration"] == [1]
     assert selection["survivors_es"] == [1]
+
+
+def test_select_final_candidate_uses_basket_aware_mode() -> None:
+    selection = _select_final_candidate(
+        inputs=FinalSelectionInputs(
+            es_metrics={
+                0: {"es_model": 1.0, "se_es": 0.1},
+                1: {"es_model": 1.0, "se_es": 0.1},
+            },
+            calibration_metrics={
+                0: {
+                    "calibration_score": 0.10,
+                    "mean_abs_coverage_error": 0.08,
+                    "max_abs_coverage_error": 0.12,
+                    "pit_uniform_rmse": 0.03,
+                },
+                1: {
+                    "calibration_score": 0.11,
+                    "mean_abs_coverage_error": 0.08,
+                    "max_abs_coverage_error": 0.12,
+                    "pit_uniform_rmse": 0.03,
+                },
+            },
+            crps_metrics={0: 1.0, 1: 1.0},
+            ql_metrics={0: 1.0, 1: 1.0},
+            basket_diagnostics={
+                0: {
+                    "us_index": {
+                        "coverage_p50": 0.50,
+                        "coverage_p90": 0.90,
+                        "coverage_p95": 0.95,
+                        "pit_uniform_rmse": 0.02,
+                    },
+                    "europe_index": {
+                        "coverage_p50": 0.50,
+                        "coverage_p90": 0.90,
+                        "coverage_p95": 0.95,
+                        "pit_uniform_rmse": 0.02,
+                    },
+                    "us_minus_europe": {
+                        "coverage_p50": 0.50,
+                        "coverage_p90": 0.90,
+                        "coverage_p95": 0.95,
+                        "pit_uniform_rmse": 0.02,
+                    },
+                    "index_equal_weight": {
+                        "coverage_p50": 0.50,
+                        "coverage_p90": 0.90,
+                        "coverage_p95": 0.95,
+                        "pit_uniform_rmse": 0.02,
+                    },
+                },
+                1: {
+                    "us_index": {
+                        "coverage_p50": 0.45,
+                        "coverage_p90": 0.85,
+                        "coverage_p95": 0.90,
+                        "pit_uniform_rmse": 0.05,
+                    },
+                    "europe_index": {
+                        "coverage_p50": 0.45,
+                        "coverage_p90": 0.85,
+                        "coverage_p95": 0.90,
+                        "pit_uniform_rmse": 0.05,
+                    },
+                    "us_minus_europe": {
+                        "coverage_p50": 0.45,
+                        "coverage_p90": 0.85,
+                        "coverage_p95": 0.90,
+                        "pit_uniform_rmse": 0.05,
+                    },
+                    "index_equal_weight": {
+                        "coverage_p50": 0.45,
+                        "coverage_p90": 0.85,
+                        "coverage_p95": 0.90,
+                        "pit_uniform_rmse": 0.05,
+                    },
+                },
+            },
+            complexity={0: 0.2, 1: 0.1},
+        ),
+        model_selection=ModelSelectionConfig(
+            mode="basket_aware",
+            calibration=ModelSelectionCalibration(top_k=2),
+        ),
+    )
+
+    assert selection["best_candidate_id"] == 0
+    assert selection["survivors_calibration"] == [0, 1]
+    assert selection["survivors_es"] == [0, 1]
+    assert selection["survivors_secondary"] == [0]
+    assert selection["basket_scores"][0] < selection["basket_scores"][1]
 
 
 def test_variogram_weekly_matches_manual_two_asset_case() -> None:

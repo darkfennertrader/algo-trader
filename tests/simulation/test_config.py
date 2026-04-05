@@ -44,7 +44,7 @@ def test_build_model_config_parses_optional_predictor() -> None:
     )
 
     assert model.predict_name == "factor_predict_l10_online_filtering"
-    assert dict(model.predict_params) == {}
+    assert not dict(model.predict_params)
 
 
 def test_build_preprocess_config_parses_exogenous_mask_flag() -> None:
@@ -97,6 +97,39 @@ def test_build_model_selection_calibration_parses_custom_values() -> None:
     assert selection.calibration.mean_abs_weight == 2.0
     assert selection.calibration.max_abs_weight == 3.0
     assert selection.calibration.pit_weight == 4.0
+
+
+def test_build_model_selection_parses_basket_aware_mode() -> None:
+    selection = simulation_config._build_model_selection_config(  # pylint: disable=protected-access
+        {
+            "model_selection": {
+                "mode": "basket_aware",
+                "basket": {
+                    "baskets": [
+                        "us_index",
+                        "europe_index",
+                        "us_minus_europe",
+                        "index_equal_weight",
+                    ],
+                    "mean_abs_weight": 2.0,
+                    "max_abs_weight": 3.0,
+                    "pit_weight": 4.0,
+                },
+            }
+        },
+        Path("simulation.yml"),
+    )
+
+    assert selection.mode == "basket_aware"
+    assert selection.basket.baskets == (
+        "us_index",
+        "europe_index",
+        "us_minus_europe",
+        "index_equal_weight",
+    )
+    assert selection.basket.mean_abs_weight == 2.0
+    assert selection.basket.max_abs_weight == 3.0
+    assert selection.basket.pit_weight == 4.0
 
 
 def test_build_tuning_config_parses_ray_early_stopping() -> None:

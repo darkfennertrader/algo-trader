@@ -39,6 +39,7 @@ from algo_trader.domain.simulation import (
     TrainingSVISharedConfig,
     TrainingTBPTTConfig,
     ModelSelectionBatching,
+    ModelSelectionBasket,
     ModelSelectionBootstrap,
     ModelSelectionCalibration,
     ModelSelectionComplexity,
@@ -558,8 +559,10 @@ def _build_model_selection_config(
     phase_name = str(
         section.get("phase_name", "post_tune_model_selection")
     )
+    mode = _build_model_selection_mode(section, config_path)
     es_band = _build_model_selection_es_band(section, config_path)
     calibration = _build_model_selection_calibration(section, config_path)
+    basket = _build_model_selection_basket(section, config_path)
     bootstrap = _build_model_selection_bootstrap(section, config_path)
     tail = _build_model_selection_tail(section, config_path)
     batching = _build_model_selection_batching(section, config_path)
@@ -567,7 +570,9 @@ def _build_model_selection_config(
     return ModelSelectionConfig(
         enable=enable,
         phase_name=phase_name,
+        mode=mode,
         calibration=calibration,
+        basket=basket,
         es_band=es_band,
         bootstrap=bootstrap,
         tail=tail,
@@ -616,6 +621,18 @@ def _build_svi_loss_config(
             config_path=config_path,
         )
     )
+
+
+def _build_model_selection_mode(
+    section: Mapping[str, Any], config_path: Path
+) -> Literal["global_calibrated", "basket_aware"]:
+    raw_mode = str(section.get("mode", "global_calibrated")).strip().lower()
+    if raw_mode not in {"global_calibrated", "basket_aware"}:
+        raise ConfigError(
+            "model_selection.mode must be 'global_calibrated' or "
+            f"'basket_aware' in {config_path}"
+        )
+    return cast(Literal["global_calibrated", "basket_aware"], raw_mode)
 
 
 def _build_fan_charts_config(
@@ -713,6 +730,24 @@ def _parse_float_list(
             )
     unique = sorted(set(values))
     return tuple(unique)
+
+
+def _parse_nonempty_string_list(
+    raw: Any,
+    *,
+    field: str,
+    config_path: Path,
+    default: tuple[str, ...],
+) -> tuple[str, ...]:
+    if raw is None:
+        values = list(default)
+    elif isinstance(raw, (list, tuple)):
+        values = [str(item).strip() for item in raw]
+    else:
+        values = [str(raw).strip()]
+    if not values or any(not value for value in values):
+        raise ConfigError(f"{field} must be non-empty in {config_path}")
+    return tuple(values)
 
 
 def _parse_positive_int_list(
@@ -836,6 +871,49 @@ def _build_model_selection_calibration(
     return ModelSelectionCalibration(
         top_k=top_k,
         coverage_levels=coverage_levels,
+        mean_abs_weight=mean_abs_weight,
+        max_abs_weight=max_abs_weight,
+        pit_weight=pit_weight,
+    )
+
+
+def _build_model_selection_basket(
+    section: Mapping[str, Any], config_path: Path
+) -> ModelSelectionBasket:
+    raw_basket = section.get("basket", {})
+    if raw_basket is None:
+        raw_basket = {}
+    if not isinstance(raw_basket, Mapping):
+        raise ConfigError(
+            f"model_selection.basket must be a mapping in {config_path}"
+        )
+    defaults = ModelSelectionBasket()
+    baskets = _parse_nonempty_string_list(
+        raw_basket.get("baskets"),
+        field="model_selection.basket.baskets",
+        config_path=config_path,
+        default=defaults.baskets,
+    )
+    mean_abs_weight = float(
+        raw_basket.get("mean_abs_weight", defaults.mean_abs_weight)
+    )
+    max_abs_weight = float(
+        raw_basket.get("max_abs_weight", defaults.max_abs_weight)
+    )
+    pit_weight = float(raw_basket.get("pit_weight", defaults.pit_weight))
+    weights = (mean_abs_weight, max_abs_weight, pit_weight)
+    if any(weight < 0.0 for weight in weights):
+        raise ConfigError(
+            "model_selection.basket weights must be non-negative "
+            f"in {config_path}"
+        )
+    if all(weight == 0.0 for weight in weights):
+        raise ConfigError(
+            "model_selection.basket requires at least one positive weight "
+            f"in {config_path}"
+        )
+    return ModelSelectionBasket(
+        baskets=baskets,
         mean_abs_weight=mean_abs_weight,
         max_abs_weight=max_abs_weight,
         pit_weight=pit_weight,

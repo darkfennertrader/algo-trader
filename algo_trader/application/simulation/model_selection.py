@@ -135,6 +135,7 @@ class FinalSelectionInputs:
     calibration_metrics: Mapping[int, Mapping[str, float]]
     crps_metrics: Mapping[int, float]
     ql_metrics: Mapping[int, float]
+    basket_diagnostics: Mapping[int, Mapping[str, Mapping[str, float]]]
     complexity: Mapping[int, float]
 
 
@@ -144,6 +145,17 @@ class CoverageErrorSummary:
     abs_error_by_level: Mapping[float, float]
     mean_error: float
     max_error: float
+
+
+def reselect_best_candidate(
+    *,
+    inputs: FinalSelectionInputs,
+    model_selection: ModelSelectionConfig,
+) -> Mapping[str, Any]:
+    return _select_final_candidate(
+        inputs=inputs,
+        model_selection=model_selection,
+    )
 
 
 _BLOCK_COVERAGE_LEVELS = (0.5, 0.9, 0.95)
@@ -214,6 +226,7 @@ def select_best_candidate_post_tune(
             calibration_metrics=calibration_metrics,
             crps_metrics=crps_metrics,
             ql_metrics=ql_metrics,
+            basket_diagnostics=basket_diagnostics,
             complexity=complexity,
         ),
         model_selection=context.model_selection,
@@ -296,6 +309,7 @@ def select_best_candidate_global(
             calibration_metrics=calibration_metrics,
             crps_metrics=crps_metrics,
             ql_metrics=ql_metrics,
+            basket_diagnostics=basket_diagnostics,
             complexity=complexity,
         ),
         model_selection=context.model_selection,
@@ -1811,14 +1825,20 @@ def _select_final_candidate(
         model_selection,
         candidate_ids=calibration_survivors,
     )
-    secondary = _secondary_scores(
-        survivors, inputs.crps_metrics, inputs.ql_metrics
+    secondary = _secondary_scores(survivors, inputs.crps_metrics, inputs.ql_metrics)
+    basket_scores = _basket_scores(
+        survivors=survivors,
+        basket_diagnostics=inputs.basket_diagnostics,
+        model_selection=model_selection,
     )
-    survivors2 = _secondary_survivors(secondary)
-    best_id = _pick_best_by_complexity(
-        survivors2, inputs.complexity, inputs.es_metrics
+    survivors2, adjusted_scores = _final_survivors(
+        survivors=survivors,
+        secondary=secondary,
+        basket_scores=basket_scores,
+        model_selection=model_selection,
     )
-    return {
+    best_id = _pick_best_by_complexity(survivors2, inputs.complexity, inputs.es_metrics)
+    selection: dict[str, Any] = {
         "best_candidate_id": int(best_id),
         "survivors_calibration": calibration_survivors,
         "survivors_es": survivors,
@@ -1832,6 +1852,11 @@ def _select_final_candidate(
         "secondary_scores": secondary,
         "complexity": inputs.complexity,
     }
+    if basket_scores:
+        selection["basket_scores"] = basket_scores
+    if adjusted_scores:
+        selection["adjusted_scores"] = adjusted_scores
+    return selection
 
 
 def _with_best_candidate_block_scores(
@@ -2074,6 +2099,141 @@ def _secondary_survivors(
         for candidate_id, score in secondary.items()
         if score == min_secondary
     ]
+
+
+def _final_survivors(
+    *,
+    survivors: Sequence[int],
+    secondary: Mapping[int, int],
+    basket_scores: Mapping[int, float],
+    model_selection: ModelSelectionConfig,
+) -> tuple[list[int], Mapping[int, int]]:
+    if model_selection.mode == "global_calibrated":
+        return _secondary_survivors(secondary), {}
+    if model_selection.mode == "basket_aware":
+        adjusted = _adjusted_scores(
+            survivors=survivors,
+            secondary=secondary,
+            basket_scores=basket_scores,
+        )
+        min_score = min(adjusted.values())
+        survivors2 = [
+            candidate_id
+            for candidate_id, score in adjusted.items()
+            if score == min_score
+        ]
+        return survivors2, adjusted
+    raise SimulationError(
+        "Unknown model selection mode",
+        context={"mode": str(model_selection.mode)},
+    )
+
+
+def _adjusted_scores(
+    *,
+    survivors: Sequence[int],
+    secondary: Mapping[int, int],
+    basket_scores: Mapping[int, float],
+) -> Mapping[int, int]:
+    basket_rank = _rank_values(basket_scores, survivors)
+    return {
+        candidate_id: secondary[candidate_id] + basket_rank[candidate_id]
+        for candidate_id in survivors
+    }
+
+
+def _basket_scores(
+    *,
+    survivors: Sequence[int],
+    basket_diagnostics: Mapping[int, Mapping[str, Mapping[str, float]]],
+    model_selection: ModelSelectionConfig,
+) -> Mapping[int, float]:
+    if model_selection.mode != "basket_aware":
+        return {}
+    scores: dict[int, float] = {}
+    for candidate_id in survivors:
+        diagnostics = basket_diagnostics.get(candidate_id)
+        if diagnostics is None:
+            raise SimulationError(
+                "Basket diagnostics missing for candidate selection",
+                context={"candidate_id": str(candidate_id)},
+            )
+        scores[candidate_id] = _basket_score_for_candidate(
+            diagnostics=diagnostics,
+            model_selection=model_selection,
+        )
+    return scores
+
+
+def _basket_score_for_candidate(
+    *,
+    diagnostics: Mapping[str, Mapping[str, float]],
+    model_selection: ModelSelectionConfig,
+) -> float:
+    basket_errors = _basket_coverage_errors(
+        diagnostics=diagnostics,
+        basket_names=model_selection.basket.baskets,
+        coverage_levels=model_selection.calibration.coverage_levels,
+    )
+    basket_pit = _basket_mean_pit_rmse(
+        diagnostics=diagnostics,
+        basket_names=model_selection.basket.baskets,
+    )
+    return (
+        model_selection.basket.mean_abs_weight * float(np.mean(basket_errors))
+        + model_selection.basket.max_abs_weight * float(np.max(basket_errors))
+        + model_selection.basket.pit_weight * basket_pit
+    )
+
+
+def _basket_coverage_errors(
+    *,
+    diagnostics: Mapping[str, Mapping[str, float]],
+    basket_names: Sequence[str],
+    coverage_levels: Sequence[float],
+) -> list[float]:
+    errors: list[float] = []
+    for basket_name in basket_names:
+        values = diagnostics.get(basket_name)
+        if values is None:
+            raise SimulationError(
+                "Configured basket missing from diagnostics",
+                context={"basket": basket_name},
+            )
+        for level in coverage_levels:
+            tag = calibration_diags.coverage_level_tag(float(level))
+            field = f"coverage_{tag}"
+            observed = float(values.get(field, float("nan")))
+            if not np.isfinite(observed):
+                raise SimulationError(
+                    "Basket coverage metric missing for candidate selection",
+                    context={"basket": basket_name, "field": field},
+                )
+            errors.append(abs(observed - float(level)))
+    return errors
+
+
+def _basket_mean_pit_rmse(
+    *,
+    diagnostics: Mapping[str, Mapping[str, float]],
+    basket_names: Sequence[str],
+) -> float:
+    values: list[float] = []
+    for basket_name in basket_names:
+        basket_values = diagnostics.get(basket_name)
+        if basket_values is None:
+            raise SimulationError(
+                "Configured basket missing from diagnostics",
+                context={"basket": basket_name},
+            )
+        pit = float(basket_values.get("pit_uniform_rmse", float("nan")))
+        if not np.isfinite(pit):
+            raise SimulationError(
+                "Basket PIT metric missing for candidate selection",
+                context={"basket": basket_name},
+            )
+        values.append(pit)
+    return float(np.mean(np.asarray(values, dtype=float)))
 
 
 def _pick_best_by_complexity(

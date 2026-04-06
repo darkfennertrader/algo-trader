@@ -65,6 +65,7 @@ from .types import (
     TuningRayEarlyStoppingConfig,
     TuningRayConfig,
     TuningResourcesConfig,
+    WalkforwardConfig,
 )
 
 __all__ = [
@@ -133,5 +134,6 @@ __all__ = [
     "TuningRayEarlyStoppingConfig",
     "TuningRayConfig",
     "TuningResourcesConfig",
+    "WalkforwardConfig",
     "PnLCalculator",
 ]

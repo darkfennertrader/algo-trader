@@ -36,11 +36,6 @@ from .inner_objective import (
     InnerObjectiveParams,
     make_inner_objective,
 )
-from .outer_walk_forward import (
-    OuterEvaluationContext,
-    PortfolioSpec,
-    evaluate_outer_walk_forward,
-)
 from .artifacts import (
     CVStructureInputs,
     SimulationArtifacts,
@@ -48,9 +43,6 @@ from .artifacts import (
     resolve_simulation_output_dir,
 )
 from .data_source_metadata import write_data_source_metadata
-from .downstream_metrics import write_downstream_metrics
-from .downstream_outputs import write_downstream_outputs
-from .downstream_plots import write_downstream_plots
 from .feature_panel_data import FeaturePanelData
 from .preprocessing import InnerCleaningSummaryContext, summarize_inner_cleaning
 from .registry import default_registries
@@ -98,7 +90,17 @@ from .selection import (
     select_global_best_config,
 )
 from .prebuild import PrebuildInputs, apply_prebuild, maybe_run_prebuild
-from .walkforward_progress import WalkforwardProgress, build_walkforward_progress
+from .walkforward import (
+    OuterEvaluationContext,
+    PortfolioSpec,
+    WalkforwardProgress,
+    build_walkforward_progress,
+    evaluate_outer_walk_forward,
+    run_seed_stability_study,
+    write_downstream_metrics,
+    write_downstream_outputs,
+    write_downstream_plots,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +160,16 @@ class _CudaRefSummary:
     examples: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _PreparedRunContext:
+    config: SimulationConfig
+    setup: RunSetup
+    runtime: _RunRuntimeOptions
+    resume_state: ResumeState
+    resume_tracker: SimulationResumeTracker | None
+    walkforward_progress: WalkforwardProgress | None
+
+
 def _summarize_cuda_refs(named_values: Mapping[str, object]) -> _CudaRefSummary:
     examples: list[str] = []
     count, total_bytes = _walk_cuda_refs(
@@ -199,11 +211,52 @@ def _is_walkforward_mode(flags: Any) -> bool:
     return getattr(flags, "execution_mode", None) == "walkforward"
 
 
+def _outer_runtime_seed(
+    *,
+    config: Any,
+    flags: Any,
+    fold_id: int,
+) -> int:
+    if _is_walkforward_mode(flags):
+        walkforward = getattr(config, "walkforward", None)
+        seeds = getattr(walkforward, "seeds", (7,))
+        base_seed = seeds[0] if len(seeds) > 0 else 7
+        return outer_fold_seed(int(base_seed), fold_id)
+    return outer_fold_seed(int(config.cv.cpcv.seed), fold_id)
+
+
 def _close_walkforward_progress(
     progress: WalkforwardProgress | None,
 ) -> None:
     if progress is not None:
         progress.close()
+
+
+def _should_run_walkforward_seed_stability(
+    config: SimulationConfig,
+) -> bool:
+    return (
+        config.flags.execution_mode == "walkforward"
+        and config.walkforward.num_seeds > 1
+    )
+
+
+def _maybe_run_walkforward_seed_stability(
+    *,
+    config: SimulationConfig,
+    started_at: float,
+) -> Mapping[str, Any] | None:
+    if not _should_run_walkforward_seed_stability(config):
+        return None
+    results = run_seed_stability_study(config=config)
+    ended_at = time.time()
+    logger.info(
+        "simulation_timing start=%s end=%s duration=%s",
+        _format_clock_time(started_at),
+        _format_clock_time(ended_at),
+        _format_duration_hms(ended_at - started_at),
+    )
+    return with_run_meta(results, config.flags)
 
 
 def _walk_cuda_refs(
@@ -334,16 +387,63 @@ def run(
     started_at = time.time()
     config = apply_smoke_test_overrides(load_config(config_path))
     validate_resume_request(config=config, resume=resume)
+    early_results = _maybe_run_walkforward_seed_stability(
+        config=config,
+        started_at=started_at,
+    )
+    if early_results is not None:
+        return early_results
+    results = _run_prepared_simulation(config=config, resume=resume)
+    ended_at = time.time()
+    logger.info(
+        "simulation_timing start=%s end=%s duration=%s",
+        _format_clock_time(started_at),
+        _format_clock_time(ended_at),
+        _format_duration_hms(ended_at - started_at),
+    )
+    return results
+
+
+def _run_prepared_simulation(
+    *,
+    config: SimulationConfig,
+    resume: bool,
+) -> Mapping[str, Any]:
     device = _resolve_device(config.flags.use_gpu)
     setup: RunSetup | None = _prepare_run_state(config=config, device=device)
     if setup.early_results is not None:
         return setup.early_results
-    resume_state = ResumeState(enabled=resume)
     runtime = _resolve_runtime_options(config)
+    resume_state = ResumeState(enabled=resume)
     walkforward_progress = _build_walkforward_progress(
         config=config,
         outer_folds=setup.outer_context.context.cv.outer_folds,
     )
+    resume_tracker = _initialize_run_runtime(
+        config=config,
+        setup=setup,
+        runtime=runtime,
+        resume=resume,
+    )
+    return _execute_run_loop(
+        prepared=_PreparedRunContext(
+            config=config,
+            setup=setup,
+            runtime=runtime,
+            resume_state=resume_state,
+            resume_tracker=resume_tracker,
+            walkforward_progress=walkforward_progress,
+        )
+    )
+
+
+def _initialize_run_runtime(
+    *,
+    config: SimulationConfig,
+    setup: RunSetup,
+    runtime: _RunRuntimeOptions,
+    resume: bool,
+) -> SimulationResumeTracker | None:
     cleanup_before_simulation_run(
         use_ray=runtime.use_ray,
         ray_address=runtime.ray_address,
@@ -361,96 +461,130 @@ def run(
     )
     if runtime.use_ray:
         init_ray_for_tuning(
-            runtime.ray_address, logs_enabled=runtime.ray_logs_enabled
+            runtime.ray_address,
+            logs_enabled=runtime.ray_logs_enabled,
         )
+    return resume_tracker
+
+
+def _execute_run_loop(
+    *,
+    prepared: _PreparedRunContext,
+) -> Mapping[str, Any]:
     interrupted = False
     chosen_configs: dict[int, Mapping[str, Any]] = {}
     outer_results: list[Mapping[str, Any]] = []
     results: Mapping[str, Any] | None = None
     try:
         chosen_configs, outer_results = _evaluate_outer_folds(
-            outer_context=setup.outer_context,
-            candidates=setup.candidates,
-            resume_state=resume_state,
-            resume_tracker=resume_tracker,
+            outer_context=prepared.setup.outer_context,
+            candidates=prepared.setup.candidates,
+            resume_state=prepared.resume_state,
+            resume_tracker=prepared.resume_tracker,
             week_progress=(
-                None if walkforward_progress is None else walkforward_progress.update
+                None
+                if prepared.walkforward_progress is None
+                else prepared.walkforward_progress.update
             ),
         )
-        _close_walkforward_progress(walkforward_progress)
-        walkforward_progress = None
-        if resume_tracker is not None:
-            resume_tracker.mark_run_completed()
-        if setup is None:
-            raise SimulationError("Simulation setup missing during result build")
-        results = _build_results(
-            config,
-            setup.outer_context.context,
-            chosen_configs,
-            outer_results,
-        )
-        results = with_run_meta(results, config.flags)
-        write_downstream_outputs(
-            base_dir=setup.outer_context.artifacts.base_dir,
+        _close_walkforward_progress(prepared.walkforward_progress)
+        prepared = replace(prepared, walkforward_progress=None)
+        if prepared.resume_tracker is not None:
+            prepared.resume_tracker.mark_run_completed()
+        results = _finalize_run_results(
+            config=prepared.config,
+            setup=prepared.setup,
+            chosen_configs=chosen_configs,
             outer_results=outer_results,
-            assets=setup.outer_context.context.assets,
         )
-        write_downstream_metrics(
-            base_dir=setup.outer_context.artifacts.base_dir,
-            dataset_params=config.data.dataset_params,
-        )
-        write_downstream_plots(
-            base_dir=setup.outer_context.artifacts.base_dir,
-            dataset_params=config.data.dataset_params,
-        )
-        setup.outer_context.artifacts.write_results(results)
-        setup.outer_context.artifacts.write_cv_summary(results)
-        _log_cuda_ref_summary(
-            use_gpu=config.flags.use_gpu,
-            stage="pre_release",
-            named_values={
-                "setup": setup,
-                "chosen_configs": chosen_configs,
-                "outer_results": outer_results,
-                "results": results,
-            },
-        )
-        setup = None
-        chosen_configs = {}
-        outer_results = []
-        _log_cuda_ref_summary(
-            use_gpu=config.flags.use_gpu,
-            stage="post_release",
-            named_values={
-                "setup": setup,
-                "chosen_configs": chosen_configs,
-                "outer_results": outer_results,
-                "results": results,
-            },
+        _release_run_refs(
+            use_gpu=prepared.config.flags.use_gpu,
+            setup=prepared.setup,
+            chosen_configs=chosen_configs,
+            outer_results=outer_results,
+            results=results,
         )
     except KeyboardInterrupt:
         interrupted = True
         raise
     finally:
-        if walkforward_progress is not None:
-            walkforward_progress.close()
+        if prepared.walkforward_progress is not None:
+            prepared.walkforward_progress.close()
         cleanup_after_simulation_run(
-            use_ray=runtime.use_ray,
-            ray_address=runtime.ray_address,
-            use_gpu=config.flags.use_gpu,
+            use_ray=prepared.runtime.use_ray,
+            ray_address=prepared.runtime.ray_address,
+            use_gpu=prepared.config.flags.use_gpu,
             interrupted=interrupted,
-            log_cuda_clear=not _is_walkforward_mode(config.flags),
+            log_cuda_clear=not _is_walkforward_mode(prepared.config.flags),
         )
     if results is None:
         raise SimulationError("Simulation completed without results")
-    ended_at = time.time()
-    logger.info(
-        "simulation_timing start=%s end=%s duration=%s",
-        _format_clock_time(started_at),
-        _format_clock_time(ended_at),
-        _format_duration_hms(ended_at - started_at),
-    )
     return results
+
+
+def _finalize_run_results(
+    *,
+    config: SimulationConfig,
+    setup: RunSetup,
+    chosen_configs: Mapping[int, Mapping[str, Any]],
+    outer_results: list[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    results = _build_results(
+        config,
+        setup.outer_context.context,
+        chosen_configs,
+        outer_results,
+    )
+    enriched = with_run_meta(results, config.flags)
+    write_downstream_outputs(
+        base_dir=setup.outer_context.artifacts.base_dir,
+        outer_results=outer_results,
+        assets=setup.outer_context.context.assets,
+    )
+    write_downstream_metrics(
+        base_dir=setup.outer_context.artifacts.base_dir,
+        dataset_params=config.data.dataset_params,
+    )
+    write_downstream_plots(
+        base_dir=setup.outer_context.artifacts.base_dir,
+        dataset_params=config.data.dataset_params,
+    )
+    setup.outer_context.artifacts.write_results(enriched)
+    setup.outer_context.artifacts.write_cv_summary(enriched)
+    return enriched
+
+
+def _release_run_refs(
+    *,
+    use_gpu: bool,
+    setup: RunSetup,
+    chosen_configs: dict[int, Mapping[str, Any]],
+    outer_results: list[Mapping[str, Any]],
+    results: Mapping[str, Any],
+) -> None:
+    _log_cuda_ref_summary(
+        use_gpu=use_gpu,
+        stage="pre_release",
+        named_values={
+            "setup": setup,
+            "chosen_configs": chosen_configs,
+            "outer_results": outer_results,
+            "results": results,
+        },
+    )
+    emptied_setup = None
+    chosen_configs.clear()
+    outer_results.clear()
+    _log_cuda_ref_summary(
+        use_gpu=use_gpu,
+        stage="post_release",
+        named_values={
+            "setup": emptied_setup,
+            "chosen_configs": chosen_configs,
+            "outer_results": outer_results,
+            "results": results,
+        },
+    )
 
 @dataclass(frozen=True)
 class RunSetup:
@@ -1354,9 +1488,10 @@ def _run_outer_evaluation(
     week_progress: Callable[[int, Any], None] | None,
 ) -> tuple[Mapping[str, Any], FeatureCleaningState | None]:
     set_runtime_seed(
-        outer_fold_seed(
-            outer_context.config.cv,
-            outer_fold.k_test,
+        _outer_runtime_seed(
+            config=outer_context.config,
+            flags=outer_context.flags,
+            fold_id=outer_fold.k_test,
         )
     )
     result, cleaning_outer = evaluate_outer_walk_forward(

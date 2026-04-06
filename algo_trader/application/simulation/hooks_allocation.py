@@ -21,6 +21,7 @@ from .allocation_common import (
 
 AllocatorMethod = str
 PortfolioStyle = str
+_DEFAULT_RANDOM_BASELINE_SEED = 17
 
 
 @dataclass(frozen=True)
@@ -116,7 +117,7 @@ def _parse_allocation_params(
             "allocation.spec.gross_exposure must be > 0 unless "
             "allocation family is de_risked"
         )
-    random_seed = _optional_int(alloc_spec.get("random_seed"), "random_seed")
+    random_seed = _resolve_random_seed(alloc_spec, method)
     risk_measure = str(alloc_spec.get("risk_measure", "cvar")).strip().lower()
     use_previous_weights = bool(alloc_spec.get("use_previous_weights", False))
     transaction_costs = float(alloc_spec.get("transaction_costs", 0.0))
@@ -162,6 +163,16 @@ def _optional_int(raw: Any, field: str) -> int | None:
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise ConfigError(f"allocation.spec.{field} must be an integer")
     return int(raw)
+
+
+def _resolve_random_seed(
+    alloc_spec: Mapping[str, Any],
+    method: str,
+) -> int | None:
+    random_seed = _optional_int(alloc_spec.get("random_seed"), "random_seed")
+    if method != "random" or random_seed is not None:
+        return random_seed
+    return _DEFAULT_RANDOM_BASELINE_SEED
 
 
 def _optional_float(raw: Any, field: str) -> float | None:

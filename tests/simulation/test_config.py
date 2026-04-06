@@ -175,6 +175,61 @@ def test_build_flags_rejects_stop_after() -> None:
         )
 
 
+def test_build_walkforward_config_parses_flat_seed_schema() -> None:
+    build_walkforward = getattr(
+        simulation_config, "_build_walkforward_config"
+    )
+    config = build_walkforward(
+        {
+            "walkforward": {
+                "num_seeds": 3,
+                "seeds": [11, 13, 17],
+                "max_parallel_seeds_per_gpu": 2,
+            }
+        },
+        Path("simulation.yml"),
+    )
+
+    assert config.num_seeds == 3
+    assert config.seeds == (11, 13, 17)
+    assert config.max_parallel_seeds_per_gpu == 2
+
+
+def test_build_walkforward_config_rejects_mismatched_seed_count() -> None:
+    build_walkforward = getattr(
+        simulation_config, "_build_walkforward_config"
+    )
+
+    with pytest.raises(ConfigError):
+        build_walkforward(
+            {
+                "walkforward": {
+                    "num_seeds": 2,
+                    "seeds": [7, 19, 43],
+                }
+            },
+            Path("simulation.yml"),
+        )
+
+
+def test_build_walkforward_config_rejects_removed_nested_keys() -> None:
+    build_walkforward = getattr(
+        simulation_config, "_build_walkforward_config"
+    )
+
+    with pytest.raises(ConfigError):
+        build_walkforward(
+            {
+                "walkforward": {
+                    "runtime": {
+                        "parallelize_seeds": True,
+                    }
+                }
+            },
+            Path("simulation.yml"),
+        )
+
+
 def test_build_tuning_config_parses_ray_early_stopping() -> None:
     tuning = config_tuning.build_tuning_config(
         {

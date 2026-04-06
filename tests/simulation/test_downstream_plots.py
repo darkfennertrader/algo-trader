@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from algo_trader.application.simulation.downstream_plots import (
     write_downstream_plots,
+)
+from tests.simulation.helpers import (
+    write_log_weekly_data_source_metadata,
 )
 
 
@@ -12,21 +14,10 @@ def test_write_downstream_plots_creates_downstream_charts(
     tmp_path: Path,
 ) -> None:
     base_dir = tmp_path / "simulation_run"
-    downstream_dir = base_dir / "downstream"
-    downstream_dir.mkdir(parents=True, exist_ok=True)
-    (base_dir / "inputs").mkdir(parents=True, exist_ok=True)
-    (base_dir / "inputs" / "data_source.json").write_text(
-        json.dumps(
-            {
-                "version_label": "2026-14",
-                "return_type": "log",
-                "return_frequency": "weekly",
-                "data_lake_dir": "/tmp/data_lake/2026-14",
-            }
-        ),
-        encoding="utf-8",
-    )
-    (downstream_dir / "stitched_returns.csv").write_text(
+    walkforward_dir = base_dir / "walkforward"
+    walkforward_dir.mkdir(parents=True, exist_ok=True)
+    write_log_weekly_data_source_metadata(base_dir)
+    (walkforward_dir / "stitched_returns.csv").write_text(
         "\n".join(
             [
                 "timestamp,primary,equal_weight",
@@ -40,8 +31,8 @@ def test_write_downstream_plots_creates_downstream_charts(
     write_downstream_plots(base_dir=base_dir, dataset_params={})
 
     assert (
-        downstream_dir / "plots" / "cumulative_returns.png"
+        walkforward_dir / "plots" / "cumulative_returns.png"
     ).exists()
     assert (
-        downstream_dir / "plots" / "underwater_drawdown.png"
+        walkforward_dir / "plots" / "underwater_drawdown.png"
     ).exists()

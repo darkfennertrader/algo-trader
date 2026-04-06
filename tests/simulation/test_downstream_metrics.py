@@ -15,30 +15,22 @@ from algo_trader.application.simulation.data_source_metadata import (
 from algo_trader.application.simulation.downstream_metrics import (
     write_downstream_metrics,
 )
+from tests.simulation.helpers import (
+    write_log_weekly_data_source_metadata,
+)
 
 
 def test_write_downstream_metrics_creates_summary_files(
     tmp_path: Path,
 ) -> None:
     base_dir = tmp_path / "simulation_run"
-    portfolio_dir = base_dir / "downstream" / "portfolios" / "primary"
+    portfolio_dir = base_dir / "walkforward" / "portfolios" / "primary"
     portfolio_dir.mkdir(parents=True, exist_ok=True)
-    (base_dir / "downstream" / "stitched_returns.csv").write_text(
+    (base_dir / "walkforward" / "stitched_returns.csv").write_text(
         "timestamp,primary\n2024-01-05,0.01\n",
         encoding="utf-8",
     )
-    (base_dir / "inputs").mkdir(parents=True, exist_ok=True)
-    (base_dir / "inputs" / "data_source.json").write_text(
-        json.dumps(
-            {
-                "version_label": "2026-14",
-                "return_type": "log",
-                "return_frequency": "weekly",
-                "data_lake_dir": "/tmp/data_lake/2026-14",
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_log_weekly_data_source_metadata(base_dir)
     pd.DataFrame(
         {
             "timestamp": ["2024-01-05", "2024-01-12"],
@@ -52,16 +44,16 @@ def test_write_downstream_metrics_creates_summary_files(
 
     write_downstream_metrics(base_dir=base_dir, dataset_params={})
 
-    summary_csv = pd.read_csv(base_dir / "downstream" / "metrics" / "summary.csv")
+    summary_csv = pd.read_csv(base_dir / "walkforward" / "metrics" / "summary.csv")
     summary_json = json.loads(
-        (base_dir / "downstream" / "metrics" / "summary.json").read_text(
+        (base_dir / "walkforward" / "metrics" / "summary.json").read_text(
             encoding="utf-8"
         )
     )
     primary_json = json.loads(
         (
             base_dir
-            / "downstream"
+            / "walkforward"
             / "metrics"
             / "by_portfolio"
             / "primary.json"

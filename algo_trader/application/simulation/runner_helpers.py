@@ -16,6 +16,7 @@ from algo_trader.domain.simulation import (
     TrainingConfig,
 )
 from .index_ranges import indices_to_ranges
+from .model_payload import model_to_payload
 
 
 def with_fold_seed(cv: CVParams, fold_id: int) -> CVParams:
@@ -29,8 +30,8 @@ def _fold_seed(base_seed: int, fold_id: int) -> int:
     return base_seed + 10_000 * fold_id
 
 
-def outer_fold_seed(cv: CVParams, fold_id: int) -> int:
-    return _fold_seed(cv.cpcv.seed, fold_id)
+def outer_fold_seed(base_seed: int, fold_id: int) -> int:
+    return _fold_seed(base_seed, fold_id)
 
 
 def set_runtime_seed(seed: int) -> None:
@@ -90,14 +91,7 @@ def build_base_config(
     debug_output_dir: str | None,
 ) -> dict[str, Any]:
     return {
-        "model": {
-            "model_name": model.model_name,
-            "guide_name": model.guide_name,
-            "predict_name": model.predict_name,
-            "params": dict(model.params),
-            "guide_params": dict(model.guide_params),
-            "predict_params": dict(model.predict_params),
-        },
+        "model": model_to_payload(model, include_prebuild=False),
         "debug": {
             "enabled": flags.smoke_test_debug,
             "output_dir": debug_output_dir,

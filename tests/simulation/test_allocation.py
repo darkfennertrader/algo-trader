@@ -95,6 +95,25 @@ def test_allocate_random_is_seeded() -> None:
     assert torch.isclose(w1.abs().sum(), torch.tensor(1.0), atol=1e-6)
 
 
+def test_allocate_random_uses_stable_default_seed() -> None:
+    alloc_spec = {
+        "method": "random",
+        "portfolio_style": "long_short_bounded_net",
+        "n_assets": 5,
+    }
+
+    w1 = hooks._allocate_weights(  # pylint: disable=protected-access
+        request=_request(alloc_spec=alloc_spec),
+    ).weights
+    w2 = hooks._allocate_weights(  # pylint: disable=protected-access
+        request=_request(alloc_spec=alloc_spec),
+    ).weights
+
+    assert torch.allclose(w1, w2)
+    assert torch.isclose(w1.sum(), torch.tensor(0.0), atol=1e-6)
+    assert torch.isclose(w1.abs().sum(), torch.tensor(1.0), atol=1e-6)
+
+
 def test_allocate_risk_budgeting_uses_predictive_samples() -> None:
     samples = torch.randn((16, 1, 3), dtype=torch.float32) * 0.01
 

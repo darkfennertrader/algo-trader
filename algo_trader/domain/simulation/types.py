@@ -464,6 +464,13 @@ class OuterConfig:
 
 
 @dataclass(frozen=True)
+class WalkforwardConfig:
+    num_seeds: int = 1
+    seeds: tuple[int, ...] = (7,)
+    max_parallel_seeds_per_gpu: int = 1
+
+
+@dataclass(frozen=True)
 class SimulationFlags:
     use_feature_names_for_scaling: bool = True
     use_gpu: bool = False
@@ -483,4 +490,5 @@ class SimulationConfig:
     modeling: ModelingSpec
     evaluation: EvaluationSpec
     outer: OuterConfig
+    walkforward: WalkforwardConfig
     flags: SimulationFlags

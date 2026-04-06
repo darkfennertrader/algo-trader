@@ -47,10 +47,12 @@ from algo_trader.domain.simulation import (
     ModelSelectionESBand,
     ModelSelectionTail,
     ModelPrebuildConfig,
+    WalkforwardConfig,
 )
 from .config_allocation import _build_allocation_config
 from .config_tuning import build_tuning_config
 from .config_utils import coerce_mapping, require_bool, require_string
+from .model_payload import model_to_payload
 
 DEFAULT_CONFIG_PATH = (
     Path(__file__).resolve().parents[3] / "config" / "simulation.yml"
@@ -67,6 +69,200 @@ def config_to_dict(config: SimulationConfig) -> dict[str, object]:
     return asdict(config)
 
 
+def config_to_input_dict(config: SimulationConfig) -> dict[str, object]:
+    return {
+        "use_feature_names_for_scaling": (
+            config.flags.use_feature_names_for_scaling
+        ),
+        "use_gpu": config.flags.use_gpu,
+        "simulation_mode": config.flags.simulation_mode,
+        "execution": {"mode": config.flags.execution_mode},
+        "smoke_test": {
+            "enabled": config.flags.smoke_test_enabled,
+            "debug": config.flags.smoke_test_debug,
+        },
+        "data": {
+            "simulation_output_path": config.data.simulation_output_path,
+            "dataset_params": dict(config.data.dataset_params),
+        },
+        "cv": {
+            "warmup_len": config.cv.window.warmup_len,
+            "group_len": config.cv.window.group_len,
+            "horizon": config.cv.leakage.horizon,
+            "embargo_len": config.cv.leakage.embargo_len,
+            "q": config.cv.cpcv.q,
+            "max_inner_combos": config.cv.cpcv.max_inner_combos,
+            "seed": config.cv.cpcv.seed,
+            "exclude_warmup": config.cv.exclude_warmup,
+        },
+        "outer": {
+            "test_group_ids": config.outer.test_group_ids,
+            "last_n": config.outer.last_n,
+        },
+        "walkforward": {
+            "num_seeds": config.walkforward.num_seeds,
+            "seeds": list(config.walkforward.seeds),
+            "max_parallel_seeds_per_gpu": (
+                config.walkforward.max_parallel_seeds_per_gpu
+            ),
+        },
+        "preprocessing": {
+            "min_usable_ratio": config.preprocessing.cleaning.min_usable_ratio,
+            "min_variance": config.preprocessing.cleaning.min_variance,
+            "max_abs_corr": config.preprocessing.cleaning.max_abs_corr,
+            "corr_subsample": config.preprocessing.cleaning.corr_subsample,
+            "mad_eps": config.preprocessing.scaling.mad_eps,
+            "breakout_var_floor": (
+                config.preprocessing.scaling.breakout_var_floor
+            ),
+            "winsor_low_q": config.preprocessing.scaling.winsor.lower_q,
+            "winsor_high_q": config.preprocessing.scaling.winsor.upper_q,
+            "scale_floor": config.preprocessing.scaling.scale_floor,
+            "guard_abs_eps": config.preprocessing.scaling.guardrail.abs_eps,
+            "guard_rel_eps": config.preprocessing.scaling.guardrail.rel_eps,
+            "guard_rel_offset": (
+                config.preprocessing.scaling.guardrail.rel_offset
+            ),
+            "clip_min": config.preprocessing.scaling.clip.min_value,
+            "clip_max": config.preprocessing.scaling.clip.max_value,
+            "max_abs_fail": config.preprocessing.scaling.clip.max_abs_fail,
+            "impute_missing_to_zero": (
+                config.preprocessing.scaling.inputs.impute_missing_to_zero
+            ),
+            "append_mask_as_features": (
+                config.preprocessing.scaling.inputs.append_mask_as_features
+            ),
+            "append_exogenous_mask_as_features": (
+                config.preprocessing.scaling.inputs.append_exogenous_mask_as_features
+            ),
+        },
+        "model": _model_to_input_dict(config.modeling.model),
+        "training": _training_to_input_dict(config.modeling.training),
+        "tuning": _tuning_to_input_dict(config.modeling.tuning),
+        "scoring": {"spec": dict(config.evaluation.scoring.spec)},
+        "predictive": asdict(config.evaluation.predictive),
+        "allocation": _allocation_to_input_dict(config.evaluation.allocation),
+        "cost": {"spec": dict(config.evaluation.cost.spec)},
+        "model_selection": _model_selection_to_input_dict(
+            config.evaluation.model_selection
+        ),
+        "diagnostics": _diagnostics_to_input_dict(
+            config.evaluation.diagnostics
+        ),
+    }
+
+
+def _model_to_input_dict(model: ModelConfig) -> dict[str, object]:
+    return model_to_payload(model, include_prebuild=True)
+
+
+def _training_to_input_dict(training: TrainingConfig) -> dict[str, object]:
+    return {
+        "method": training.method,
+        "svi_shared": asdict(training.svi_shared),
+        "tbptt": asdict(training.tbptt),
+        "online_filtering": asdict(training.online_filtering),
+        "target_normalization": training.target_normalization,
+        "log_prob_scaling": training.log_prob_scaling,
+    }
+
+
+def _tuning_to_input_dict(tuning: Any) -> dict[str, object]:
+    return {
+        "space": [
+            _tuning_param_to_input_dict(param) for param in tuning.space
+        ],
+        "num_samples": tuning.num_samples,
+        "seed": tuning.seed,
+        "kwargs": dict(tuning.kwargs),
+        "engine": tuning.engine,
+        "aggregate": asdict(tuning.aggregate),
+        "ray": {
+            "address": tuning.ray.address,
+            "logs_enabled": tuning.ray.logs_enabled,
+            "resources": asdict(tuning.ray.resources),
+            "early_stopping": asdict(tuning.ray.early_stopping),
+        },
+    }
+
+
+def _tuning_param_to_input_dict(param: Any) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "path": param.path,
+        "type": param.param_type,
+        "transform": param.transform,
+    }
+    if param.bounds is not None:
+        payload["bounds"] = list(param.bounds)
+    if param.values is not None:
+        payload["values"] = list(param.values)
+    if param.when:
+        payload["when"] = {
+            key: list(values) for key, values in param.when.items()
+        }
+    return payload
+
+
+def _allocation_to_input_dict(
+    allocation: Any,
+) -> dict[str, object]:
+    return {
+        "primary": {
+            "family": allocation.primary.family,
+            **dict(allocation.primary.params),
+        },
+        "baselines": [
+            {"family": baseline.family, **dict(baseline.params)}
+            for baseline in allocation.baselines
+        ],
+    }
+
+
+def _model_selection_to_input_dict(
+    selection: ModelSelectionConfig,
+) -> dict[str, object]:
+    return {
+        "enable": selection.enable,
+        "phase_name": selection.phase_name,
+        "mode": selection.mode,
+        "calibration": asdict(selection.calibration),
+        "basket": {
+            "baskets": list(selection.basket.baskets),
+            "mean_abs_weight": selection.basket.mean_abs_weight,
+            "max_abs_weight": selection.basket.max_abs_weight,
+            "pit_weight": selection.basket.pit_weight,
+        },
+        "es_band": asdict(selection.es_band),
+        "bootstrap": asdict(selection.bootstrap),
+        "tail": asdict(selection.tail),
+        "batching": asdict(selection.batching),
+        "complexity": asdict(selection.complexity),
+    }
+
+
+def _diagnostics_to_input_dict(
+    diagnostics: DiagnosticsConfig,
+) -> dict[str, object]:
+    assets: object
+    if diagnostics.fan_charts.assets_mode == "all":
+        assets = "all"
+    else:
+        assets = list(diagnostics.fan_charts.assets)
+    return {
+        "fan_charts": {
+            "enable": diagnostics.fan_charts.enable,
+            "assets_mode": diagnostics.fan_charts.assets_mode,
+            "assets": assets,
+            "rolling_mean": list(diagnostics.fan_charts.rolling_mean),
+            "quantiles": list(diagnostics.fan_charts.quantiles),
+            "coverage_levels": list(
+                diagnostics.fan_charts.coverage_levels
+            ),
+        },
+        "svi_loss": asdict(diagnostics.svi_loss),
+    }
+
+
 def _build_config(
     raw: Mapping[str, Any], config_path: Path
 ) -> SimulationConfig:
@@ -76,6 +272,7 @@ def _build_config(
     modeling = _build_modeling_spec(raw, config_path)
     evaluation = _build_evaluation_spec(raw, config_path)
     outer = _build_outer_config(raw, config_path)
+    walkforward = _build_walkforward_config(raw, config_path)
     flags = _build_flags(raw, config_path)
 
     return SimulationConfig(
@@ -85,6 +282,7 @@ def _build_config(
         modeling=modeling,
         evaluation=evaluation,
         outer=outer,
+        walkforward=walkforward,
         flags=flags,
     )
 
@@ -223,6 +421,102 @@ def _build_outer_config(
             f"Specify only one of outer.test_group_ids or outer.last_n in {config_path}"
         )
     return OuterConfig(test_group_ids=test_group_ids, last_n=last_n)
+
+
+def _build_walkforward_config(
+    raw: Mapping[str, Any], config_path: Path
+) -> WalkforwardConfig:
+    section = raw.get("walkforward", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, Mapping):
+        raise ConfigError(f"walkforward must be a mapping in {config_path}")
+    extra = set(section) - {
+        "num_seeds",
+        "seeds",
+        "max_parallel_seeds_per_gpu",
+    }
+    if extra:
+        raise ConfigError(
+            f"walkforward contains unknown keys in {config_path}",
+            context={"keys": ", ".join(sorted(extra))},
+        )
+    seeds = _build_walkforward_seed_list(
+        section.get("seeds", (7,)),
+        field="walkforward.seeds",
+        config_path=config_path,
+    )
+    num_seeds = _require_positive_int(
+        section.get("num_seeds", len(seeds)),
+        field="walkforward.num_seeds",
+        config_path=config_path,
+    )
+    if len(seeds) != num_seeds:
+        raise ConfigError(
+            "walkforward.num_seeds must match the number of explicit seeds",
+            context={
+                "num_seeds": str(num_seeds),
+                "seed_count": str(len(seeds)),
+            },
+        )
+    return WalkforwardConfig(
+        num_seeds=num_seeds,
+        seeds=seeds,
+        max_parallel_seeds_per_gpu=_require_positive_int(
+            section.get("max_parallel_seeds_per_gpu", 1),
+            field="walkforward.max_parallel_seeds_per_gpu",
+            config_path=config_path,
+        ),
+    )
+
+
+def _build_walkforward_seed_list(
+    value: object,
+    *,
+    field: str,
+    config_path: Path,
+) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ConfigError(f"{field} must be a list of ints in {config_path}")
+    seeds = tuple(_require_int_field(item, field=field, config_path=config_path) for item in value)
+    if not seeds:
+        raise ConfigError(f"{field} must not be empty in {config_path}")
+    return seeds
+
+
+def _require_positive_int(
+    value: object,
+    *,
+    field: str,
+    config_path: Path,
+) -> int:
+    parsed = _require_int_field(value, field=field, config_path=config_path)
+    if parsed <= 0:
+        raise ConfigError(f"{field} must be positive in {config_path}")
+    return parsed
+
+
+def _require_int_field(
+    value: object,
+    *,
+    field: str,
+    config_path: Path,
+) -> int:
+    if isinstance(value, bool):
+        raise ConfigError(f"{field} must be an int in {config_path}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise ConfigError(
+                f"{field} must be an int in {config_path}"
+            ) from exc
+    try:
+        return int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{field} must be an int in {config_path}") from exc
 
 
 def _build_modeling_spec(

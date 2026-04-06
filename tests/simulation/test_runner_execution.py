@@ -81,6 +81,7 @@ def test_run_outer_evaluation_sets_fold_seed(
             Any,
             SimpleNamespace(
                 cv=SimpleNamespace(cpcv=SimpleNamespace(seed=7)),
+                walkforward=SimpleNamespace(seeds=(11,)),
                 evaluation=SimpleNamespace(
                     predictive=SimpleNamespace(num_samples_outer=8),
                     allocation=SimpleNamespace(primary=None, baselines=()),
@@ -125,4 +126,39 @@ def test_run_outer_evaluation_sets_fold_seed(
         week_progress=None,
     )
 
-    assert captured == [410007]
+    assert captured == [410011]
+
+
+def test_run_delegates_to_seed_stability_study(
+    monkeypatch,
+) -> None:
+    config = cast(
+        Any,
+        SimpleNamespace(
+            flags=SimpleNamespace(
+                execution_mode="walkforward",
+                simulation_mode="full",
+            ),
+            walkforward=SimpleNamespace(
+                num_seeds=5,
+            ),
+        ),
+    )
+
+    monkeypatch.setattr(runner, "load_config", lambda *_: config)
+    monkeypatch.setattr(
+        runner, "apply_smoke_test_overrides", lambda loaded: loaded
+    )
+    monkeypatch.setattr(
+        runner, "validate_resume_request", lambda **_: None
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_seed_stability_study",
+        lambda **_: {"seed_stability": {"seed_count": 5}},
+    )
+
+    result = runner.run(config_path=None, resume=False)
+
+    assert result["execution_mode"] == "walkforward"
+    assert result["seed_stability"]["seed_count"] == 5

@@ -26,12 +26,16 @@ def cleanup_before_simulation_run(
     use_ray: bool,
     ray_address: str | None,
     use_gpu: bool,
+    log_cuda_clear: bool = True,
 ) -> None:
     _cleanup_stopped_simulation_processes()
     if use_ray and ray_address is None:
         _stop_local_ray_cluster(context="before run")
     if use_gpu:
-        _clear_cuda_memory(skip_if_recent=True)
+        _clear_cuda_memory(
+            skip_if_recent=True,
+            log_clear=log_cuda_clear,
+        )
 
 
 def cleanup_after_simulation_run(
@@ -40,6 +44,7 @@ def cleanup_after_simulation_run(
     ray_address: str | None,
     use_gpu: bool,
     interrupted: bool,
+    log_cuda_clear: bool = True,
 ) -> None:
     if use_ray:
         _safe_shutdown_ray_runtime()
@@ -50,7 +55,7 @@ def cleanup_after_simulation_run(
     if interrupted:
         _cleanup_stopped_simulation_processes()
     if use_gpu:
-        _clear_cuda_memory()
+        _clear_cuda_memory(log_clear=log_cuda_clear)
     if interrupted:
         logger.info("Completed post-interrupt simulation cleanup")
 
@@ -60,12 +65,14 @@ def cleanup_after_keyboard_interrupt(
     use_ray: bool,
     ray_address: str | None,
     use_gpu: bool,
+    log_cuda_clear: bool = True,
 ) -> None:
     cleanup_after_simulation_run(
         use_ray=use_ray,
         ray_address=ray_address,
         use_gpu=use_gpu,
         interrupted=True,
+        log_cuda_clear=log_cuda_clear,
     )
 
 
@@ -178,7 +185,11 @@ def _alive_processes(pids: list[int]) -> list[int]:
     return alive
 
 
-def clear_cuda_memory(*, skip_if_recent: bool = False) -> None:
+def clear_cuda_memory(
+    *,
+    skip_if_recent: bool = False,
+    log_clear: bool = True,
+) -> None:
     if not torch.cuda.is_available():
         return
     if skip_if_recent and _cuda_cleared_recently():
@@ -190,12 +201,17 @@ def clear_cuda_memory(*, skip_if_recent: bool = False) -> None:
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
     _CUDA_CLEAR_STATE["last"] = time.monotonic()
-    logger.info("Cleared CUDA cache for %s device(s)", device_count)
+    if log_clear:
+        logger.info("Cleared CUDA cache for %s device(s)", device_count)
 
 
-def _clear_cuda_memory(*, skip_if_recent: bool = False) -> None:
+def _clear_cuda_memory(
+    *,
+    skip_if_recent: bool = False,
+    log_clear: bool = True,
+) -> None:
     """Backward-compatible private alias for existing tests/call sites."""
-    clear_cuda_memory(skip_if_recent=skip_if_recent)
+    clear_cuda_memory(skip_if_recent=skip_if_recent, log_clear=log_clear)
 
 
 def _cuda_cleared_recently() -> bool:

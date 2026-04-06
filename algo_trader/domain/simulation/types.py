@@ -412,8 +412,27 @@ class ScoringConfig:
 
 
 @dataclass(frozen=True)
+class AllocationFamilyConfig:
+    family: str
+    params: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_spec(self) -> Mapping[str, Any]:
+        spec = dict(self.params)
+        spec.setdefault("family", self.family)
+        spec.setdefault("method", self.family)
+        return spec
+
+
+@dataclass(frozen=True)
 class AllocationConfig:
-    spec: Mapping[str, Any] = field(default_factory=dict)
+    primary: AllocationFamilyConfig
+    baselines: tuple[AllocationFamilyConfig, ...] = field(
+        default_factory=tuple
+    )
+
+    @property
+    def spec(self) -> Mapping[str, Any]:
+        return self.primary.to_spec()
 
 
 @dataclass(frozen=True)
@@ -451,9 +470,9 @@ class SimulationFlags:
     smoke_test_enabled: bool = False
     smoke_test_debug: bool = False
     simulation_mode: Literal["dry_run", "stub", "full"] = "full"
-    stop_after: (
-        Literal["inputs", "cv", "inner", "outer", "results"] | None
-    ) = None
+    execution_mode: Literal[
+        "full", "model_research", "walkforward", "results_aggregation"
+    ] = "full"
 
 
 @dataclass(frozen=True)

@@ -5,6 +5,8 @@ from typing import Any, Mapping, Protocol, Sequence
 
 import torch
 
+from .downstream import AllocationRequest, AllocationResult
+
 class PanelDataset(Protocol):
     @property
     def data(self) -> torch.Tensor: ...
@@ -71,11 +73,8 @@ class Scorer(Protocol):
 class Allocator(Protocol):
     def __call__(
         self,
-        pred: Mapping[str, Any],
-        alloc_spec: Mapping[str, Any],
-        w_prev: torch.Tensor | None = None,
-        asset_names: Sequence[str] = (),
-    ) -> torch.Tensor: ...
+        request: AllocationRequest,
+    ) -> AllocationResult: ...
 
 
 class PnLCalculator(Protocol):

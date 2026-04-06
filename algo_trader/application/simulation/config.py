@@ -92,8 +92,13 @@ def _build_config(
 def _build_flags(
     raw: Mapping[str, Any], config_path: Path
 ) -> SimulationFlags:
+    if "stop_after" in raw:
+        raise ConfigError(
+            f"stop_after is no longer supported in {config_path}; "
+            "use execution.mode instead"
+        )
+    execution_mode = _read_execution_mode(raw, config_path)
     mode = raw.get("simulation_mode", "full")
-    stop_after = raw.get("stop_after")
     smoke_enabled, debug_enabled = _read_smoke_test_flags(
         raw, config_path
     )
@@ -105,8 +110,26 @@ def _build_flags(
         smoke_test_enabled=smoke_enabled,
         smoke_test_debug=debug_enabled,
         simulation_mode=_normalize_simulation_mode(mode),
-        stop_after=_normalize_stop_after(stop_after),
+        execution_mode=execution_mode,
     )
+
+
+def _read_execution_mode(
+    raw: Mapping[str, Any], config_path: Path
+) -> Literal["full", "model_research", "walkforward", "results_aggregation"]:
+    section = raw.get("execution", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, Mapping):
+        raise ConfigError(f"execution must be a mapping in {config_path}")
+    extra = set(section) - {"mode"}
+    if extra:
+        raise ConfigError(
+            f"execution contains unknown keys in {config_path}",
+            context={"keys": ", ".join(sorted(extra))},
+        )
+    value = section.get("mode", "full")
+    return _normalize_execution_mode(value)
 
 
 def _read_smoke_test_flags(
@@ -139,7 +162,9 @@ def _read_smoke_test_flags(
 
 
 SimulationMode = Literal["dry_run", "stub", "full"]
-StopAfter = Literal["inputs", "cv", "inner", "outer", "results"] | None
+ExecutionMode = Literal[
+    "full", "model_research", "walkforward", "results_aggregation"
+]
 
 
 def _normalize_simulation_mode(value: object) -> SimulationMode:
@@ -153,22 +178,19 @@ def _normalize_simulation_mode(value: object) -> SimulationMode:
     raise ConfigError("simulation_mode must be dry_run, stub, or full")
 
 
-def _normalize_stop_after(value: object) -> StopAfter:
-    if value is None:
-        return None
+def _normalize_execution_mode(value: object) -> ExecutionMode:
     raw = str(value).strip().lower()
-    if raw == "inputs":
-        return "inputs"
-    if raw == "cv":
-        return "cv"
-    if raw == "inner":
-        return "inner"
-    if raw == "outer":
-        return "outer"
-    if raw == "results":
-        return "results"
+    if raw == "full":
+        return "full"
+    if raw == "model_research":
+        return "model_research"
+    if raw in {"walkforward", "outer_evaluation"}:
+        return "walkforward"
+    if raw == "results_aggregation":
+        return "results_aggregation"
     raise ConfigError(
-        "stop_after must be inputs, cv, inner, outer, results, or null"
+        "execution.mode must be full, model_research, "
+        "walkforward, or results_aggregation"
     )
 
 

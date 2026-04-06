@@ -17,13 +17,14 @@ dependencies = [
     "torchaudio==2.10.0",
     "pyro-ppl>=1.9.1",
     "ta-lib==0.6.8",
-    "ray[default,tune]>=2.53.0",
+    "ray[tune]>=2.53.0",
     "scipy>=1.17.0",
     "ibapi",
     "matplotlib>=3.10.8",
     "seaborn[stats]>=0.13.2",
     "graphviz>=0.21",
     "skfolio>=0.15.7",
+    "tqdm>=4.67.3",
 ]
 
 [build-system]

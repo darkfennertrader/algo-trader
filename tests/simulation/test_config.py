@@ -132,6 +132,49 @@ def test_build_model_selection_parses_basket_aware_mode() -> None:
     assert selection.basket.pit_weight == 4.0
 
 
+def test_build_flags_parses_execution_mode() -> None:
+    build_flags = getattr(simulation_config, "_build_flags")
+    flags = build_flags(
+        {"execution": {"mode": "walkforward"}},
+        Path("simulation.yml"),
+    )
+
+    assert flags.execution_mode == "walkforward"
+
+
+def test_build_flags_normalizes_outer_evaluation_alias() -> None:
+    build_flags = getattr(simulation_config, "_build_flags")
+    flags = build_flags(
+        {"execution": {"mode": "outer_evaluation"}},
+        Path("simulation.yml"),
+    )
+
+    assert flags.execution_mode == "walkforward"
+
+
+def test_build_flags_rejects_invalid_execution_mode() -> None:
+    build_flags = getattr(simulation_config, "_build_flags")
+
+    with pytest.raises(ConfigError):
+        build_flags(
+            {"execution": {"mode": "bad_mode"}},
+            Path("simulation.yml"),
+        )
+
+
+def test_build_flags_rejects_stop_after() -> None:
+    build_flags = getattr(simulation_config, "_build_flags")
+
+    with pytest.raises(ConfigError):
+        build_flags(
+            {
+                "execution": {"mode": "full"},
+                "stop_after": "inner",
+            },
+            Path("simulation.yml"),
+        )
+
+
 def test_build_tuning_config_parses_ray_early_stopping() -> None:
     tuning = config_tuning.build_tuning_config(
         {
@@ -260,3 +303,52 @@ def test_build_allocation_config_parses_de_risked_flat_portfolio() -> None:
 
     assert allocation.spec["method"] == "de_risked"
     assert allocation.spec["gross_exposure"] == 0.0
+
+
+def test_load_config_parses_primary_and_baselines() -> None:
+    build_allocation_config = getattr(
+        simulation_config, "_build_allocation_config"
+    )
+    config = build_allocation_config(
+        {
+            "allocation": {
+                "primary": {
+                    "family": "long_only",
+                    "gross_exposure": 1.0,
+                    "min_weight": 0.0,
+                    "max_weight": 0.25,
+                    "use_previous_weights": True,
+                },
+                "baselines": [
+                    {"family": "equal_weight"},
+                    {"family": "random", "random_seed": 7},
+                ],
+            }
+        },
+        Path("simulation.yml"),
+    )
+
+    assert config.primary.family == "long_only"
+    assert config.primary.params["max_weight"] == 0.25
+    assert len(config.baselines) == 2
+    assert config.baselines[0].family == "equal_weight"
+    assert config.baselines[1].family == "random"
+
+
+def test_load_config_rejects_long_only_negative_min_weight() -> None:
+    build_allocation_config = getattr(
+        simulation_config, "_build_allocation_config"
+    )
+
+    with pytest.raises(ConfigError):
+        build_allocation_config(
+            {
+                "allocation": {
+                    "primary": {
+                        "family": "long_only",
+                        "min_weight": -0.1,
+                    }
+                }
+            },
+            Path("simulation.yml"),
+        )

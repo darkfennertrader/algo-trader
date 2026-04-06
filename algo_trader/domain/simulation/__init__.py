@@ -1,3 +1,4 @@
+from .downstream import AllocationRequest, AllocationResult, PredictionPacket
 from .protocols import (
     Allocator,
     ModelFitter,
@@ -9,6 +10,7 @@ from .protocols import (
 from .registry import Registry
 from .types import (
     AllocationConfig,
+    AllocationFamilyConfig,
     CandidateSpec,
     CPCVParams,
     CPCVSplit,
@@ -67,6 +69,9 @@ from .types import (
 
 __all__ = [
     "AllocationConfig",
+    "AllocationFamilyConfig",
+    "AllocationRequest",
+    "AllocationResult",
     "Allocator",
     "CandidateSpec",
     "CPCVParams",
@@ -103,6 +108,7 @@ __all__ = [
     "SviLossConfig",
     "PanelDataset",
     "PredictiveConfig",
+    "PredictionPacket",
     "Predictor",
     "PreprocessSpec",
     "Registry",

@@ -6,13 +6,14 @@ import logging
 import time
 from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping, Sequence, cast
 
 import numpy as np
 import torch
 
 from algo_trader.domain import ConfigError, SimulationError
 from algo_trader.domain.simulation import (
+    AllocationConfig,
     CandidateSpec,
     CPCVSplit,
     DataPaths,
@@ -46,6 +47,11 @@ from .artifacts import (
     SimulationInputs,
     resolve_simulation_output_dir,
 )
+from .data_source_metadata import write_data_source_metadata
+from .downstream_metrics import write_downstream_metrics
+from .downstream_outputs import write_downstream_outputs
+from .downstream_plots import write_downstream_plots
+from .feature_panel_data import FeaturePanelData
 from .preprocessing import InnerCleaningSummaryContext, summarize_inner_cleaning
 from .registry import default_registries
 from .tuning import assign_candidate_ids, build_candidates
@@ -60,6 +66,7 @@ from .resume_flow import (
     ResumeState,
     build_resume_tracker,
     load_best_config,
+    load_global_best_config,
     load_completed_outer_fold,
     load_outer_result,
     mark_outer_complete_for_all,
@@ -70,8 +77,10 @@ from .resume_flow import (
 from .runner_helpers import (
     build_base_config,
     build_group_by_index,
+    outer_fold_seed,
     outer_fold_payload,
     resolve_outer_test_group_ids,
+    set_runtime_seed,
     should_stop_after,
     with_fold_seed,
     with_run_meta,
@@ -89,6 +98,7 @@ from .selection import (
     select_global_best_config,
 )
 from .prebuild import PrebuildInputs, apply_prebuild, maybe_run_prebuild
+from .walkforward_progress import WalkforwardProgress, build_walkforward_progress
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +119,7 @@ class SimulationContext:  # pylint: disable=too-many-instance-attributes
     X_global: torch.Tensor | None
     M_global: torch.Tensor | None
     y: torch.Tensor
+    timestamps: Sequence[Any]
     preprocess_spec: PreprocessSpec
     cv: CVStructure
     feature_names: Sequence[str]
@@ -163,11 +174,36 @@ def _summarize_cuda_refs(named_values: Mapping[str, object]) -> _CudaRefSummary:
 
 
 def _resolve_runtime_options(config: SimulationConfig) -> _RunRuntimeOptions:
+    use_ray = (
+        config.flags.execution_mode in {"full", "model_research"}
+        and config.modeling.tuning.engine == "ray"
+    )
     return _RunRuntimeOptions(
-        use_ray=config.modeling.tuning.engine == "ray",
+        use_ray=use_ray,
         ray_address=config.modeling.tuning.ray.address,
         ray_logs_enabled=config.modeling.tuning.ray.logs_enabled,
     )
+
+
+def _build_walkforward_progress(
+    *,
+    config: SimulationConfig,
+    outer_folds: Sequence[OuterFold],
+) -> WalkforwardProgress | None:
+    if config.flags.execution_mode != "walkforward":
+        return None
+    return build_walkforward_progress(outer_folds)
+
+
+def _is_walkforward_mode(flags: Any) -> bool:
+    return getattr(flags, "execution_mode", None) == "walkforward"
+
+
+def _close_walkforward_progress(
+    progress: WalkforwardProgress | None,
+) -> None:
+    if progress is not None:
+        progress.close()
 
 
 def _walk_cuda_refs(
@@ -304,10 +340,15 @@ def run(
         return setup.early_results
     resume_state = ResumeState(enabled=resume)
     runtime = _resolve_runtime_options(config)
+    walkforward_progress = _build_walkforward_progress(
+        config=config,
+        outer_folds=setup.outer_context.context.cv.outer_folds,
+    )
     cleanup_before_simulation_run(
         use_ray=runtime.use_ray,
         ray_address=runtime.ray_address,
         use_gpu=config.flags.use_gpu,
+        log_cuda_clear=not _is_walkforward_mode(config.flags),
     )
     resume_tracker = build_resume_tracker(
         base_dir=setup.outer_context.artifacts.base_dir,
@@ -332,7 +373,12 @@ def run(
             candidates=setup.candidates,
             resume_state=resume_state,
             resume_tracker=resume_tracker,
+            week_progress=(
+                None if walkforward_progress is None else walkforward_progress.update
+            ),
         )
+        _close_walkforward_progress(walkforward_progress)
+        walkforward_progress = None
         if resume_tracker is not None:
             resume_tracker.mark_run_completed()
         if setup is None:
@@ -344,6 +390,19 @@ def run(
             outer_results,
         )
         results = with_run_meta(results, config.flags)
+        write_downstream_outputs(
+            base_dir=setup.outer_context.artifacts.base_dir,
+            outer_results=outer_results,
+            assets=setup.outer_context.context.assets,
+        )
+        write_downstream_metrics(
+            base_dir=setup.outer_context.artifacts.base_dir,
+            dataset_params=config.data.dataset_params,
+        )
+        write_downstream_plots(
+            base_dir=setup.outer_context.artifacts.base_dir,
+            dataset_params=config.data.dataset_params,
+        )
         setup.outer_context.artifacts.write_results(results)
         setup.outer_context.artifacts.write_cv_summary(results)
         _log_cuda_ref_summary(
@@ -373,11 +432,14 @@ def run(
         interrupted = True
         raise
     finally:
+        if walkforward_progress is not None:
+            walkforward_progress.close()
         cleanup_after_simulation_run(
             use_ray=runtime.use_ray,
             ray_address=runtime.ray_address,
             use_gpu=config.flags.use_gpu,
             interrupted=interrupted,
+            log_cuda_clear=not _is_walkforward_mode(config.flags),
         )
     if results is None:
         raise SimulationError("Simulation completed without results")
@@ -411,6 +473,7 @@ def _prepare_run_state(
         dataset=dataset,
         context=context,
         write_inputs=not reused_inputs,
+        dataset_params=config.data.dataset_params,
     )
     early_results = _maybe_finalize_inputs(
         config=config,
@@ -663,6 +726,7 @@ def _build_context(
         X_global=dataset.global_data,
         M_global=dataset.global_missing_mask,
         y=y,
+        timestamps=list(dataset.dates),
         preprocess_spec=preprocess_spec,
         cv=CVStructure(
             warmup_idx=warmup_idx,
@@ -692,7 +756,16 @@ def _evaluate_outer_folds(
     candidates: Sequence[CandidateSpec],
     resume_state: ResumeState,
     resume_tracker: SimulationResumeTracker | None,
+    week_progress: Callable[[int, Any], None] | None,
 ) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
+    if getattr(outer_context.flags, "execution_mode", None) == "results_aggregation":
+        return _load_saved_outer_outputs(outer_context=outer_context)
+    if _is_walkforward_mode(outer_context.flags):
+        return _evaluate_saved_best_configs_outer_only(
+            outer_context=outer_context,
+            resume_tracker=resume_tracker,
+            week_progress=week_progress,
+        )
     selection = outer_context.config.evaluation.model_selection
     if selection.enable:
         return _evaluate_outer_folds_global(
@@ -700,12 +773,14 @@ def _evaluate_outer_folds(
             candidates=candidates,
             resume_state=resume_state,
             resume_tracker=resume_tracker,
+            week_progress=week_progress,
         )
     return _evaluate_outer_folds_per_outer(
         outer_context=outer_context,
         candidates=candidates,
         resume_state=resume_state,
         resume_tracker=resume_tracker,
+        week_progress=week_progress,
     )
 
 def _evaluate_outer_folds_per_outer(
@@ -714,6 +789,7 @@ def _evaluate_outer_folds_per_outer(
     candidates: Sequence[CandidateSpec],
     resume_state: ResumeState,
     resume_tracker: SimulationResumeTracker | None,
+    week_progress: Callable[[int, Any], None] | None,
 ) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
     chosen_configs: dict[int, Mapping[str, Any]] = {}
     outer_results: list[Mapping[str, Any]] = []
@@ -741,6 +817,7 @@ def _evaluate_outer_folds_per_outer(
                 outer_context=outer_context,
                 outer_fold=outer_fold,
                 resume_tracker=resume_tracker,
+                week_progress=week_progress,
             )
             chosen_configs[outer_fold.k_test] = resumed.best_config
             if resumed.outer_result is None:
@@ -754,8 +831,11 @@ def _evaluate_outer_folds_per_outer(
             outer_context=outer_context,
             outer_fold=outer_fold,
             candidates=candidates,
-            resume_state=resume_state,
-            resume_tracker=resume_tracker,
+            controls=OuterRunControls(
+                resume_state=resume_state,
+                resume_tracker=resume_tracker,
+                week_progress=week_progress,
+            ),
         )
         chosen_configs[outer_fold.k_test] = fold_result.best_config
         if fold_result.outer_result is not None:
@@ -768,6 +848,7 @@ def _evaluate_outer_folds_global(
     candidates: Sequence[CandidateSpec],
     resume_state: ResumeState,
     resume_tracker: SimulationResumeTracker | None,
+    week_progress: Callable[[int, Any], None] | None,
 ) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
     chosen_configs: dict[int, Mapping[str, Any]] = {}
     outer_results: list[Mapping[str, Any]] = []
@@ -828,18 +909,100 @@ def _evaluate_outer_folds_global(
             outer_context=outer_context,
             outer_fold=outer_fold,
             best_config=global_best.best_config,
+            week_progress=week_progress,
         )
         if resume_tracker is not None:
             resume_tracker.mark_outer_completed(outer_fold.k_test)
-        _log_outer_complete(
-            outer_k=outer_fold.k_test,
-            started=started,
-            phase="outer",
-            result=result,
-            cleaning=cleaning_outer,
-        )
+        if not _is_walkforward_mode(outer_context.flags):
+            _log_outer_complete(
+                outer_k=outer_fold.k_test,
+                started=started,
+                phase="outer",
+                result=result,
+                cleaning=cleaning_outer,
+            )
         outer_results.append(result)
     return chosen_configs, outer_results
+
+
+def _evaluate_saved_best_configs_outer_only(
+    *,
+    outer_context: OuterFoldContext,
+    resume_tracker: SimulationResumeTracker | None,
+    week_progress: Callable[[int, Any], None] | None,
+) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
+    chosen_configs = _load_saved_chosen_configs(outer_context=outer_context)
+    outer_results: list[Mapping[str, Any]] = []
+    for outer_fold in outer_context.context.cv.outer_folds:
+        if (
+            resume_tracker is not None
+            and resume_tracker.is_outer_completed(outer_fold.k_test)
+        ):
+            outer_results.append(
+                load_outer_result(
+                    base_dir=outer_context.artifacts.base_dir,
+                    outer_k=outer_fold.k_test,
+                )
+            )
+            continue
+        if resume_tracker is not None:
+            resume_tracker.mark_outer_started(outer_fold.k_test)
+        started = time.perf_counter()
+        result, cleaning_outer = _run_outer_evaluation(
+            outer_context=outer_context,
+            outer_fold=outer_fold,
+            best_config=chosen_configs[outer_fold.k_test],
+            week_progress=week_progress,
+        )
+        if resume_tracker is not None:
+            resume_tracker.mark_outer_completed(outer_fold.k_test)
+        if not _is_walkforward_mode(outer_context.flags):
+            _log_outer_complete(
+                outer_k=outer_fold.k_test,
+                started=started,
+                phase="outer",
+                result=result,
+                cleaning=cleaning_outer,
+            )
+        outer_results.append(result)
+    return chosen_configs, outer_results
+
+
+def _load_saved_outer_outputs(
+    *,
+    outer_context: OuterFoldContext,
+) -> tuple[dict[int, Mapping[str, Any]], list[Mapping[str, Any]]]:
+    chosen_configs = _load_saved_chosen_configs(outer_context=outer_context)
+    outer_results = [
+        load_outer_result(
+            base_dir=outer_context.artifacts.base_dir,
+            outer_k=outer_fold.k_test,
+        )
+        for outer_fold in outer_context.context.cv.outer_folds
+    ]
+    return chosen_configs, outer_results
+
+
+def _load_saved_chosen_configs(
+    *,
+    outer_context: OuterFoldContext,
+) -> dict[int, Mapping[str, Any]]:
+    outer_ids = outer_context.context.cv.outer_ids
+    if outer_context.config.evaluation.model_selection.enable:
+        global_path = outer_context.artifacts.base_dir / "outer" / "best_config.json"
+        if global_path.exists():
+            best_config = load_global_best_config(
+                base_dir=outer_context.artifacts.base_dir
+            )
+            return {int(outer_k): best_config for outer_k in outer_ids}
+    return {
+        int(outer_fold.k_test): load_best_config(
+            base_dir=outer_context.artifacts.base_dir,
+            outer_k=outer_fold.k_test,
+        )
+        for outer_fold in outer_context.context.cv.outer_folds
+    }
+
 
 @dataclass(frozen=True)
 class OuterFoldRunResult:
@@ -853,13 +1016,20 @@ class InnerObjectiveBundle:
     context: InnerObjectiveContext
     hooks: SimulationHooks
 
+
+@dataclass(frozen=True)
+class OuterRunControls:
+    resume_state: ResumeState
+    resume_tracker: SimulationResumeTracker | None
+    week_progress: Callable[[int, Any], None] | None
+
+
 def _run_outer_fold(
     *,
     outer_context: OuterFoldContext,
     outer_fold: OuterFold,
     candidates: Sequence[CandidateSpec],
-    resume_state: ResumeState,
-    resume_tracker: SimulationResumeTracker | None,
+    controls: OuterRunControls,
 ) -> OuterFoldRunResult:
     started = time.perf_counter()
     inner_splits = _build_inner_splits(
@@ -883,17 +1053,17 @@ def _run_outer_fold(
         outer_fold=outer_fold,
         inner_splits=inner_splits,
     )
-    if resume_tracker is not None:
-        resume_tracker.mark_inner_started(outer_fold.k_test)
+    if controls.resume_tracker is not None:
+        controls.resume_tracker.mark_inner_started(outer_fold.k_test)
     ray_plan = resolve_ray_selection_plan(
         context=RaySelectionContext(
             tuning=outer_context.config.modeling.tuning,
             tuning_engine=outer_context.config.modeling.tuning.engine,
             ray_storage_path=outer_context.ray_storage_path,
             outer_k=outer_fold.k_test,
-            resume_tracker=resume_tracker,
+            resume_tracker=controls.resume_tracker,
         ),
-        resume_state=resume_state,
+        resume_state=controls.resume_state,
     )
     best_config = select_best_config(
         BestConfigContext(
@@ -923,35 +1093,38 @@ def _run_outer_fold(
         inner_splits=inner_splits,
         best_config=best_config,
     )
-    if resume_tracker is not None:
-        resume_tracker.mark_inner_completed(outer_fold.k_test)
+    if controls.resume_tracker is not None:
+        controls.resume_tracker.mark_inner_completed(outer_fold.k_test)
     if should_stop_after("inner", outer_context.flags):
-        if resume_tracker is not None:
-            resume_tracker.mark_outer_completed(outer_fold.k_test)
-        _log_outer_complete(
-            outer_k=outer_fold.k_test,
-            started=started,
-            phase="inner",
-            result=None,
-            cleaning=None,
-        )
+        if controls.resume_tracker is not None:
+            controls.resume_tracker.mark_outer_completed(outer_fold.k_test)
+        if not _is_walkforward_mode(outer_context.flags):
+            _log_outer_complete(
+                outer_k=outer_fold.k_test,
+                started=started,
+                phase="inner",
+                result=None,
+                cleaning=None,
+            )
         return OuterFoldRunResult(best_config=best_config, outer_result=None)
-    if resume_tracker is not None:
-        resume_tracker.mark_outer_started(outer_fold.k_test)
+    if controls.resume_tracker is not None:
+        controls.resume_tracker.mark_outer_started(outer_fold.k_test)
     result, cleaning_outer = _run_outer_evaluation(
         outer_context=outer_context,
         outer_fold=outer_fold,
         best_config=best_config,
+        week_progress=controls.week_progress,
     )
-    if resume_tracker is not None:
-        resume_tracker.mark_outer_completed(outer_fold.k_test)
-    _log_outer_complete(
-        outer_k=outer_fold.k_test,
-        started=started,
-        phase="outer",
-        result=result,
-        cleaning=cleaning_outer,
-    )
+    if controls.resume_tracker is not None:
+        controls.resume_tracker.mark_outer_completed(outer_fold.k_test)
+    if not _is_walkforward_mode(outer_context.flags):
+        _log_outer_complete(
+            outer_k=outer_fold.k_test,
+            started=started,
+            phase="outer",
+            result=result,
+            cleaning=cleaning_outer,
+        )
     return OuterFoldRunResult(best_config=best_config, outer_result=result)
 
 def _run_outer_fold_inner_only(
@@ -1026,13 +1199,14 @@ def _run_outer_fold_inner_only(
     )
     if resume_tracker is not None:
         resume_tracker.mark_inner_completed(outer_fold.k_test)
-    _log_outer_complete(
-        outer_k=outer_fold.k_test,
-        started=started,
-        phase="inner",
-        result=None,
-        cleaning=None,
-    )
+    if not _is_walkforward_mode(outer_context.flags):
+        _log_outer_complete(
+            outer_k=outer_fold.k_test,
+            started=started,
+            phase="inner",
+            result=None,
+            cleaning=None,
+        )
     return best_config
 
 def _build_inner_splits(
@@ -1063,11 +1237,13 @@ def _build_inner_objective(
 ):
     context = InnerObjectiveContext(
         data=InnerObjectiveData(
-            X=outer_context.context.X,
-            M=outer_context.context.M,
-            X_global=outer_context.context.X_global,
-            M_global=outer_context.context.M_global,
-            global_feature_names=outer_context.context.global_feature_names,
+            panel=FeaturePanelData(
+                X=outer_context.context.X,
+                M=outer_context.context.M,
+                X_global=outer_context.context.X_global,
+                M_global=outer_context.context.M_global,
+                global_feature_names=outer_context.context.global_feature_names,
+            ),
             assets=outer_context.context.assets,
             y=outer_context.context.y,
         ),
@@ -1175,25 +1351,37 @@ def _run_outer_evaluation(
     outer_context: OuterFoldContext,
     outer_fold: OuterFold,
     best_config: Mapping[str, Any],
+    week_progress: Callable[[int, Any], None] | None,
 ) -> tuple[Mapping[str, Any], FeatureCleaningState | None]:
+    set_runtime_seed(
+        outer_fold_seed(
+            outer_context.config.cv,
+            outer_fold.k_test,
+        )
+    )
     result, cleaning_outer = evaluate_outer_walk_forward(
         context=OuterEvaluationContext(
-            X=outer_context.context.X,
-            M=outer_context.context.M,
-            X_global=outer_context.context.X_global,
-            M_global=outer_context.context.M_global,
-            global_feature_names=outer_context.context.global_feature_names,
+            panel=FeaturePanelData(
+                X=outer_context.context.X,
+                M=outer_context.context.M,
+                X_global=outer_context.context.X_global,
+                M_global=outer_context.context.M_global,
+                global_feature_names=outer_context.context.global_feature_names,
+            ),
             y=outer_context.context.y,
+            timestamps=outer_context.context.timestamps,
             outer_fold=outer_fold,
             preprocess_spec=outer_context.context.preprocess_spec,
             num_pp_samples=(
                 outer_context.config.evaluation.predictive.num_samples_outer
             ),
-            portfolio=PortfolioSpec(
-                allocation=outer_context.config.evaluation.allocation.spec,
-                cost=outer_context.config.evaluation.cost.spec,
+            portfolios=_build_portfolio_specs_for_outer(
+                outer_context.config.evaluation.allocation,
+                outer_context.config.evaluation.cost.spec,
             ),
             assets=outer_context.context.assets,
+            execution_mode=outer_context.flags.execution_mode,
+            week_progress=week_progress,
         ),
         best_config=best_config,
         hooks=outer_context.hooks,
@@ -1210,6 +1398,40 @@ def _run_outer_evaluation(
         result=result,
     )
     return result, cleaning_outer
+
+
+def _build_portfolio_specs_for_outer(
+    allocation: AllocationConfig,
+    cost_spec: Mapping[str, Any],
+) -> tuple[PortfolioSpec, ...]:
+    portfolios: list[PortfolioSpec] = [
+        PortfolioSpec(
+            name="primary",
+            allocation=allocation.primary.to_spec(),
+            cost=cost_spec,
+        )
+    ]
+    used_names = {"primary"}
+    for baseline in allocation.baselines:
+        name = _unique_portfolio_name(baseline.family, used_names)
+        used_names.add(name)
+        portfolios.append(
+            PortfolioSpec(
+                name=name,
+                allocation=baseline.to_spec(),
+                cost=cost_spec,
+            )
+        )
+    return tuple(portfolios)
+
+
+def _unique_portfolio_name(name: str, used_names: set[str]) -> str:
+    if name not in used_names:
+        return name
+    suffix = 2
+    while f"{name}_{suffix}" in used_names:
+        suffix += 1
+    return f"{name}_{suffix}"
 
 def _log_outer_complete(
     *,
@@ -1244,6 +1466,7 @@ def _run_outer_from_saved_inner(
     outer_context: OuterFoldContext,
     outer_fold: OuterFold,
     resume_tracker: SimulationResumeTracker,
+    week_progress: Callable[[int, Any], None] | None,
 ) -> OuterFoldRunResult:
     best_config = load_best_config(
         base_dir=outer_context.artifacts.base_dir,
@@ -1255,15 +1478,17 @@ def _run_outer_from_saved_inner(
         outer_context=outer_context,
         outer_fold=outer_fold,
         best_config=best_config,
+        week_progress=week_progress,
     )
     resume_tracker.mark_outer_completed(outer_fold.k_test)
-    _log_outer_complete(
-        outer_k=outer_fold.k_test,
-        started=started,
-        phase="outer",
-        result=result,
-        cleaning=cleaning_outer,
-    )
+    if not _is_walkforward_mode(outer_context.flags):
+        _log_outer_complete(
+            outer_k=outer_fold.k_test,
+            started=started,
+            phase="outer",
+            result=result,
+            cleaning=cleaning_outer,
+        )
     return OuterFoldRunResult(best_config=best_config, outer_result=result)
 
 def _build_artifacts(
@@ -1272,6 +1497,7 @@ def _build_artifacts(
     dataset: PanelDataset,
     context: SimulationContext,
     write_inputs: bool,
+    dataset_params: Mapping[str, Any],
 ) -> SimulationArtifacts:
     artifacts = SimulationArtifacts(base_dir)
     if write_inputs:
@@ -1287,6 +1513,10 @@ def _build_artifacts(
                 features=dataset.features,
                 global_features=dataset.global_features,
             )
+        )
+        write_data_source_metadata(
+            base_dir=base_dir,
+            dataset_params=dataset_params,
         )
     return artifacts
 

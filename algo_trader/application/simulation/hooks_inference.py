@@ -649,9 +649,15 @@ def _run_context(config: Mapping[str, Any]) -> Mapping[str, Any]:
     return dict(context)
 
 
+def _should_log_svi_progress(context: Mapping[str, Any]) -> bool:
+    return context.get("execution_mode") != "walkforward"
+
+
 def _log_svi_progress(
     *, step: int, loss: float, context: Mapping[str, Any], start: float
 ) -> None:
+    if not _should_log_svi_progress(context):
+        return
     payload = dict(context)
     payload.update(
         {

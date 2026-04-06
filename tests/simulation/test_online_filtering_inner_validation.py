@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 import torch
 
 from algo_trader.application.simulation import inner_objective
 from algo_trader.application.simulation.hooks import SimulationHooks
+from algo_trader.domain.simulation import AllocationRequest, AllocationResult
 
 
 def test_predict_validation_horizon_uses_single_block_for_tbptt() -> None:
@@ -21,7 +22,7 @@ def test_predict_validation_horizon_uses_single_block_for_tbptt() -> None:
     )
 
     assert recorder.predict_lengths == [2]
-    assert recorder.fit_lengths == []
+    assert not recorder.fit_lengths
     assert pred["samples"].shape == (4, 2, 2)
 
 
@@ -50,34 +51,30 @@ class _HookRecorder:
         self.fit_lengths: list[int] = []
         self._next_state_id = 1
         self.hooks = SimulationHooks(
-            fit_model=self._fit_model,
-            predict=self._predict,
+            fit_model=cast(Any, self._fit_model),
+            predict=cast(Any, self._predict),
             score=self._score,
             allocate=self._allocate,
-            compute_pnl=self._compute_pnl,
+            compute_pnl=cast(Any, self._compute_pnl),
         )
 
-    def _fit_model(
-        self,
-        X_train: torch.Tensor,
-        X_train_global: torch.Tensor | None,
-        y_train: torch.Tensor,
-        config: Mapping[str, Any],
-        init_state: Mapping[str, Any] | None = None,
-    ) -> Mapping[str, Any]:
+    def _fit_model(self, **kwargs: Any) -> Mapping[str, Any]:
+        X_train = cast(torch.Tensor, kwargs["X_train"])
+        X_train_global = kwargs.get("X_train_global")
+        y_train = cast(torch.Tensor, kwargs["y_train"])
+        config = kwargs.get("config")
+        init_state = kwargs.get("init_state")
         del X_train_global, config, init_state
         self.fit_lengths.append(int(X_train.shape[0]))
         self._next_state_id += 1
         return {"state_id": self._next_state_id, "y_shape": tuple(y_train.shape)}
 
-    def _predict(
-        self,
-        X_pred: torch.Tensor,
-        X_pred_global: torch.Tensor | None,
-        state: Mapping[str, Any],
-        config: Mapping[str, Any],
-        num_samples: int,
-    ) -> Mapping[str, Any]:
+    def _predict(self, **kwargs: Any) -> Mapping[str, Any]:
+        X_pred = cast(torch.Tensor, kwargs["X_pred"])
+        X_pred_global = kwargs.get("X_pred_global")
+        state = cast(Mapping[str, Any], kwargs["state"])
+        config = kwargs.get("config")
+        num_samples = int(kwargs["num_samples"])
         del X_pred_global, config
         length = int(X_pred.shape[0])
         self.predict_lengths.append(length)
@@ -108,18 +105,21 @@ class _HookRecorder:
         del y_true, pred, score_spec
         return 0.0
 
-    def _allocate(
-        self, pred: Mapping[str, Any], alloc_spec: Mapping[str, Any]
-    ) -> torch.Tensor:
-        del pred, alloc_spec
-        return torch.zeros(0)
+    def _allocate(self, request: AllocationRequest) -> AllocationResult:
+        del request
+        return AllocationResult(
+            rebalance_index=0,
+            rebalance_timestamp=None,
+            asset_names=(),
+            weights=torch.zeros(0),
+        )
 
     def _compute_pnl(
         self,
         w: torch.Tensor,
         y_t: torch.Tensor,
-        w_prev: torch.Tensor | None,
-        cost_spec: Mapping[str, Any],
+        w_prev: torch.Tensor | None = None,
+        cost_spec: Mapping[str, Any] | None = None,
     ) -> torch.Tensor:
         del w, y_t, w_prev, cost_spec
         return torch.tensor(0.0)

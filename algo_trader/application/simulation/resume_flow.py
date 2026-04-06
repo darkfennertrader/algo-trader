@@ -148,6 +148,14 @@ def load_best_config(*, base_dir: Path, outer_k: int) -> Mapping[str, Any]:
     )
 
 
+def load_global_best_config(*, base_dir: Path) -> Mapping[str, Any]:
+    path = base_dir / "outer" / "best_config.json"
+    return read_json_mapping(
+        path=path,
+        message="Missing global best_config for outer evaluation",
+    )
+
+
 def load_outer_result(*, base_dir: Path, outer_k: int) -> Mapping[str, Any]:
     path = base_dir / "outer" / f"outer_{outer_k}" / "result.json"
     return read_json_mapping(

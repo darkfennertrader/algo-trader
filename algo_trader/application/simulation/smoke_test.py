@@ -44,7 +44,10 @@ def apply_smoke_test_overrides(
     logger.info(
         "Smoke test enabled: using synthetic data and fast SVI overrides."
     )
-    flags = replace(config.flags, stop_after="inner")
+    flags = replace(
+        config.flags,
+        execution_mode="model_research",
+    )
     tuning = replace(
         config.modeling.tuning,
         engine="local",

@@ -2,36 +2,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
-from typing import Any, Literal, Mapping, Sequence, cast
+from typing import Any, Mapping, Sequence, cast
 
 import pandas as pd
 import torch
 
 from algo_trader.domain import ConfigError, SimulationError
+from algo_trader.domain.simulation import (
+    AllocationRequest,
+    AllocationResult,
+    PredictionPacket,
+)
+from .allocation_common import (
+    VALID_ALLOCATION_FAMILIES,
+    VALID_PORTFOLIO_STYLES,
+    optional_float_value,
+)
 
-AllocatorMethod = Literal[
-    "equal_weight",
-    "random",
-    "de_risked",
-    "skfolio_risk_budgeting",
-]
-PortfolioStyle = Literal[
-    "long_only",
-    "long_short_bounded_net",
-    "factor_neutral_long_short",
-]
-
-_VALID_METHODS = {
-    "equal_weight",
-    "random",
-    "de_risked",
-    "skfolio_risk_budgeting",
-}
-_VALID_STYLES = {
-    "long_only",
-    "long_short_bounded_net",
-    "factor_neutral_long_short",
-}
+AllocatorMethod = str
+PortfolioStyle = str
 
 
 @dataclass(frozen=True)
@@ -39,8 +28,6 @@ class _SkfolioOptions:
     risk_measure: str
     use_previous_weights: bool
     transaction_costs: float
-    min_weight: float | None
-    max_weight: float | None
 
 
 @dataclass(frozen=True)
@@ -49,6 +36,8 @@ class _AllocationParams:
     portfolio_style: PortfolioStyle
     gross_exposure: float
     random_seed: int | None
+    min_weight: float | None
+    max_weight: float | None
     skfolio: _SkfolioOptions
 
 
@@ -59,54 +48,61 @@ class _TensorSpec:
 
 
 def _allocate_weights(
-    pred: Mapping[str, Any],
-    alloc_spec: Mapping[str, Any],
-    w_prev: torch.Tensor | None = None,
-    asset_names: Sequence[str] = (),
-) -> torch.Tensor:
-    params = _parse_allocation_params(alloc_spec)
-    n_assets = _resolve_n_assets(pred, alloc_spec, asset_names)
-    tensor_spec = _resolve_tensor_spec(pred)
-    if params.method == "equal_weight":
-        return _allocate_equal_weight(
+    request: AllocationRequest,
+) -> AllocationResult:
+    params = _parse_allocation_params(request.allocation_spec)
+    prediction = request.prediction
+    n_assets = _resolve_n_assets(prediction, request.allocation_spec)
+    tensor_spec = _resolve_tensor_spec(prediction)
+    if params.method == "long_only":
+        weights = _allocate_long_only(
+            prediction=prediction,
+            params=params,
+            tensor_spec=tensor_spec,
+        )
+    elif params.method == "equal_weight":
+        weights = _allocate_equal_weight(
             n_assets=n_assets,
             params=params,
             tensor_spec=tensor_spec,
         )
-    if params.method == "random":
-        return _allocate_random(
+    elif params.method == "random":
+        weights = _allocate_random(
             n_assets=n_assets,
             params=params,
             tensor_spec=tensor_spec,
         )
-    if params.method == "de_risked":
-        return _allocate_de_risked(
+    elif params.method == "de_risked":
+        weights = _allocate_de_risked(
             n_assets=n_assets,
             params=params,
             tensor_spec=tensor_spec,
         )
-    return _allocate_skfolio_risk_budgeting(
-        pred=pred,
-        asset_names=asset_names,
-        w_prev=w_prev,
-        params=params,
-        tensor_spec=tensor_spec,
+    else:
+        weights = _allocate_skfolio_risk_budgeting(
+            prediction=prediction,
+            previous_weights=request.previous_weights,
+            params=params,
+            tensor_spec=tensor_spec,
+        )
+    return _build_allocation_result(
+        prediction=prediction,
+        previous_weights=request.previous_weights,
+        weights=weights,
     )
 
 
 def _parse_allocation_params(
     alloc_spec: Mapping[str, Any],
 ) -> _AllocationParams:
-    method = str(alloc_spec.get("method", "equal_weight")).strip().lower()
-    if method not in _VALID_METHODS:
+    method = _resolve_allocation_method(alloc_spec)
+    if method not in VALID_ALLOCATION_FAMILIES:
         raise ConfigError(
-            "allocation.spec.method must be equal_weight, random, "
+            "allocation family must be long_only, equal_weight, random, "
             "de_risked, or skfolio_risk_budgeting"
         )
-    portfolio_style = str(
-        alloc_spec.get("portfolio_style", "long_only")
-    ).strip().lower()
-    if portfolio_style not in _VALID_STYLES:
+    portfolio_style = _resolve_portfolio_style(alloc_spec, method)
+    if portfolio_style not in VALID_PORTFOLIO_STYLES:
         raise ConfigError(
             "allocation.spec.portfolio_style must be long_only, "
             "long_short_bounded_net, or factor_neutral_long_short"
@@ -115,10 +111,10 @@ def _parse_allocation_params(
     gross_exposure = float(alloc_spec.get("gross_exposure", gross_default))
     if gross_exposure < 0.0:
         raise ConfigError("allocation.spec.gross_exposure must be >= 0")
-    if gross_exposure == 0.0 and method != "de_risked":
+    if gross_exposure == 0.0 and method not in {"de_risked", "long_only"}:
         raise ConfigError(
             "allocation.spec.gross_exposure must be > 0 unless "
-            "allocation.spec.method=de_risked"
+            "allocation family is de_risked"
         )
     random_seed = _optional_int(alloc_spec.get("random_seed"), "random_seed")
     risk_measure = str(alloc_spec.get("risk_measure", "cvar")).strip().lower()
@@ -131,14 +127,33 @@ def _parse_allocation_params(
         portfolio_style=cast(PortfolioStyle, portfolio_style),
         gross_exposure=gross_exposure,
         random_seed=random_seed,
+        min_weight=min_weight,
+        max_weight=max_weight,
         skfolio=_SkfolioOptions(
             risk_measure=risk_measure,
             use_previous_weights=use_previous_weights,
             transaction_costs=transaction_costs,
-            min_weight=min_weight,
-            max_weight=max_weight,
         ),
     )
+
+
+def _resolve_allocation_method(alloc_spec: Mapping[str, Any]) -> str:
+    raw = alloc_spec.get("family", alloc_spec.get("method", "equal_weight"))
+    return str(raw).strip().lower()
+
+
+def _resolve_portfolio_style(
+    alloc_spec: Mapping[str, Any], method: str
+) -> str:
+    if method == "long_only":
+        raw = str(alloc_spec.get("portfolio_style", "long_only")).strip().lower()
+        if raw != "long_only":
+            raise ConfigError(
+                "allocation.spec.family=long_only supports only "
+                "allocation.spec.portfolio_style=long_only"
+            )
+        return raw
+    return str(alloc_spec.get("portfolio_style", "long_only")).strip().lower()
 
 
 def _optional_int(raw: Any, field: str) -> int | None:
@@ -150,36 +165,23 @@ def _optional_int(raw: Any, field: str) -> int | None:
 
 
 def _optional_float(raw: Any, field: str) -> float | None:
-    if raw is None:
-        return None
-    try:
-        return float(raw)
-    except (TypeError, ValueError) as exc:
-        raise ConfigError(f"allocation.spec.{field} must be numeric") from exc
+    return optional_float_value(raw, location=f"allocation.spec.{field}")
 
 
 def _resolve_n_assets(
-    pred: Mapping[str, Any],
+    prediction: PredictionPacket,
     alloc_spec: Mapping[str, Any],
-    asset_names: Sequence[str],
 ) -> int:
-    if asset_names:
-        return len(asset_names)
-    samples = pred.get("samples")
-    if isinstance(samples, torch.Tensor):
-        return int(samples.shape[-1])
-    mean = pred.get("mean")
-    if isinstance(mean, torch.Tensor):
-        return int(mean.shape[-1])
+    if prediction.asset_names:
+        return len(prediction.asset_names)
     return int(alloc_spec.get("n_assets", 1))
 
 
-def _resolve_tensor_spec(pred: Mapping[str, Any]) -> _TensorSpec:
-    for key in ("mean", "samples", "covariance"):
-        value = pred.get(key)
-        if isinstance(value, torch.Tensor):
-            return _TensorSpec(device=value.device, dtype=value.dtype)
-    return _TensorSpec(device=torch.device("cpu"), dtype=torch.float32)
+def _resolve_tensor_spec(prediction: PredictionPacket) -> _TensorSpec:
+    return _TensorSpec(
+        device=prediction.mu.device,
+        dtype=prediction.mu.dtype,
+    )
 
 
 def _allocate_equal_weight(
@@ -207,6 +209,121 @@ def _allocate_equal_weight(
         gross_exposure=gross_exposure,
         tensor_spec=tensor_spec,
     )
+
+
+def _allocate_long_only(
+    *,
+    prediction: PredictionPacket,
+    params: _AllocationParams,
+    tensor_spec: _TensorSpec,
+) -> torch.Tensor:
+    if params.portfolio_style != "long_only":
+        raise ConfigError(
+            "allocation.spec.family=long_only supports only "
+            "allocation.spec.portfolio_style=long_only"
+        )
+    if params.gross_exposure == 0.0:
+        return torch.zeros(
+            prediction.mu.shape,
+            device=tensor_spec.device,
+            dtype=tensor_spec.dtype,
+        )
+    scores = _long_only_scores(prediction)
+    min_weight = 0.0 if params.min_weight is None else params.min_weight
+    max_weight = params.gross_exposure if params.max_weight is None else params.max_weight
+    return _capped_long_only_weights(
+        scores=scores,
+        gross_exposure=params.gross_exposure,
+        min_weight=min_weight,
+        max_weight=max_weight,
+        tensor_spec=tensor_spec,
+    )
+
+
+def _long_only_scores(prediction: PredictionPacket) -> torch.Tensor:
+    variance = prediction.covariance.diag().clamp_min(1e-12)
+    risk = variance.sqrt()
+    scores = torch.relu(prediction.mu / risk)
+    if torch.count_nonzero(scores) == 0:
+        return torch.ones_like(prediction.mu)
+    return scores
+
+
+def _capped_long_only_weights(
+    *,
+    scores: torch.Tensor,
+    gross_exposure: float,
+    min_weight: float,
+    max_weight: float,
+    tensor_spec: _TensorSpec,
+) -> torch.Tensor:
+    n_assets = int(scores.shape[0])
+    if min_weight < 0.0:
+        raise ConfigError("allocation.spec.min_weight must be >= 0")
+    if max_weight <= 0.0:
+        raise ConfigError("allocation.spec.max_weight must be > 0")
+    if min_weight > max_weight:
+        raise ConfigError(
+            "allocation.spec.min_weight must be <= allocation.spec.max_weight"
+        )
+    if n_assets * min_weight > gross_exposure + 1e-12:
+        raise ConfigError(
+            "allocation.spec.min_weight is too large for the long_only gross_exposure"
+        )
+    if n_assets * max_weight < gross_exposure - 1e-12:
+        raise ConfigError(
+            "allocation.spec.max_weight is too small for the long_only gross_exposure"
+        )
+    weights = torch.full(
+        (n_assets,),
+        min_weight,
+        device=tensor_spec.device,
+        dtype=tensor_spec.dtype,
+    )
+    remaining = gross_exposure - float(n_assets * min_weight)
+    if remaining <= 1e-12:
+        return weights
+    capacities = torch.full(
+        (n_assets,),
+        max_weight - min_weight,
+        device=tensor_spec.device,
+        dtype=tensor_spec.dtype,
+    )
+    active = capacities > 1e-12
+    working_scores = scores.to(device=tensor_spec.device, dtype=tensor_spec.dtype)
+    while remaining > 1e-12 and bool(torch.any(active)):
+        active_idx = torch.nonzero(active, as_tuple=False).flatten()
+        active_scores = working_scores[active_idx]
+        proposal = _long_only_proposal(
+            active_scores=active_scores,
+            remaining=remaining,
+            count=int(active_idx.numel()),
+            tensor_spec=tensor_spec,
+        )
+        allocation = torch.minimum(proposal, capacities[active_idx])
+        weights[active_idx] = weights[active_idx] + allocation
+        capacities[active_idx] = capacities[active_idx] - allocation
+        remaining -= float(allocation.sum().item())
+        active = capacities > 1e-12
+    return weights
+
+
+def _long_only_proposal(
+    *,
+    active_scores: torch.Tensor,
+    remaining: float,
+    count: int,
+    tensor_spec: _TensorSpec,
+) -> torch.Tensor:
+    score_sum = float(active_scores.sum().item())
+    if score_sum <= 1e-12:
+        return torch.full(
+            (count,),
+            remaining / count,
+            device=tensor_spec.device,
+            dtype=tensor_spec.dtype,
+        )
+    return active_scores * (remaining / score_sum)
 
 
 def _bounded_net_equal_weights(
@@ -360,9 +477,8 @@ def _random_bounded_net(
 
 def _allocate_skfolio_risk_budgeting(
     *,
-    pred: Mapping[str, Any],
-    asset_names: Sequence[str],
-    w_prev: torch.Tensor | None,
+    prediction: PredictionPacket,
+    previous_weights: torch.Tensor | None,
     params: _AllocationParams,
     tensor_spec: _TensorSpec,
 ) -> torch.Tensor:
@@ -371,9 +487,12 @@ def _allocate_skfolio_risk_budgeting(
             "allocation.spec.method=skfolio_risk_budgeting currently supports "
             "only allocation.spec.portfolio_style=long_only"
         )
-    scenarios = _extract_predictive_scenarios(pred)
-    frame = _build_scenario_frame(scenarios, asset_names)
-    model = _build_risk_budgeting_model(params=params, w_prev=w_prev)
+    scenarios = _extract_predictive_scenarios(prediction)
+    frame = _build_scenario_frame(scenarios, prediction.asset_names)
+    model = _build_risk_budgeting_model(
+        params=params,
+        w_prev=previous_weights,
+    )
     try:
         model.fit(frame)
     except Exception as exc:  # pragma: no cover - library failure path
@@ -389,20 +508,15 @@ def _allocate_skfolio_risk_budgeting(
     return weights
 
 
-def _extract_predictive_scenarios(pred: Mapping[str, Any]) -> torch.Tensor:
-    samples = pred.get("samples")
+def _extract_predictive_scenarios(
+    prediction: PredictionPacket,
+) -> torch.Tensor:
+    samples = prediction.samples
     if not isinstance(samples, torch.Tensor):
         raise ConfigError(
-            "allocation with skfolio_risk_budgeting requires pred['samples']"
+            "allocation with skfolio_risk_budgeting requires predictive samples"
         )
-    if samples.ndim == 2:
-        return samples.detach()
-    if samples.ndim == 3:
-        return samples[:, 0, :].detach()
-    raise ConfigError(
-        "pred['samples'] must have shape (num_samples, n_assets) or "
-        "(num_samples, horizon, n_assets)"
-    )
+    return samples.detach()
 
 
 def _build_scenario_frame(
@@ -441,13 +555,13 @@ def _build_risk_budgeting_model(
         )
     min_weight = (
         0.0
-        if params.skfolio.min_weight is None
-        else params.skfolio.min_weight
+        if params.min_weight is None
+        else params.min_weight
     )
     max_weight = (
         1.0
-        if params.skfolio.max_weight is None
-        else params.skfolio.max_weight
+        if params.max_weight is None
+        else params.max_weight
     )
     return risk_budgeting_cls(
         risk_measure=risk_measure,
@@ -471,14 +585,74 @@ def _resolve_risk_measure(raw: str, enum_cls: Any) -> Any:
 
 
 def _allocate_weights_stub(
-    pred: Mapping[str, Any],
-    alloc_spec: Mapping[str, Any],
-    w_prev: torch.Tensor | None = None,
-    asset_names: Sequence[str] = (),
+    request: AllocationRequest,
+) -> AllocationResult:
+    n_assets = int(request.allocation_spec.get("n_assets", 1))
+    tensor_spec = _resolve_tensor_spec(request.prediction)
+    weights = torch.full(
+        (n_assets,),
+        1.0 / max(n_assets, 1),
+        device=tensor_spec.device,
+        dtype=tensor_spec.dtype,
+    )
+    return _build_allocation_result(
+        prediction=request.prediction,
+        previous_weights=request.previous_weights,
+        weights=weights,
+    )
+
+
+def _build_allocation_result(
+    *,
+    prediction: PredictionPacket,
+    previous_weights: torch.Tensor | None,
+    weights: torch.Tensor,
+) -> AllocationResult:
+    expected_return = _expected_return(weights, prediction.mu)
+    expected_risk = _expected_risk(weights, prediction.covariance)
+    turnover = _turnover(weights, previous_weights)
+    return AllocationResult(
+        rebalance_index=prediction.rebalance_index,
+        rebalance_timestamp=prediction.rebalance_timestamp,
+        asset_names=prediction.asset_names,
+        weights=weights,
+        expected_return=expected_return,
+        expected_risk=expected_risk,
+        turnover=turnover,
+    )
+
+
+def _expected_return(
+    weights: torch.Tensor,
+    mu: torch.Tensor,
 ) -> torch.Tensor:
-    _ = (pred, w_prev, asset_names)
-    n_assets = int(alloc_spec.get("n_assets", 1))
-    return torch.full((n_assets,), 1.0 / max(n_assets, 1))
+    weights_cpu = _as_cpu_vector(weights)
+    mu_cpu = _as_cpu_vector(mu)
+    return torch.dot(weights_cpu, mu_cpu)
+
+
+def _expected_risk(
+    weights: torch.Tensor, covariance: torch.Tensor
+) -> torch.Tensor:
+    weights_cpu = _as_cpu_vector(weights)
+    covariance_cpu = covariance.detach().to(device="cpu", dtype=torch.float64)
+    risk = weights_cpu.matmul(covariance_cpu).matmul(weights_cpu)
+    return risk.clamp_min(0.0).sqrt()
+
+
+def _turnover(
+    weights: torch.Tensor,
+    previous_weights: torch.Tensor | None,
+) -> torch.Tensor | None:
+    if previous_weights is None:
+        return None
+    weights_cpu = _as_cpu_vector(weights)
+    previous_weights_cpu = _as_cpu_vector(previous_weights)
+    return torch.abs(weights_cpu - previous_weights_cpu).sum()
+
+
+def _as_cpu_vector(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.detach().reshape(-1).to(device="cpu", dtype=torch.float64)
 
 
 __all__ = [

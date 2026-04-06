@@ -1,5 +1,4 @@
 from __future__ import annotations
-# pylint: disable=duplicate-code
 
 import json
 from dataclasses import asdict, dataclass, is_dataclass
@@ -19,10 +18,8 @@ from algo_trader.domain.simulation import (
     PreprocessSpec,
 )
 from algo_trader.infrastructure import ensure_directory, require_env
-from algo_trader.infrastructure.data.versioning import (
-    resolve_feature_store_version_label,
-    resolve_root_dir,
-)
+from .data_versioning import resolve_dataset_version_context
+from .io_utils import normalize_timestamps
 from .index_ranges import indices_to_ranges
 from .split_timeline_plot import write_splits_timeline_plot
 from .summary_utils import build_cleaning_thresholds
@@ -72,7 +69,7 @@ class SimulationArtifacts:
             "values": inputs.X.detach().cpu(),
             "missing_mask": inputs.M.detach().cpu(),
             "targets": inputs.y.detach().cpu(),
-            "timestamps": _normalize_timestamps(inputs.timestamps),
+            "timestamps": normalize_timestamps(inputs.timestamps),
             "assets": list(inputs.assets),
             "features": list(inputs.features),
         }
@@ -436,7 +433,6 @@ class SimulationArtifacts:
             message="Failed to write global metrics",
         )
 
-
 def resolve_simulation_output_dir(
     *,
     simulation_output_path: str | None,
@@ -455,37 +451,7 @@ def resolve_simulation_output_dir(
 def _resolve_latest_version_label(
     dataset_params: Mapping[str, Any],
 ) -> str:
-    feature_store = resolve_root_dir(
-        dataset_params,
-        key="feature_store",
-        env_name="FEATURE_STORE_SOURCE",
-        error_type=SimulationError,
-    )
-    data_lake = resolve_root_dir(
-        dataset_params,
-        key="data_lake",
-        env_name="DATA_LAKE_SOURCE",
-        error_type=SimulationError,
-    )
-    return resolve_feature_store_version_label(
-        feature_store,
-        data_lake,
-        error_type=SimulationError,
-        feature_error="No feature store versions found",
-        lake_error="No data lake versions found",
-    )
-
-
-def _normalize_timestamps(values: Sequence[Any]) -> list[int | str]:
-    normalized: list[int | str] = []
-    for item in values:
-        if isinstance(item, (int, np.integer)):
-            normalized.append(int(item))
-        elif hasattr(item, "isoformat"):
-            normalized.append(str(item.isoformat()))
-        else:
-            normalized.append(str(item))
-    return normalized
+    return resolve_dataset_version_context(dataset_params).version_label
 
 
 def _normalize_epoch_hours(values: Sequence[Any]) -> list[int]:

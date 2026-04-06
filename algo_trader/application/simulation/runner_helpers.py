@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import random
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+import torch
 
 from algo_trader.domain import ConfigError
 from algo_trader.domain.simulation import (
@@ -27,6 +29,18 @@ def _fold_seed(base_seed: int, fold_id: int) -> int:
     return base_seed + 10_000 * fold_id
 
 
+def outer_fold_seed(cv: CVParams, fold_id: int) -> int:
+    return _fold_seed(cv.cpcv.seed, fold_id)
+
+
+def set_runtime_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def build_group_by_index(
     *, groups: Sequence[np.ndarray], total_len: int
 ) -> np.ndarray:
@@ -37,8 +51,8 @@ def build_group_by_index(
 
 
 def should_stop_after(phase: str, flags: SimulationFlags) -> bool:
-    if flags.stop_after is not None:
-        return phase == flags.stop_after
+    if flags.execution_mode == "model_research":
+        return phase == "inner"
     if flags.simulation_mode == "dry_run":
         return phase == "cv"
     return False
@@ -49,7 +63,7 @@ def with_run_meta(
 ) -> Mapping[str, Any]:
     enriched = dict(results)
     enriched["run_mode"] = flags.simulation_mode
-    enriched["stop_after"] = flags.stop_after
+    enriched["execution_mode"] = flags.execution_mode
     return enriched
 
 

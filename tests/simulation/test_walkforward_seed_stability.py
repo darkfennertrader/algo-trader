@@ -18,6 +18,7 @@ def test_build_seed_config_payload_overrides_seed_and_output() -> None:
         ),
         data=SimpleNamespace(
             simulation_output_path="validated_model",
+            portfolio_output_path="portfolio/herc",
             dataset_params={},
         ),
         flags=SimpleNamespace(
@@ -44,6 +45,7 @@ def test_build_seed_config_payload_overrides_seed_and_output() -> None:
     assert payload["walkforward"]["seeds"] == [19]
     assert payload["walkforward"]["max_parallel_seeds_per_gpu"] == 1
     assert payload["data"]["simulation_output_path"] == "seed_19"
+    assert "portfolio_output_path" not in payload["data"]
     assert "paths" not in payload["data"]
 
 
@@ -92,7 +94,7 @@ def test_write_seed_stability_outputs_aggregates_per_seed_metrics(
     results = []
     for seed, annualized_return in ((7, 0.1), (19, 0.2)):
         seed_dir = tmp_path / f"seed_{seed}"
-        metrics_dir = seed_dir / "walkforward" / "metrics"
+        metrics_dir = seed_dir / "metrics"
         metrics_dir.mkdir(parents=True)
         pd.DataFrame(
             [
@@ -128,3 +130,24 @@ def test_write_seed_stability_outputs_aggregates_per_seed_metrics(
     assert dispersion_csv.exists()
     summary_frame = pd.read_csv(summary_csv)
     assert summary_frame["seed"].tolist() == [7, 19]
+
+
+def test_resolve_study_dir_uses_portfolio_output_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SIMULATION_SOURCE", str(tmp_path))
+    config = SimpleNamespace(
+        data=SimpleNamespace(
+            portfolio_output_path="portfolio/herc",
+            dataset_params={},
+        )
+    )
+
+    resolve_study_dir = getattr(seed_stability, "_resolve_study_dir")
+    study_dir = resolve_study_dir(
+        config=config,
+        source_dir=tmp_path / "validated_model",
+    )
+
+    assert study_dir == tmp_path / "portfolio" / "herc" / "seed_stability"

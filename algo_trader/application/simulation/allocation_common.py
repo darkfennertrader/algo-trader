@@ -9,6 +9,7 @@ VALID_ALLOCATION_FAMILIES = (
     "equal_weight",
     "random",
     "de_risked",
+    "herc",
     "skfolio_risk_budgeting",
 )
 
@@ -16,6 +17,34 @@ VALID_PORTFOLIO_STYLES = (
     "long_only",
     "long_short_bounded_net",
     "factor_neutral_long_short",
+)
+
+VALID_HERC_DISTANCE_ESTIMATORS = (
+    "pearson",
+    "mutual_information",
+)
+
+VALID_SKFOLIO_RISK_MEASURES = (
+    "mean_absolute_deviation",
+    "first_lower_partial_moment",
+    "variance",
+    "semi_variance",
+    "cvar",
+    "evar",
+    "worst_realization",
+    "cdar",
+    "max_drawdown",
+    "average_drawdown",
+    "edar",
+    "ulcer_index",
+    "gini_mean_difference",
+    "value_at_risk",
+    "drawdown_at_risk",
+    "entropic_risk_measure",
+    "fourth_central_moment",
+    "fourth_lower_partial_moment",
+    "kurtosis",
+    "skew",
 )
 
 
@@ -29,7 +58,9 @@ def optional_float_value(raw: Any, *, location: str) -> float | None:
 
 
 __all__ = [
+    "VALID_HERC_DISTANCE_ESTIMATORS",
     "VALID_ALLOCATION_FAMILIES",
     "VALID_PORTFOLIO_STYLES",
+    "VALID_SKFOLIO_RISK_MEASURES",
     "optional_float_value",
 ]

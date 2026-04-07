@@ -97,6 +97,7 @@ from .walkforward import (
     build_walkforward_progress,
     evaluate_outer_walk_forward,
     run_seed_stability_study,
+    resolve_portfolio_base_dir,
     write_downstream_metrics,
     write_downstream_outputs,
     write_downstream_plots,
@@ -598,16 +599,30 @@ def _prepare_run_state(
     ray_storage_path = resolve_ray_storage_path(
         config.modeling.tuning.engine
     )
-    base_dir, dataset, reused_inputs = _resolve_run_inputs(
+    source_dir, dataset, reused_inputs = _resolve_run_inputs(
         config=config, device=device
+    )
+    base_dir = resolve_portfolio_base_dir(
+        source_dir=source_dir,
+        portfolio_output_path=(
+            config.data.portfolio_output_path
+            if _is_walkforward_mode(config.flags)
+            else None
+        ),
+        dataset_params=config.data.dataset_params,
     )
     context = _build_context(config, dataset)
     artifacts = _build_artifacts(
         base_dir=base_dir,
         dataset=dataset,
         context=context,
-        write_inputs=not reused_inputs,
+        write_inputs=(not reused_inputs) or base_dir != source_dir,
         dataset_params=config.data.dataset_params,
+    )
+    _stage_walkforward_source_artifacts(
+        config=config,
+        source_dir=source_dir,
+        target_dir=base_dir,
     )
     early_results = _maybe_finalize_inputs(
         config=config,
@@ -1654,6 +1669,41 @@ def _build_artifacts(
             dataset_params=dataset_params,
         )
     return artifacts
+
+
+def _stage_walkforward_source_artifacts(
+    *,
+    config: SimulationConfig,
+    source_dir: Path,
+    target_dir: Path,
+) -> None:
+    if not _is_walkforward_mode(config.flags):
+        return
+    if source_dir == target_dir:
+        return
+    _copy_optional_walkforward_artifact(
+        source=source_dir / "outer" / "best_config.json",
+        target=target_dir / "outer" / "best_config.json",
+    )
+    for source_path in source_dir.glob("inner/outer_*/best_config.json"):
+        relative_path = source_path.relative_to(source_dir)
+        _copy_optional_walkforward_artifact(
+            source=source_path,
+            target=target_dir / relative_path,
+        )
+
+
+def _copy_optional_walkforward_artifact(*, source: Path, target: Path) -> None:
+    if not source.exists():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.write_bytes(source.read_bytes())
+    except OSError as exc:
+        raise SimulationError(
+            "Failed to stage walkforward source artifact",
+            context={"source": str(source), "target": str(target)},
+        ) from exc
 
 def _build_results(
     config: SimulationConfig,

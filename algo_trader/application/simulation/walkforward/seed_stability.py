@@ -16,12 +16,15 @@ import yaml
 
 from algo_trader.domain import ConfigError, SimulationError
 from algo_trader.domain.simulation import SimulationConfig
-from algo_trader.infrastructure import require_env
 
 from ..artifacts import resolve_simulation_output_dir
 from ..config import config_to_input_dict
 from ..io_utils import write_json_file
-from .pathing import seed_stability_dir
+from .pathing import (
+    resolve_portfolio_base_dir,
+    seed_stability_dir,
+    walkforward_dir,
+)
 from .progress import SeedStudyProgress, build_seed_stability_progress
 
 logger = logging.getLogger(__name__)
@@ -50,8 +53,8 @@ def run_seed_stability_study(
 ) -> Mapping[str, Any]:
     _validate_seed_stability_config(config)
     source_dir = _resolve_source_dir(config)
-    study_dir = seed_stability_dir(source_dir)
-    tasks = _build_seed_tasks(config=config, source_dir=source_dir)
+    study_dir = _resolve_study_dir(config=config, source_dir=source_dir)
+    tasks = _build_seed_tasks(config=config, study_dir=study_dir)
     _stage_seed_tasks(source_dir=source_dir, tasks=tasks)
     results = _run_seed_tasks(config=config, tasks=tasks)
     aggregate = _write_seed_stability_outputs(
@@ -88,6 +91,19 @@ def _resolve_source_dir(config: SimulationConfig) -> Path:
     return source_dir
 
 
+def _resolve_study_dir(
+    *,
+    config: SimulationConfig,
+    source_dir: Path,
+) -> Path:
+    portfolio_dir = resolve_portfolio_base_dir(
+        source_dir=source_dir,
+        portfolio_output_path=config.data.portfolio_output_path,
+        dataset_params=config.data.dataset_params,
+    )
+    return seed_stability_dir(portfolio_dir)
+
+
 def _validate_source_inputs(source_dir: Path) -> None:
     inputs_dir = source_dir / "inputs"
     if not inputs_dir.exists():
@@ -117,13 +133,12 @@ def _validate_source_best_configs(source_dir: Path) -> None:
 def _build_seed_tasks(
     *,
     config: SimulationConfig,
-    source_dir: Path,
+    study_dir: Path,
 ) -> tuple[SeedStudyTask, ...]:
-    source_label = _relative_experiment_label(source_dir)
     return tuple(
         _build_seed_task(
             config=config,
-            source_label=source_label,
+            study_dir=study_dir,
             seed=seed,
         )
         for seed in config.walkforward.seeds
@@ -133,14 +148,10 @@ def _build_seed_tasks(
 def _build_seed_task(
     *,
     config: SimulationConfig,
-    source_label: str,
+    study_dir: Path,
     seed: int,
 ) -> SeedStudyTask:
-    output_label = _build_seed_output_label(source_label, seed)
-    output_dir = resolve_simulation_output_dir(
-        simulation_output_path=output_label,
-        dataset_params=config.data.dataset_params,
-    )
+    output_dir = study_dir / task_seed_output_name(seed)
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / "simulation.seed.yml"
     payload = _build_seed_config_payload(
@@ -151,24 +162,15 @@ def _build_seed_task(
     _write_seed_config(config_path=config_path, payload=payload)
     return SeedStudyTask(
         seed=seed,
-        output_label=output_label,
+        output_label=str(output_dir),
         output_dir=output_dir,
         config_path=config_path,
         log_path=output_dir / "seed_run.log",
     )
 
 
-def _build_seed_output_label(source_label: str, seed: int) -> str:
-    return f"{source_label}/walkforward/seed_stability/seed_{seed}"
-
-
 def task_seed_output_name(seed: int) -> str:
     return f"seed_{seed}"
-
-
-def _relative_experiment_label(source_dir: Path) -> str:
-    simulation_root = Path(require_env("SIMULATION_SOURCE")).expanduser()
-    return source_dir.relative_to(simulation_root).as_posix()
 
 
 def _build_seed_config_payload(
@@ -184,6 +186,7 @@ def _build_seed_config_payload(
     walkforward["max_parallel_seeds_per_gpu"] = 1
     data = _dict_field(payload, "data")
     data["simulation_output_path"] = output_name
+    data.pop("portfolio_output_path", None)
     payload["walkforward"] = walkforward
     payload["data"] = data
     return payload
@@ -560,7 +563,7 @@ def _build_seed_summary_frame(
 
 
 def _load_seed_summary(result: SeedStudyResult) -> pd.DataFrame:
-    path = result.output_dir / "walkforward" / "metrics" / "summary.csv"
+    path = walkforward_dir(result.output_dir) / "metrics" / "summary.csv"
     try:
         frame = pd.read_csv(path)
     except Exception as exc:

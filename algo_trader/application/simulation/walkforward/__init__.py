@@ -12,6 +12,7 @@ from .progress import (
     build_seed_stability_progress,
     build_walkforward_progress,
 )
+from .pathing import resolve_portfolio_base_dir
 from .seed_stability import run_seed_stability_study
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "build_seed_stability_progress",
     "build_walkforward_progress",
     "evaluate_outer_walk_forward",
+    "resolve_portfolio_base_dir",
     "run_seed_stability_study",
     "write_downstream_metrics",
     "write_downstream_outputs",

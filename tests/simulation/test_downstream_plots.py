@@ -14,7 +14,7 @@ def test_write_downstream_plots_creates_downstream_charts(
     tmp_path: Path,
 ) -> None:
     base_dir = tmp_path / "simulation_run"
-    walkforward_dir = base_dir / "walkforward"
+    walkforward_dir = base_dir
     walkforward_dir.mkdir(parents=True, exist_ok=True)
     write_log_weekly_data_source_metadata(base_dir)
     (walkforward_dir / "stitched_returns.csv").write_text(

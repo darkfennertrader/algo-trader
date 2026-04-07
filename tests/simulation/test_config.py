@@ -230,6 +230,37 @@ def test_build_walkforward_config_rejects_removed_nested_keys() -> None:
         )
 
 
+def test_build_data_config_parses_portfolio_output_path() -> None:
+    build_data = getattr(simulation_config, "_build_data_config")
+    config = build_data(
+        {
+            "data": {
+                "simulation_output_path": "validated_model",
+                "portfolio_output_path": "portfolio/herc",
+            }
+        },
+        Path("simulation.yml"),
+    )
+
+    assert config.simulation_output_path == "validated_model"
+    assert config.portfolio_output_path == "portfolio/herc"
+
+
+def test_build_data_config_rejects_invalid_portfolio_output_path() -> None:
+    build_data = getattr(simulation_config, "_build_data_config")
+
+    with pytest.raises(ConfigError):
+        build_data(
+            {
+                "data": {
+                    "simulation_output_path": "validated_model",
+                    "portfolio_output_path": "../portfolio/herc",
+                }
+            },
+            Path("simulation.yml"),
+        )
+
+
 def test_build_tuning_config_parses_ray_early_stopping() -> None:
     tuning = config_tuning.build_tuning_config(
         {
@@ -369,10 +400,8 @@ def test_load_config_parses_primary_and_baselines() -> None:
             "allocation": {
                 "primary": {
                     "family": "long_only",
-                    "gross_exposure": 1.0,
                     "min_weight": 0.0,
                     "max_weight": 0.25,
-                    "use_previous_weights": True,
                 },
                 "baselines": [
                     {"family": "equal_weight"},
@@ -388,6 +417,90 @@ def test_load_config_parses_primary_and_baselines() -> None:
     assert len(config.baselines) == 2
     assert config.baselines[0].family == "equal_weight"
     assert config.baselines[1].family == "random"
+
+
+def test_load_config_rejects_long_only_gross_exposure() -> None:
+    build_allocation_config = getattr(
+        simulation_config, "_build_allocation_config"
+    )
+
+    with pytest.raises(ConfigError):
+        build_allocation_config(
+            {
+                "allocation": {
+                    "primary": {
+                        "family": "long_only",
+                        "gross_exposure": 1.0,
+                    }
+                }
+            },
+            Path("simulation.yml"),
+        )
+
+
+def test_load_config_rejects_long_only_use_previous_weights() -> None:
+    build_allocation_config = getattr(
+        simulation_config, "_build_allocation_config"
+    )
+
+    with pytest.raises(ConfigError):
+        build_allocation_config(
+            {
+                "allocation": {
+                    "primary": {
+                        "family": "long_only",
+                        "use_previous_weights": True,
+                    }
+                }
+            },
+            Path("simulation.yml"),
+        )
+
+
+def test_load_config_parses_herc_primary() -> None:
+    build_allocation_config = getattr(
+        simulation_config, "_build_allocation_config"
+    )
+    config = build_allocation_config(
+        {
+            "allocation": {
+                "primary": {
+                    "family": "herc",
+                    "risk_measure": "cvar",
+                    "distance_estimator": "pearson",
+                    "min_weight": 0.0,
+                    "max_weight": 0.20,
+                    "transaction_costs": 0.0,
+                    "use_previous_weights": False,
+                },
+                "baselines": [{"family": "equal_weight"}],
+            }
+        },
+        Path("simulation.yml"),
+    )
+
+    assert config.primary.family == "herc"
+    assert config.primary.params["risk_measure"] == "cvar"
+    assert config.primary.params["distance_estimator"] == "pearson"
+
+
+def test_load_config_rejects_invalid_herc_distance_estimator() -> None:
+    build_allocation_config = getattr(
+        simulation_config, "_build_allocation_config"
+    )
+
+    with pytest.raises(ConfigError):
+        build_allocation_config(
+            {
+                "allocation": {
+                    "primary": {
+                        "family": "herc",
+                        "distance_estimator": "kendall",
+                    }
+                }
+            },
+            Path("simulation.yml"),
+        )
 
 
 def test_load_config_rejects_long_only_negative_min_weight() -> None:

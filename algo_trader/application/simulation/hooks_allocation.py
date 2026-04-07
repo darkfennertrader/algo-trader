@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import importlib
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Mapping, cast
 
-import pandas as pd
 import torch
 
-from algo_trader.domain import ConfigError, SimulationError
+from algo_trader.domain import ConfigError
 from algo_trader.domain.simulation import (
     AllocationRequest,
     AllocationResult,
@@ -15,8 +13,15 @@ from algo_trader.domain.simulation import (
 )
 from .allocation_common import (
     VALID_ALLOCATION_FAMILIES,
+    VALID_HERC_DISTANCE_ESTIMATORS,
     VALID_PORTFOLIO_STYLES,
     optional_float_value,
+)
+from .skfolio_allocators import (
+    SkfolioRuntimeConfig,
+    TensorTarget,
+    allocate_herc,
+    allocate_risk_budgeting,
 )
 
 AllocatorMethod = str
@@ -27,6 +32,7 @@ _DEFAULT_RANDOM_BASELINE_SEED = 17
 @dataclass(frozen=True)
 class _SkfolioOptions:
     risk_measure: str
+    distance_estimator: str
     use_previous_weights: bool
     transaction_costs: float
 
@@ -79,6 +85,13 @@ def _allocate_weights(
             params=params,
             tensor_spec=tensor_spec,
         )
+    elif params.method == "herc":
+        weights = _allocate_herc(
+            prediction=prediction,
+            previous_weights=request.previous_weights,
+            params=params,
+            tensor_spec=tensor_spec,
+        )
     else:
         weights = _allocate_skfolio_risk_budgeting(
             prediction=prediction,
@@ -100,7 +113,7 @@ def _parse_allocation_params(
     if method not in VALID_ALLOCATION_FAMILIES:
         raise ConfigError(
             "allocation family must be long_only, equal_weight, random, "
-            "de_risked, or skfolio_risk_budgeting"
+            "de_risked, herc, or skfolio_risk_budgeting"
         )
     portfolio_style = _resolve_portfolio_style(alloc_spec, method)
     if portfolio_style not in VALID_PORTFOLIO_STYLES:
@@ -108,8 +121,7 @@ def _parse_allocation_params(
             "allocation.spec.portfolio_style must be long_only, "
             "long_short_bounded_net, or factor_neutral_long_short"
         )
-    gross_default = 0.10 if method == "de_risked" else 1.0
-    gross_exposure = float(alloc_spec.get("gross_exposure", gross_default))
+    gross_exposure = _resolve_gross_exposure(alloc_spec, method)
     if gross_exposure < 0.0:
         raise ConfigError("allocation.spec.gross_exposure must be >= 0")
     if gross_exposure == 0.0 and method not in {"de_risked", "long_only"}:
@@ -118,8 +130,9 @@ def _parse_allocation_params(
             "allocation family is de_risked"
         )
     random_seed = _resolve_random_seed(alloc_spec, method)
-    risk_measure = str(alloc_spec.get("risk_measure", "cvar")).strip().lower()
-    use_previous_weights = bool(alloc_spec.get("use_previous_weights", False))
+    risk_measure = _resolve_risk_measure_name(alloc_spec, method)
+    distance_estimator = _resolve_distance_estimator_name(alloc_spec, method)
+    use_previous_weights = _resolve_use_previous_weights(alloc_spec, method)
     transaction_costs = float(alloc_spec.get("transaction_costs", 0.0))
     min_weight = _optional_float(alloc_spec.get("min_weight"), "min_weight")
     max_weight = _optional_float(alloc_spec.get("max_weight"), "max_weight")
@@ -132,6 +145,7 @@ def _parse_allocation_params(
         max_weight=max_weight,
         skfolio=_SkfolioOptions(
             risk_measure=risk_measure,
+            distance_estimator=distance_estimator,
             use_previous_weights=use_previous_weights,
             transaction_costs=transaction_costs,
         ),
@@ -177,6 +191,56 @@ def _resolve_random_seed(
 
 def _optional_float(raw: Any, field: str) -> float | None:
     return optional_float_value(raw, location=f"allocation.spec.{field}")
+
+
+def _resolve_gross_exposure(
+    alloc_spec: Mapping[str, Any],
+    method: str,
+) -> float:
+    if method == "long_only":
+        if "gross_exposure" in alloc_spec:
+            raise ConfigError(
+                "allocation.spec.gross_exposure is not supported for "
+                "allocation.spec.family=long_only"
+            )
+        return 1.0
+    gross_default = 0.10 if method == "de_risked" else 1.0
+    return float(alloc_spec.get("gross_exposure", gross_default))
+
+
+def _resolve_use_previous_weights(
+    alloc_spec: Mapping[str, Any],
+    method: str,
+) -> bool:
+    if method == "long_only" and "use_previous_weights" in alloc_spec:
+        raise ConfigError(
+            "allocation.spec.use_previous_weights is not supported for "
+            "allocation.spec.family=long_only"
+        )
+    return bool(alloc_spec.get("use_previous_weights", False))
+
+
+def _resolve_risk_measure_name(
+    alloc_spec: Mapping[str, Any],
+    method: str,
+) -> str:
+    default = "variance" if method == "herc" else "cvar"
+    return str(alloc_spec.get("risk_measure", default)).strip().lower()
+
+
+def _resolve_distance_estimator_name(
+    alloc_spec: Mapping[str, Any],
+    method: str,
+) -> str:
+    if method != "herc":
+        return "pearson"
+    raw = str(alloc_spec.get("distance_estimator", "pearson")).strip().lower()
+    if raw not in VALID_HERC_DISTANCE_ESTIMATORS:
+        raise ConfigError(
+            "allocation.spec.distance_estimator must be pearson or "
+            "mutual_information"
+        )
+    return raw
 
 
 def _resolve_n_assets(
@@ -420,6 +484,29 @@ def _allocate_de_risked(
     )
 
 
+def _allocate_herc(
+    *,
+    prediction: PredictionPacket,
+    previous_weights: torch.Tensor | None,
+    params: _AllocationParams,
+    tensor_spec: _TensorSpec,
+) -> torch.Tensor:
+    if params.portfolio_style != "long_only":
+        raise ConfigError(
+            "allocation.spec.method=herc currently supports only "
+            "allocation.spec.portfolio_style=long_only"
+        )
+    return allocate_herc(
+        prediction=prediction,
+        runtime_config=_build_skfolio_runtime_config(
+            previous_weights=previous_weights,
+            params=params,
+            tensor_spec=tensor_spec,
+        ),
+        distance_estimator=params.skfolio.distance_estimator,
+    )
+
+
 def _build_generator(seed: int | None) -> torch.Generator | None:
     if seed is None:
         return None
@@ -498,100 +585,33 @@ def _allocate_skfolio_risk_budgeting(
             "allocation.spec.method=skfolio_risk_budgeting currently supports "
             "only allocation.spec.portfolio_style=long_only"
         )
-    scenarios = _extract_predictive_scenarios(prediction)
-    frame = _build_scenario_frame(scenarios, prediction.asset_names)
-    model = _build_risk_budgeting_model(
-        params=params,
-        w_prev=previous_weights,
+    return allocate_risk_budgeting(
+        prediction=prediction,
+        runtime_config=_build_skfolio_runtime_config(
+            previous_weights=previous_weights,
+            params=params,
+            tensor_spec=tensor_spec,
+        ),
     )
-    try:
-        model.fit(frame)
-    except Exception as exc:  # pragma: no cover - library failure path
-        raise SimulationError(
-            "skfolio RiskBudgeting allocation failed",
-            context={"error": str(exc)},
-        ) from exc
-    weights = torch.as_tensor(
-        model.weights_,
-        device=tensor_spec.device,
-        dtype=tensor_spec.dtype,
-    )
-    return weights
 
 
-def _extract_predictive_scenarios(
-    prediction: PredictionPacket,
-) -> torch.Tensor:
-    samples = prediction.samples
-    if not isinstance(samples, torch.Tensor):
-        raise ConfigError(
-            "allocation with skfolio_risk_budgeting requires predictive samples"
-        )
-    return samples.detach()
-
-
-def _build_scenario_frame(
-    scenarios: torch.Tensor,
-    asset_names: Sequence[str],
-) -> pd.DataFrame:
-    columns = list(asset_names)
-    if not columns:
-        columns = [f"asset_{idx}" for idx in range(int(scenarios.shape[-1]))]
-    if len(columns) != int(scenarios.shape[-1]):
-        raise ConfigError(
-            "allocation asset_names length must match predictive asset dimension"
-        )
-    values = scenarios.to(device="cpu", dtype=torch.float32).numpy()
-    return pd.DataFrame(values, columns=columns)
-
-
-def _build_risk_budgeting_model(
+def _build_skfolio_runtime_config(
     *,
+    previous_weights: torch.Tensor | None,
     params: _AllocationParams,
-    w_prev: torch.Tensor | None,
-) -> Any:
-    risk_measure_enum = importlib.import_module("skfolio").RiskMeasure
-    risk_budgeting_cls = importlib.import_module(
-        "skfolio.optimization"
-    ).RiskBudgeting
-    risk_measure = _resolve_risk_measure(
-        params.skfolio.risk_measure, risk_measure_enum
-    )
-    previous_weights = None
-    if params.skfolio.use_previous_weights and w_prev is not None:
-        previous_weights = (
-            w_prev.detach()
-            .to(device="cpu", dtype=torch.float32)
-            .numpy()
-        )
-    min_weight = (
-        0.0
-        if params.min_weight is None
-        else params.min_weight
-    )
-    max_weight = (
-        1.0
-        if params.max_weight is None
-        else params.max_weight
-    )
-    return risk_budgeting_cls(
-        risk_measure=risk_measure,
-        min_weights=min_weight,
-        max_weights=max_weight,
+    tensor_spec: _TensorSpec,
+) -> SkfolioRuntimeConfig:
+    return SkfolioRuntimeConfig(
+        risk_measure=params.skfolio.risk_measure,
+        min_weight=params.min_weight,
+        max_weight=params.max_weight,
         transaction_costs=params.skfolio.transaction_costs,
         previous_weights=previous_weights,
-        raise_on_failure=True,
-    )
-
-
-def _resolve_risk_measure(raw: str, enum_cls: Any) -> Any:
-    name = raw.strip().upper()
-    if hasattr(enum_cls, name):
-        return getattr(enum_cls, name)
-    valid = sorted(name for name in dir(enum_cls) if name.isupper())
-    raise ConfigError(
-        "allocation.spec.risk_measure must be one of "
-        + ", ".join(valid)
+        use_previous_weights=params.skfolio.use_previous_weights,
+        tensor_target=TensorTarget(
+            device=tensor_spec.device,
+            dtype=tensor_spec.dtype,
+        ),
     )
 
 

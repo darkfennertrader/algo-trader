@@ -438,14 +438,23 @@ def resolve_simulation_output_dir(
     simulation_output_path: str | None,
     dataset_params: Mapping[str, Any],
 ) -> Path:
-    root = Path(require_env("SIMULATION_SOURCE")).expanduser()
-    _ensure_dir(root, message="Failed to create SIMULATION_SOURCE")
+    root = resolve_simulation_root_dir()
     label = (
         simulation_output_path
         if simulation_output_path is not None
         else _resolve_latest_version_label(dataset_params)
     )
     return root / label
+
+
+def resolve_simulation_root_dir() -> Path:
+    root = Path(require_env("SIMULATION_SOURCE")).expanduser()
+    _ensure_dir(root, message="Failed to create SIMULATION_SOURCE")
+    return root
+
+
+def resolve_relative_simulation_output_dir(*, output_path: str) -> Path:
+    return resolve_simulation_root_dir() / output_path
 
 
 def _resolve_latest_version_label(

@@ -2,7 +2,7 @@ from __future__ import annotations
 # pylint: disable=too-many-lines
 
 from dataclasses import asdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Mapping, cast
 
 import yaml
@@ -83,6 +83,7 @@ def config_to_input_dict(config: SimulationConfig) -> dict[str, object]:
         },
         "data": {
             "simulation_output_path": config.data.simulation_output_path,
+            "portfolio_output_path": config.data.portfolio_output_path,
             "dataset_params": dict(config.data.dataset_params),
         },
         "cv": {
@@ -1435,23 +1436,49 @@ def _build_preprocess_spec(
     return PreprocessSpec(cleaning=cleaning, scaling=scaling)
 
 
-def _normalize_simulation_output_path(
-    value: object, config_path: Path
+def _normalize_single_dir_output_path(
+    value: object, config_path: Path, field_name: str
 ) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
         raise ConfigError(
-            f"data.simulation_output_path must be a string in {config_path}"
+            f"data.{field_name} must be a string in {config_path}"
         )
     label = value.strip()
     if not label:
         raise ConfigError(
-            f"data.simulation_output_path must not be empty in {config_path}"
+            f"data.{field_name} must not be empty in {config_path}"
         )
     if Path(label).name != label or "/" in label or "\\" in label:
         raise ConfigError(
-            f"data.simulation_output_path must be a single directory name in {config_path}"
+            f"data.{field_name} must be a single directory name in {config_path}"
+        )
+    return label
+
+
+def _normalize_relative_output_path(
+    value: object, config_path: Path, field_name: str
+) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"data.{field_name} must be a string in {config_path}"
+        )
+    label = value.strip()
+    if not label:
+        raise ConfigError(
+            f"data.{field_name} must not be empty in {config_path}"
+        )
+    if "\\" in label:
+        raise ConfigError(
+            f"data.{field_name} must use forward slashes in {config_path}"
+        )
+    path = PurePosixPath(label)
+    if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
+        raise ConfigError(
+            f"data.{field_name} must be a relative path under SIMULATION_SOURCE in {config_path}"
         )
     return label
 
@@ -1481,13 +1508,21 @@ def _build_data_config(
         raise ConfigError(
             f"data.dataset_params.version_label is no longer supported in {config_path}"
         )
-    simulation_output_path = _normalize_simulation_output_path(
-        section.get("simulation_output_path"), config_path
+    simulation_output_path = _normalize_single_dir_output_path(
+        section.get("simulation_output_path"),
+        config_path,
+        "simulation_output_path",
+    )
+    portfolio_output_path = _normalize_relative_output_path(
+        section.get("portfolio_output_path"),
+        config_path,
+        "portfolio_output_path",
     )
     try:
         return DataConfig(
             dataset_params=dataset_params,
             simulation_output_path=simulation_output_path,
+            portfolio_output_path=portfolio_output_path,
         )
     except TypeError as exc:
         raise ConfigError(

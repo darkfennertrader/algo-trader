@@ -24,9 +24,9 @@ def test_write_downstream_metrics_creates_summary_files(
     tmp_path: Path,
 ) -> None:
     base_dir = tmp_path / "simulation_run"
-    portfolio_dir = base_dir / "walkforward" / "portfolios" / "primary"
+    portfolio_dir = base_dir / "portfolios" / "primary"
     portfolio_dir.mkdir(parents=True, exist_ok=True)
-    (base_dir / "walkforward" / "stitched_returns.csv").write_text(
+    (base_dir / "stitched_returns.csv").write_text(
         "timestamp,primary\n2024-01-05,0.01\n",
         encoding="utf-8",
     )
@@ -44,16 +44,15 @@ def test_write_downstream_metrics_creates_summary_files(
 
     write_downstream_metrics(base_dir=base_dir, dataset_params={})
 
-    summary_csv = pd.read_csv(base_dir / "walkforward" / "metrics" / "summary.csv")
+    summary_csv = pd.read_csv(base_dir / "metrics" / "summary.csv")
     summary_json = json.loads(
-        (base_dir / "walkforward" / "metrics" / "summary.json").read_text(
+        (base_dir / "metrics" / "summary.json").read_text(
             encoding="utf-8"
         )
     )
     primary_json = json.loads(
         (
             base_dir
-            / "walkforward"
             / "metrics"
             / "by_portfolio"
             / "primary.json"

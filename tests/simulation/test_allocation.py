@@ -135,6 +135,29 @@ def test_allocate_risk_budgeting_uses_predictive_samples() -> None:
     assert torch.isclose(weights.sum(), torch.tensor(1.0), atol=1e-5)
 
 
+def test_allocate_herc_uses_predictive_samples() -> None:
+    samples = torch.randn((24, 3), dtype=torch.float32) * 0.01
+
+    result = hooks._allocate_weights(  # pylint: disable=protected-access
+        request=_request(
+            alloc_spec={
+                "family": "herc",
+                "risk_measure": "cvar",
+                "distance_estimator": "pearson",
+                "min_weight": 0.0,
+                "max_weight": 0.8,
+            },
+            samples=samples,
+            asset_names=("A", "B", "C"),
+        )
+    )
+
+    weights = result.weights
+    assert weights.shape == (3,)
+    assert torch.all(weights >= 0.0)
+    assert torch.isclose(weights.sum(), torch.tensor(1.0), atol=1e-5)
+
+
 def test_allocate_risk_budgeting_rejects_non_long_only() -> None:
     with pytest.raises(ConfigError):
         hooks._allocate_weights(  # pylint: disable=protected-access
@@ -211,7 +234,6 @@ def test_allocate_long_only_respects_cap_and_sum() -> None:
         prediction=prediction,
         allocation_spec={
             "family": "long_only",
-            "gross_exposure": 1.0,
             "min_weight": 0.0,
             "max_weight": 0.60,
         },
@@ -226,3 +248,31 @@ def test_allocate_long_only_respects_cap_and_sum() -> None:
     assert float(weights.max().item()) <= 0.600001
     assert float(weights[0].item()) >= float(weights[1].item())
     assert float(weights[1].item()) >= float(weights[2].item())
+
+
+def test_allocate_long_only_rejects_gross_exposure() -> None:
+    with pytest.raises(ConfigError):
+        hooks._allocate_weights(  # pylint: disable=protected-access
+            request=_request(
+                alloc_spec={
+                    "family": "long_only",
+                    "gross_exposure": 1.0,
+                    "max_weight": 0.60,
+                    "n_assets": 3,
+                },
+            ),
+        )
+
+
+def test_allocate_long_only_rejects_use_previous_weights() -> None:
+    with pytest.raises(ConfigError):
+        hooks._allocate_weights(  # pylint: disable=protected-access
+            request=_request(
+                alloc_spec={
+                    "family": "long_only",
+                    "use_previous_weights": True,
+                    "max_weight": 0.60,
+                    "n_assets": 3,
+                },
+            ),
+        )

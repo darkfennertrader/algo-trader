@@ -130,7 +130,6 @@ def _outer_context() -> outer_walk_forward.OuterEvaluationContext:
                 name="primary",
                 allocation={
                     "family": "long_only",
-                    "gross_exposure": 1.0,
                     "min_weight": 0.0,
                     "max_weight": 0.75,
                 },

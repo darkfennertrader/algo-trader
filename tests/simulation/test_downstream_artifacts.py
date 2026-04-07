@@ -72,7 +72,7 @@ def test_write_downstream_outputs_creates_stitched_portfolio_files(
         assets=("A", "B"),
     )
 
-    downstream_dir = base_dir / "walkforward"
+    downstream_dir = base_dir
     primary_returns = pd.read_csv(
         downstream_dir / "portfolios" / "primary" / "weekly_returns.csv"
     )

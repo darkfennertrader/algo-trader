@@ -10,8 +10,10 @@ from algo_trader.domain.simulation import (
 )
 
 from .allocation_common import (
+    VALID_HERC_DISTANCE_ESTIMATORS,
     VALID_ALLOCATION_FAMILIES,
     VALID_PORTFOLIO_STYLES,
+    VALID_SKFOLIO_RISK_MEASURES,
     optional_float_value,
 )
 from .config_utils import coerce_mapping, require_bool
@@ -146,6 +148,11 @@ def _validate_family_params(
             params=params, field=field, config_path=config_path
         )
         return
+    if family == "herc":
+        _validate_herc_params(
+            params=params, field=field, config_path=config_path
+        )
+        return
     _validate_legacy_family_params(
         family=family,
         params=params,
@@ -160,11 +167,11 @@ def _validate_long_only_params(
     field: str,
     config_path: Path,
 ) -> None:
-    gross = _require_non_negative_float(
-        params.get("gross_exposure", 1.0),
-        field=f"{field}.gross_exposure",
-        config_path=config_path,
-    )
+    if "gross_exposure" in params:
+        raise ConfigError(
+            f"{field}.gross_exposure is not supported for long_only "
+            f"in {config_path}"
+        )
     min_weight = _optional_float(
         params.get("min_weight"),
         field=f"{field}.min_weight",
@@ -185,12 +192,10 @@ def _validate_long_only_params(
         raise ConfigError(
             f"{field}.min_weight must be <= max_weight in {config_path}"
         )
-    _ = gross
     if "use_previous_weights" in params:
-        require_bool(
-            params.get("use_previous_weights"),
-            field=f"{field}.use_previous_weights",
-            config_path=config_path,
+        raise ConfigError(
+            f"{field}.use_previous_weights is not supported for long_only "
+            f"in {config_path}"
         )
 
 
@@ -264,6 +269,74 @@ def _validate_legacy_family_params(
         )
 
 
+def _validate_herc_params(
+    *,
+    params: Mapping[str, Any],
+    field: str,
+    config_path: Path,
+) -> None:
+    portfolio_style = str(
+        params.get("portfolio_style", "long_only")
+    ).strip().lower()
+    if portfolio_style != "long_only":
+        raise ConfigError(
+            f"{field}.family=herc currently supports only "
+            f"{field}.portfolio_style=long_only in {config_path}"
+        )
+    min_weight = _optional_float(
+        params.get("min_weight"),
+        field=f"{field}.min_weight",
+        config_path=config_path,
+    )
+    max_weight = _optional_float(
+        params.get("max_weight"),
+        field=f"{field}.max_weight",
+        config_path=config_path,
+    )
+    if min_weight is not None and min_weight < 0.0:
+        raise ConfigError(
+            f"{field}.min_weight must be >= 0 in {config_path}"
+        )
+    if max_weight is not None and max_weight <= 0.0:
+        raise ConfigError(
+            f"{field}.max_weight must be > 0 in {config_path}"
+        )
+    if min_weight is not None and max_weight is not None and min_weight > max_weight:
+        raise ConfigError(
+            f"{field}.min_weight must be <= max_weight in {config_path}"
+        )
+    if "risk_measure" in params:
+        _require_choice(
+            params.get("risk_measure"),
+            field=f"{field}.risk_measure",
+            config_path=config_path,
+            valid_values=VALID_SKFOLIO_RISK_MEASURES,
+        )
+    if "distance_estimator" in params:
+        _require_choice(
+            params.get("distance_estimator"),
+            field=f"{field}.distance_estimator",
+            config_path=config_path,
+            valid_values=VALID_HERC_DISTANCE_ESTIMATORS,
+        )
+    if "transaction_costs" in params:
+        transaction_costs = _optional_float(
+            params.get("transaction_costs"),
+            field=f"{field}.transaction_costs",
+            config_path=config_path,
+        )
+        if transaction_costs is not None and transaction_costs < 0.0:
+            raise ConfigError(
+                f"{field}.transaction_costs must be >= 0 in {config_path}"
+            )
+    if "use_previous_weights" in params:
+        require_bool(
+            params.get("use_previous_weights"),
+            field=f"{field}.use_previous_weights",
+            config_path=config_path,
+        )
+
+
 def _require_non_negative_float(
     raw: Any,
     *,
@@ -298,6 +371,21 @@ def _require_int(
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise ConfigError(f"{field} must be an integer in {config_path}")
     return int(raw)
+
+
+def _require_choice(
+    raw: Any,
+    *,
+    field: str,
+    config_path: Path,
+    valid_values: tuple[str, ...],
+) -> str:
+    value = str(raw).strip().lower()
+    if value not in valid_values:
+        raise ConfigError(
+            f"{field} must be one of {', '.join(valid_values)} in {config_path}"
+        )
+    return value
 
 
 __all__ = ["_build_allocation_config"]

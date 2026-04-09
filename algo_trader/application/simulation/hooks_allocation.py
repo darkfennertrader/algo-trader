@@ -13,8 +13,8 @@ from algo_trader.domain.simulation import (
 )
 from .allocation_common import (
     VALID_ALLOCATION_FAMILIES,
-    VALID_HERC_DISTANCE_ESTIMATORS,
     VALID_PORTFOLIO_STYLES,
+    VALID_SKFOLIO_DISTANCE_ESTIMATORS,
     optional_float_value,
 )
 from .skfolio_allocators import (
@@ -22,6 +22,7 @@ from .skfolio_allocators import (
     TensorTarget,
     allocate_herc,
     allocate_risk_budgeting,
+    allocate_schur,
 )
 
 AllocatorMethod = str
@@ -33,6 +34,7 @@ _DEFAULT_RANDOM_BASELINE_SEED = 17
 class _SkfolioOptions:
     risk_measure: str
     distance_estimator: str
+    gamma: float
     use_previous_weights: bool
     transaction_costs: float
 
@@ -92,6 +94,13 @@ def _allocate_weights(
             params=params,
             tensor_spec=tensor_spec,
         )
+    elif params.method == "schur":
+        weights = _allocate_schur(
+            prediction=prediction,
+            previous_weights=request.previous_weights,
+            params=params,
+            tensor_spec=tensor_spec,
+        )
     else:
         weights = _allocate_skfolio_risk_budgeting(
             prediction=prediction,
@@ -113,7 +122,7 @@ def _parse_allocation_params(
     if method not in VALID_ALLOCATION_FAMILIES:
         raise ConfigError(
             "allocation family must be long_only, equal_weight, random, "
-            "de_risked, herc, or skfolio_risk_budgeting"
+            "de_risked, herc, schur, or skfolio_risk_budgeting"
         )
     portfolio_style = _resolve_portfolio_style(alloc_spec, method)
     if portfolio_style not in VALID_PORTFOLIO_STYLES:
@@ -132,6 +141,7 @@ def _parse_allocation_params(
     random_seed = _resolve_random_seed(alloc_spec, method)
     risk_measure = _resolve_risk_measure_name(alloc_spec, method)
     distance_estimator = _resolve_distance_estimator_name(alloc_spec, method)
+    gamma = _resolve_gamma(alloc_spec, method)
     use_previous_weights = _resolve_use_previous_weights(alloc_spec, method)
     transaction_costs = float(alloc_spec.get("transaction_costs", 0.0))
     min_weight = _optional_float(alloc_spec.get("min_weight"), "min_weight")
@@ -146,6 +156,7 @@ def _parse_allocation_params(
         skfolio=_SkfolioOptions(
             risk_measure=risk_measure,
             distance_estimator=distance_estimator,
+            gamma=gamma,
             use_previous_weights=use_previous_weights,
             transaction_costs=transaction_costs,
         ),
@@ -232,14 +243,28 @@ def _resolve_distance_estimator_name(
     alloc_spec: Mapping[str, Any],
     method: str,
 ) -> str:
-    if method != "herc":
+    if method not in {"herc", "schur"}:
         return "pearson"
     raw = str(alloc_spec.get("distance_estimator", "pearson")).strip().lower()
-    if raw not in VALID_HERC_DISTANCE_ESTIMATORS:
+    if raw not in VALID_SKFOLIO_DISTANCE_ESTIMATORS:
         raise ConfigError(
             "allocation.spec.distance_estimator must be pearson or "
             "mutual_information"
         )
+    return raw
+
+
+def _resolve_gamma(
+    alloc_spec: Mapping[str, Any],
+    method: str,
+) -> float:
+    if method != "schur":
+        return 0.5
+    raw = _optional_float(alloc_spec.get("gamma"), "gamma")
+    if raw is None:
+        return 0.5
+    if raw < 0.0 or raw > 1.0:
+        raise ConfigError("allocation.spec.gamma must be between 0 and 1")
     return raw
 
 
@@ -503,6 +528,30 @@ def _allocate_herc(
             params=params,
             tensor_spec=tensor_spec,
         ),
+        distance_estimator=params.skfolio.distance_estimator,
+    )
+
+
+def _allocate_schur(
+    *,
+    prediction: PredictionPacket,
+    previous_weights: torch.Tensor | None,
+    params: _AllocationParams,
+    tensor_spec: _TensorSpec,
+) -> torch.Tensor:
+    if params.portfolio_style != "long_only":
+        raise ConfigError(
+            "allocation.spec.method=schur currently supports only "
+            "allocation.spec.portfolio_style=long_only"
+        )
+    return allocate_schur(
+        prediction=prediction,
+        runtime_config=_build_skfolio_runtime_config(
+            previous_weights=previous_weights,
+            params=params,
+            tensor_spec=tensor_spec,
+        ),
+        gamma=params.skfolio.gamma,
         distance_estimator=params.skfolio.distance_estimator,
     )
 

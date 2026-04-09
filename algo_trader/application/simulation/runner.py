@@ -12,6 +12,10 @@ import numpy as np
 import torch
 
 from algo_trader.domain import ConfigError, SimulationError
+from algo_trader.application.research.posterior_signal import (
+    run_posterior_signal_analysis,
+    run_posterior_signal_seed_stability,
+)
 from algo_trader.domain.simulation import (
     AllocationConfig,
     CandidateSpec,
@@ -20,7 +24,6 @@ from algo_trader.domain.simulation import (
     FeatureCleaningState,
     OuterFold,
     PanelDataset,
-    PreprocessSpec,
     SimulationConfig,
     SimulationFlags,
 )
@@ -28,7 +31,7 @@ from algo_trader.infrastructure import log_boundary
 from algo_trader.infrastructure.data import load_panel_tensor_dataset
 
 from .config import DEFAULT_CONFIG_PATH, load_config
-from .cv_groups import build_equal_groups, make_cpcv_splits, make_outer_folds
+from .cv_groups import make_cpcv_splits
 from .hooks import SimulationHooks, default_hooks, stub_hooks
 from .inner_objective import (
     InnerObjectiveContext,
@@ -68,10 +71,8 @@ from .resume_flow import (
 )
 from .runner_helpers import (
     build_base_config,
-    build_group_by_index,
     outer_fold_seed,
     outer_fold_payload,
-    resolve_outer_test_group_ids,
     set_runtime_seed,
     should_stop_after,
     with_fold_seed,
@@ -90,6 +91,10 @@ from .selection import (
     select_global_best_config,
 )
 from .prebuild import PrebuildInputs, apply_prebuild, maybe_run_prebuild
+from .simulation_context import (
+    SimulationContext,
+    build_simulation_context,
+)
 from .walkforward import (
     OuterEvaluationContext,
     PortfolioSpec,
@@ -106,28 +111,6 @@ from .walkforward import (
 logger = logging.getLogger(__name__)
 
 _CUDA_REF_SAMPLE_LIMIT = 8
-
-@dataclass(frozen=True)
-class CVStructure:
-    warmup_idx: np.ndarray
-    groups: list[np.ndarray]
-    outer_ids: list[int]
-    outer_folds: list
-    group_by_index: np.ndarray
-
-@dataclass(frozen=True)
-class SimulationContext:  # pylint: disable=too-many-instance-attributes
-    X: torch.Tensor
-    M: torch.Tensor
-    X_global: torch.Tensor | None
-    M_global: torch.Tensor | None
-    y: torch.Tensor
-    timestamps: Sequence[Any]
-    preprocess_spec: PreprocessSpec
-    cv: CVStructure
-    feature_names: Sequence[str]
-    global_feature_names: Sequence[str]
-    assets: Sequence[str]
 
 def _run_context(config_path: Path | None, resume: bool) -> Mapping[str, str]:
     return {
@@ -198,6 +181,10 @@ def _resolve_runtime_options(config: SimulationConfig) -> _RunRuntimeOptions:
     )
 
 
+def _validate_execution_mode(config: SimulationConfig) -> None:
+    return None
+
+
 def _build_walkforward_progress(
     *,
     config: SimulationConfig,
@@ -242,6 +229,52 @@ def _should_run_walkforward_seed_stability(
     )
 
 
+def _should_run_posterior_signal_seed_stability(
+    config: SimulationConfig,
+) -> bool:
+    return (
+        config.flags.execution_mode == "posterior_signal"
+        and config.walkforward.num_seeds > 1
+    )
+
+
+def _maybe_run_posterior_signal(
+    *,
+    config: SimulationConfig,
+    started_at: float,
+) -> Mapping[str, Any] | None:
+    if config.flags.execution_mode != "posterior_signal":
+        return None
+    if _should_run_posterior_signal_seed_stability(config):
+        results = run_posterior_signal_seed_stability(config=config)
+        return _complete_early_run(
+            config=config,
+            started_at=started_at,
+            results=results,
+        )
+    cleanup_before_simulation_run(
+        use_ray=False,
+        ray_address=None,
+        use_gpu=config.flags.use_gpu,
+        log_cuda_clear=False,
+    )
+    try:
+        results = run_posterior_signal_analysis(config=config)
+    finally:
+        cleanup_after_simulation_run(
+            use_ray=False,
+            ray_address=None,
+            use_gpu=config.flags.use_gpu,
+            interrupted=False,
+            log_cuda_clear=False,
+        )
+    return _complete_early_run(
+        config=config,
+        started_at=started_at,
+        results=results,
+    )
+
+
 def _maybe_run_walkforward_seed_stability(
     *,
     config: SimulationConfig,
@@ -250,6 +283,19 @@ def _maybe_run_walkforward_seed_stability(
     if not _should_run_walkforward_seed_stability(config):
         return None
     results = run_seed_stability_study(config=config)
+    return _complete_early_run(
+        config=config,
+        started_at=started_at,
+        results=results,
+    )
+
+
+def _complete_early_run(
+    *,
+    config: SimulationConfig,
+    started_at: float,
+    results: Mapping[str, Any],
+) -> Mapping[str, Any]:
     ended_at = time.time()
     logger.info(
         "simulation_timing start=%s end=%s duration=%s",
@@ -387,7 +433,14 @@ def run(
 ) -> Mapping[str, Any]:
     started_at = time.time()
     config = apply_smoke_test_overrides(load_config(config_path))
+    _validate_execution_mode(config)
     validate_resume_request(config=config, resume=resume)
+    posterior_results = _maybe_run_posterior_signal(
+        config=config,
+        started_at=started_at,
+    )
+    if posterior_results is not None:
+        return posterior_results
     early_results = _maybe_run_walkforward_seed_stability(
         config=config,
         started_at=started_at,
@@ -611,7 +664,7 @@ def _prepare_run_state(
         ),
         dataset_params=config.data.dataset_params,
     )
-    context = _build_context(config, dataset)
+    context = build_simulation_context(config, dataset)
     artifacts = _build_artifacts(
         base_dir=base_dir,
         dataset=dataset,
@@ -773,26 +826,6 @@ def _resolve_device(use_gpu: bool) -> str:
         raise ConfigError("use_gpu is true but CUDA is not available")
     return "cuda" if use_gpu else "cpu"
 
-def _resolve_preprocess_spec(
-    spec: PreprocessSpec,
-    dataset: PanelDataset,
-    use_feature_names_for_scaling: bool,
-) -> PreprocessSpec:
-    if not use_feature_names_for_scaling:
-        return spec
-    if spec.scaling.inputs.feature_names is not None:
-        return spec
-    return replace(
-        spec,
-        scaling=replace(
-            spec.scaling,
-            inputs=replace(
-                spec.scaling.inputs, feature_names=list(dataset.features)
-            ),
-        ),
-    )
-
-
 def _debug_output_dir(
     *, artifacts: SimulationArtifacts, flags: SimulationFlags
 ) -> str | None:
@@ -842,52 +875,6 @@ def _load_dataset_for_run(
         return dataset, True
     dataset = _load_dataset(config, device)
     return dataset, False
-
-def _build_context(
-    config: SimulationConfig, dataset: PanelDataset
-) -> SimulationContext:
-    preprocess_spec = _resolve_preprocess_spec(
-        config.preprocessing, dataset, config.flags.use_feature_names_for_scaling
-    )
-    X, M, y = dataset.data, dataset.missing_mask, dataset.targets
-    warmup_idx, groups = build_equal_groups(
-        T=int(X.shape[0]),
-        warmup_len=config.cv.window.warmup_len,
-        group_len=config.cv.window.group_len,
-    )
-    if not groups:
-        raise SimulationError("No groups available; check cv settings")
-    outer_ids = resolve_outer_test_group_ids(
-        config.outer.test_group_ids, config.outer.last_n, len(groups)
-    )
-    outer_folds = make_outer_folds(
-        warmup_idx=warmup_idx,
-        groups=groups,
-        outer_test_group_ids=outer_ids,
-        exclude_warmup=config.cv.exclude_warmup,
-    )
-    group_by_index = build_group_by_index(
-        groups=groups, total_len=int(X.shape[0])
-    )
-    return SimulationContext(
-        X=X,
-        M=M,
-        X_global=dataset.global_data,
-        M_global=dataset.global_missing_mask,
-        y=y,
-        timestamps=list(dataset.dates),
-        preprocess_spec=preprocess_spec,
-        cv=CVStructure(
-            warmup_idx=warmup_idx,
-            groups=groups,
-            outer_ids=outer_ids,
-            outer_folds=outer_folds,
-            group_by_index=group_by_index,
-        ),
-        feature_names=list(dataset.features),
-        global_feature_names=list(dataset.global_features),
-        assets=list(dataset.assets),
-    )
 
 @dataclass(frozen=True)
 class OuterFoldContext:

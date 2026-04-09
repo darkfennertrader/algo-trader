@@ -41,6 +41,8 @@ class SeedStudyProgress:
 
 def build_walkforward_progress(
     outer_folds: Sequence[OuterFold],
+    *,
+    desc: str = "walkforward",
 ) -> WalkforwardProgress | None:
     total_weeks = sum(int(len(fold.test_idx)) for fold in outer_folds)
     if total_weeks <= 0:
@@ -48,7 +50,7 @@ def build_walkforward_progress(
     return WalkforwardProgress(
         _bar=tqdm(
             total=total_weeks,
-            desc="walkforward",
+            desc=desc,
             dynamic_ncols=True,
             delay=1.0,
         )

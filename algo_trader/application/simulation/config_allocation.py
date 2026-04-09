@@ -10,9 +10,9 @@ from algo_trader.domain.simulation import (
 )
 
 from .allocation_common import (
-    VALID_HERC_DISTANCE_ESTIMATORS,
     VALID_ALLOCATION_FAMILIES,
     VALID_PORTFOLIO_STYLES,
+    VALID_SKFOLIO_DISTANCE_ESTIMATORS,
     VALID_SKFOLIO_RISK_MEASURES,
     optional_float_value,
 )
@@ -150,6 +150,11 @@ def _validate_family_params(
         return
     if family == "herc":
         _validate_herc_params(
+            params=params, field=field, config_path=config_path
+        )
+        return
+    if family == "schur":
+        _validate_schur_params(
             params=params, field=field, config_path=config_path
         )
         return
@@ -317,7 +322,78 @@ def _validate_herc_params(
             params.get("distance_estimator"),
             field=f"{field}.distance_estimator",
             config_path=config_path,
-            valid_values=VALID_HERC_DISTANCE_ESTIMATORS,
+            valid_values=VALID_SKFOLIO_DISTANCE_ESTIMATORS,
+        )
+    if "transaction_costs" in params:
+        transaction_costs = _optional_float(
+            params.get("transaction_costs"),
+            field=f"{field}.transaction_costs",
+            config_path=config_path,
+        )
+        if transaction_costs is not None and transaction_costs < 0.0:
+            raise ConfigError(
+                f"{field}.transaction_costs must be >= 0 in {config_path}"
+            )
+    if "use_previous_weights" in params:
+        require_bool(
+            params.get("use_previous_weights"),
+            field=f"{field}.use_previous_weights",
+            config_path=config_path,
+        )
+
+
+def _validate_schur_params(
+    *,
+    params: Mapping[str, Any],
+    field: str,
+    config_path: Path,
+) -> None:
+    portfolio_style = str(
+        params.get("portfolio_style", "long_only")
+    ).strip().lower()
+    if portfolio_style != "long_only":
+        raise ConfigError(
+            f"{field}.family=schur currently supports only "
+            f"{field}.portfolio_style=long_only in {config_path}"
+        )
+    min_weight = _optional_float(
+        params.get("min_weight"),
+        field=f"{field}.min_weight",
+        config_path=config_path,
+    )
+    max_weight = _optional_float(
+        params.get("max_weight"),
+        field=f"{field}.max_weight",
+        config_path=config_path,
+    )
+    if min_weight is not None and min_weight < 0.0:
+        raise ConfigError(
+            f"{field}.min_weight must be >= 0 in {config_path}"
+        )
+    if max_weight is not None and max_weight <= 0.0:
+        raise ConfigError(
+            f"{field}.max_weight must be > 0 in {config_path}"
+        )
+    if min_weight is not None and max_weight is not None and min_weight > max_weight:
+        raise ConfigError(
+            f"{field}.min_weight must be <= max_weight in {config_path}"
+        )
+    if "gamma" in params:
+        gamma = _optional_float(
+            params.get("gamma"),
+            field=f"{field}.gamma",
+            config_path=config_path,
+        )
+        if gamma is not None and (gamma < 0.0 or gamma > 1.0):
+            raise ConfigError(
+                f"{field}.gamma must be between 0 and 1 in {config_path}"
+            )
+    if "distance_estimator" in params:
+        _require_choice(
+            params.get("distance_estimator"),
+            field=f"{field}.distance_estimator",
+            config_path=config_path,
+            valid_values=VALID_SKFOLIO_DISTANCE_ESTIMATORS,
         )
     if "transaction_costs" in params:
         transaction_costs = _optional_float(

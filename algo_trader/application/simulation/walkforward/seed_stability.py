@@ -1,18 +1,12 @@
 from __future__ import annotations
 
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, is_dataclass
 import logging
-import os
 from pathlib import Path
 import shutil
-import subprocess
-import sys
-from typing import Any, Iterable, Mapping, Sequence, cast
+from typing import Any, Mapping, Sequence, cast
 
 import pandas as pd
-import torch
-import yaml
 
 from algo_trader.domain import ConfigError, SimulationError
 from algo_trader.domain.simulation import SimulationConfig
@@ -20,31 +14,20 @@ from algo_trader.domain.simulation import SimulationConfig
 from ..artifacts import resolve_simulation_output_dir
 from ..config import config_to_input_dict
 from ..io_utils import write_json_file
+from ..seed_stability_common import (
+    SeedStudyResult,
+    SeedStudyTask,
+    load_seed_summary,
+    prepare_seed_task,
+    run_logged_seed_task,
+    run_seed_tasks_from_config,
+    seed_name,
+)
 from .pathing import (
     resolve_portfolio_base_dir,
     seed_stability_dir,
-    walkforward_dir,
 )
-from .progress import SeedStudyProgress, build_seed_stability_progress
-
 logger = logging.getLogger(__name__)
-_WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
-
-
-@dataclass(frozen=True)
-class SeedStudyTask:
-    seed: int
-    output_label: str
-    output_dir: Path
-    config_path: Path
-    log_path: Path
-
-
-@dataclass(frozen=True)
-class SeedStudyResult:
-    seed: int
-    output_dir: Path
-    log_path: Path
 
 
 def run_seed_stability_study(
@@ -151,26 +134,22 @@ def _build_seed_task(
     study_dir: Path,
     seed: int,
 ) -> SeedStudyTask:
-    output_dir = study_dir / task_seed_output_name(seed)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    config_path = output_dir / "simulation.seed.yml"
     payload = _build_seed_config_payload(
         config=config,
         output_name=task_seed_output_name(seed),
         seed=seed,
     )
-    _write_seed_config(config_path=config_path, payload=payload)
-    return SeedStudyTask(
+    return prepare_seed_task(
+        study_dir=study_dir,
+        output_name=task_seed_output_name(seed),
         seed=seed,
-        output_label=str(output_dir),
-        output_dir=output_dir,
-        config_path=config_path,
-        log_path=output_dir / "seed_run.log",
+        payload=payload,
+        write_message="Failed to write seed-stability simulation config",
     )
 
 
 def task_seed_output_name(seed: int) -> str:
-    return f"seed_{seed}"
+    return seed_name(seed)
 
 
 def _build_seed_config_payload(
@@ -231,23 +210,6 @@ def _dict_field(
     if not isinstance(value, Mapping):
         raise ConfigError(f"Seed-stability payload missing mapping field '{key}'")
     return dict(value)
-
-
-def _write_seed_config(
-    *,
-    config_path: Path,
-    payload: Mapping[str, Any],
-) -> None:
-    try:
-        config_path.write_text(
-            yaml.safe_dump(dict(payload), sort_keys=False),
-            encoding="utf-8",
-        )
-    except Exception as exc:
-        raise SimulationError(
-            "Failed to write seed-stability simulation config",
-            context={"path": str(config_path)},
-        ) from exc
 
 
 def _stage_seed_tasks(
@@ -330,192 +292,26 @@ def _run_seed_tasks(
 ) -> tuple[SeedStudyResult, ...]:
     if not tasks:
         return ()
-    progress = build_seed_stability_progress(len(tasks))
-    try:
-        if _max_concurrent_seed_runs(config) <= 1:
-            return _run_seed_tasks_serial(
-                config=config,
-                tasks=tasks,
-                progress=progress,
-            )
-        return _run_seed_tasks_parallel(
-            config=config,
-            tasks=tasks,
-            progress=progress,
-        )
-    finally:
-        if progress is not None:
-            progress.close()
-
-
-def _run_seed_tasks_serial(
-    *,
-    config: SimulationConfig,
-    tasks: Sequence[SeedStudyTask],
-    progress: SeedStudyProgress | None,
-) -> tuple[SeedStudyResult, ...]:
-    results: list[SeedStudyResult] = []
-    gpu_id = _default_gpu_id(config)
-    for task in tasks:
-        result = _run_seed_task(task=task, gpu_id=gpu_id)
-        results.append(result)
-        _update_seed_progress(progress=progress, seed=result.seed)
-    return tuple(results)
-
-
-def _default_gpu_id(config: SimulationConfig) -> int | None:
-    if not config.flags.use_gpu:
-        return None
-    return 0
-
-
-def _run_seed_tasks_parallel(
-    *,
-    config: SimulationConfig,
-    tasks: Sequence[SeedStudyTask],
-    progress: SeedStudyProgress | None,
-) -> tuple[SeedStudyResult, ...]:
-    gpu_slots = _build_gpu_slots(config)
-    max_workers = min(len(tasks), len(gpu_slots))
-    if max_workers <= 1:
-        return _run_seed_tasks_serial(
-            config=config,
-            tasks=tasks,
-            progress=progress,
-        )
-    pending = list(tasks)
-    active: dict[Any, int] = {}
-    results: list[SeedStudyResult] = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for gpu_id in gpu_slots[:max_workers]:
-            if not pending:
-                break
-            task = pending.pop(0)
-            future = executor.submit(_run_seed_task, task=task, gpu_id=gpu_id)
-            active[future] = gpu_id
-        while active:
-            future = next(iter(_completed_futures(active)))
-            gpu_id = active.pop(future)
-            result = future.result()
-            results.append(result)
-            _update_seed_progress(progress=progress, seed=result.seed)
-            if pending:
-                task = pending.pop(0)
-                active[
-                    executor.submit(_run_seed_task, task=task, gpu_id=gpu_id)
-                ] = gpu_id
-    return tuple(sorted(results, key=lambda item: item.seed))
-
-
-def _update_seed_progress(
-    *,
-    progress: SeedStudyProgress | None,
-    seed: int,
-) -> None:
-    if progress is not None:
-        progress.update(seed)
-
-
-def _completed_futures(
-    active: Mapping[Any, int],
-) -> Iterable[Any]:
-    done, _ = wait(tuple(active), return_when=FIRST_COMPLETED)
-    return done
-
-
-def _build_gpu_slots(config: SimulationConfig) -> tuple[int, ...]:
-    if not config.flags.use_gpu:
-        raise ConfigError(
-            "walkforward seed parallelization requires use_gpu=true"
-        )
-    gpu_count = int(torch.cuda.device_count())
-    if gpu_count <= 0:
-        raise ConfigError(
+    return run_seed_tasks_from_config(
+        config=config,
+        tasks=tasks,
+        parallel_error_message=(
             "walkforward seed parallelization requires at least one CUDA device"
-        )
-    per_gpu = config.walkforward.max_parallel_seeds_per_gpu
-    return tuple(
-        gpu_id
-        for gpu_id in range(gpu_count)
-        for _ in range(per_gpu)
+        ),
+        task_runner=_run_seed_task,
     )
-
-
-def _max_concurrent_seed_runs(config: SimulationConfig) -> int:
-    if not config.flags.use_gpu:
-        return 1
-    gpu_count = int(torch.cuda.device_count())
-    if gpu_count <= 0:
-        return 1
-    return gpu_count * config.walkforward.max_parallel_seeds_per_gpu
 
 
 def _run_seed_task(
-    *,
     task: SeedStudyTask,
     gpu_id: int | None,
 ) -> SeedStudyResult:
-    logger.info(
-        "seed_stability.start seed=%s gpu=%s output=%s",
-        task.seed,
-        gpu_id,
-        task.output_dir,
+    return run_logged_seed_task(
+        task=task,
+        gpu_id=gpu_id,
+        failure_message="Seed-stability walkforward seed run failed",
+        simulation_root=task.output_dir.parent,
     )
-    env = _build_seed_env(gpu_id=gpu_id, simulation_root=task.output_dir.parent)
-    command = _build_seed_command(task.config_path)
-    with task.log_path.open("w", encoding="utf-8") as handle:
-        completed = subprocess.run(
-            command,
-            check=False,
-            cwd=_WORKSPACE_ROOT,
-            env=env,
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-        )
-    if completed.returncode != 0:
-        raise SimulationError(
-            "Seed-stability walkforward seed run failed",
-            context={
-                "seed": str(task.seed),
-                "log_path": str(task.log_path),
-                "returncode": str(completed.returncode),
-            },
-        )
-    logger.info(
-        "seed_stability.complete seed=%s gpu=%s output=%s",
-        task.seed,
-        gpu_id,
-        task.output_dir,
-    )
-    return SeedStudyResult(
-        seed=task.seed,
-        output_dir=task.output_dir,
-        log_path=task.log_path,
-    )
-
-
-def _build_seed_env(
-    *,
-    gpu_id: int | None,
-    simulation_root: Path,
-) -> dict[str, str]:
-    env = dict(os.environ)
-    env["SIMULATION_SOURCE"] = str(simulation_root)
-    if gpu_id is None:
-        return env
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    return env
-
-
-def _build_seed_command(config_path: Path) -> list[str]:
-    return [
-        sys.executable,
-        "-m",
-        "algo_trader.cli.main",
-        "simulation",
-        "--simulation-config",
-        str(config_path),
-    ]
 
 
 def _write_seed_stability_outputs(
@@ -563,16 +359,20 @@ def _build_seed_summary_frame(
 
 
 def _load_seed_summary(result: SeedStudyResult) -> pd.DataFrame:
-    path = walkforward_dir(result.output_dir) / "metrics" / "summary.csv"
-    try:
-        frame = pd.read_csv(path)
-    except Exception as exc:
-        raise SimulationError(
-            "Failed to read seed downstream metrics summary",
-            context={"seed": str(result.seed), "path": str(path)},
-        ) from exc
-    frame.insert(0, "seed", result.seed)
-    return frame
+    walkforward_path = (
+        result.output_dir / "walkforward" / "metrics" / "summary.csv"
+    )
+    direct_path = result.output_dir / "metrics" / "summary.csv"
+    path = (
+        walkforward_path
+        if walkforward_path.exists()
+        else direct_path
+    )
+    return load_seed_summary(
+        result=result,
+        path=path,
+        message="Failed to read seed downstream metrics summary",
+    )
 
 
 def _build_dispersion_frame(summary: pd.DataFrame) -> pd.DataFrame:

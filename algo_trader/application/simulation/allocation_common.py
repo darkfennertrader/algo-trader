@@ -10,6 +10,7 @@ VALID_ALLOCATION_FAMILIES = (
     "random",
     "de_risked",
     "herc",
+    "schur",
     "skfolio_risk_budgeting",
 )
 
@@ -19,7 +20,7 @@ VALID_PORTFOLIO_STYLES = (
     "factor_neutral_long_short",
 )
 
-VALID_HERC_DISTANCE_ESTIMATORS = (
+VALID_SKFOLIO_DISTANCE_ESTIMATORS = (
     "pearson",
     "mutual_information",
 )
@@ -58,9 +59,9 @@ def optional_float_value(raw: Any, *, location: str) -> float | None:
 
 
 __all__ = [
-    "VALID_HERC_DISTANCE_ESTIMATORS",
     "VALID_ALLOCATION_FAMILIES",
     "VALID_PORTFOLIO_STYLES",
+    "VALID_SKFOLIO_DISTANCE_ESTIMATORS",
     "VALID_SKFOLIO_RISK_MEASURES",
     "optional_float_value",
 ]

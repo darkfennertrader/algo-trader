@@ -7,6 +7,15 @@ import numpy as np
 import torch
 
 
+ExecutionMode = Literal[
+    "full",
+    "model_research",
+    "posterior_signal",
+    "walkforward",
+    "results_aggregation",
+]
+
+
 @dataclass(frozen=True)
 class DataPaths:
     tensor_path: str | None = None
@@ -21,6 +30,7 @@ class DataPaths:
 class DataConfig:
     simulation_output_path: str | None = None
     portfolio_output_path: str | None = None
+    posterior_output_path: str | None = None
     paths: DataPaths = field(default_factory=DataPaths)
     dataset_params: Mapping[str, Any] = field(default_factory=dict)
 
@@ -478,9 +488,7 @@ class SimulationFlags:
     smoke_test_enabled: bool = False
     smoke_test_debug: bool = False
     simulation_mode: Literal["dry_run", "stub", "full"] = "full"
-    execution_mode: Literal[
-        "full", "model_research", "walkforward", "results_aggregation"
-    ] = "full"
+    execution_mode: ExecutionMode = "full"
 
 
 @dataclass(frozen=True)

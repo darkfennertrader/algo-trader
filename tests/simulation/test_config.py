@@ -142,6 +142,16 @@ def test_build_flags_parses_execution_mode() -> None:
     assert flags.execution_mode == "walkforward"
 
 
+def test_build_flags_parses_posterior_signal_execution_mode() -> None:
+    build_flags = getattr(simulation_config, "_build_flags")
+    flags = build_flags(
+        {"execution": {"mode": "posterior_signal"}},
+        Path("simulation.yml"),
+    )
+
+    assert flags.execution_mode == "posterior_signal"
+
+
 def test_build_flags_normalizes_outer_evaluation_alias() -> None:
     build_flags = getattr(simulation_config, "_build_flags")
     flags = build_flags(
@@ -235,15 +245,36 @@ def test_build_data_config_parses_portfolio_output_path() -> None:
     config = build_data(
         {
             "data": {
-                "simulation_output_path": "validated_model",
+                "simulation_output_path": (
+                    "older experiments/v3/v3_l1_unified_5y_bugfixed"
+                ),
                 "portfolio_output_path": "portfolio/herc",
+                "posterior_output_path": "v4_l1_11y_basket_aware",
             }
         },
         Path("simulation.yml"),
     )
 
-    assert config.simulation_output_path == "validated_model"
+    assert (
+        config.simulation_output_path
+        == "older experiments/v3/v3_l1_unified_5y_bugfixed"
+    )
     assert config.portfolio_output_path == "portfolio/herc"
+    assert config.posterior_output_path == "v4_l1_11y_basket_aware"
+
+
+def test_build_data_config_rejects_invalid_simulation_output_path() -> None:
+    build_data = getattr(simulation_config, "_build_data_config")
+
+    with pytest.raises(ConfigError):
+        build_data(
+            {
+                "data": {
+                    "simulation_output_path": "../older experiments/v3/model",
+                }
+            },
+            Path("simulation.yml"),
+        )
 
 
 def test_build_data_config_rejects_invalid_portfolio_output_path() -> None:
@@ -255,6 +286,21 @@ def test_build_data_config_rejects_invalid_portfolio_output_path() -> None:
                 "data": {
                     "simulation_output_path": "validated_model",
                     "portfolio_output_path": "../portfolio/herc",
+                }
+            },
+            Path("simulation.yml"),
+        )
+
+
+def test_build_data_config_rejects_invalid_posterior_output_path() -> None:
+    build_data = getattr(simulation_config, "_build_data_config")
+
+    with pytest.raises(ConfigError):
+        build_data(
+            {
+                "data": {
+                    "simulation_output_path": "validated_model",
+                    "posterior_output_path": "../posterior_signal/model_a",
                 }
             },
             Path("simulation.yml"),
@@ -496,6 +542,50 @@ def test_load_config_rejects_invalid_herc_distance_estimator() -> None:
                     "primary": {
                         "family": "herc",
                         "distance_estimator": "kendall",
+                    }
+                }
+            },
+            Path("simulation.yml"),
+        )
+
+
+def test_load_config_parses_schur_primary() -> None:
+    build_allocation_config = getattr(
+        simulation_config, "_build_allocation_config"
+    )
+    config = build_allocation_config(
+        {
+            "allocation": {
+                "primary": {
+                    "family": "schur",
+                    "gamma": 0.5,
+                    "distance_estimator": "pearson",
+                    "transaction_costs": 0.0,
+                    "use_previous_weights": False,
+                },
+                "baselines": [{"family": "equal_weight"}],
+            }
+        },
+        Path("simulation.yml"),
+    )
+
+    assert config.primary.family == "schur"
+    assert config.primary.params["gamma"] == 0.5
+    assert config.primary.params["distance_estimator"] == "pearson"
+
+
+def test_load_config_rejects_invalid_schur_gamma() -> None:
+    build_allocation_config = getattr(
+        simulation_config, "_build_allocation_config"
+    )
+
+    with pytest.raises(ConfigError):
+        build_allocation_config(
+            {
+                "allocation": {
+                    "primary": {
+                        "family": "schur",
+                        "gamma": 1.5,
                     }
                 }
             },

@@ -17,6 +17,7 @@ from algo_trader.domain.simulation import (
     CVWindow,
     DataConfig,
     DiagnosticsConfig,
+    ExecutionMode,
     EvaluationSpec,
     GuardrailSpec,
     FanChartsConfig,
@@ -84,6 +85,7 @@ def config_to_input_dict(config: SimulationConfig) -> dict[str, object]:
         "data": {
             "simulation_output_path": config.data.simulation_output_path,
             "portfolio_output_path": config.data.portfolio_output_path,
+            "posterior_output_path": config.data.posterior_output_path,
             "dataset_params": dict(config.data.dataset_params),
         },
         "cv": {
@@ -315,7 +317,13 @@ def _build_flags(
 
 def _read_execution_mode(
     raw: Mapping[str, Any], config_path: Path
-) -> Literal["full", "model_research", "walkforward", "results_aggregation"]:
+) -> Literal[
+    "full",
+    "model_research",
+    "posterior_signal",
+    "walkforward",
+    "results_aggregation",
+]:
     section = raw.get("execution", {})
     if section is None:
         section = {}
@@ -361,11 +369,6 @@ def _read_smoke_test_flags(
 
 
 SimulationMode = Literal["dry_run", "stub", "full"]
-ExecutionMode = Literal[
-    "full", "model_research", "walkforward", "results_aggregation"
-]
-
-
 def _normalize_simulation_mode(value: object) -> SimulationMode:
     raw = str(value).strip().lower()
     if raw == "dry_run":
@@ -383,13 +386,15 @@ def _normalize_execution_mode(value: object) -> ExecutionMode:
         return "full"
     if raw == "model_research":
         return "model_research"
+    if raw == "posterior_signal":
+        return "posterior_signal"
     if raw in {"walkforward", "outer_evaluation"}:
         return "walkforward"
     if raw == "results_aggregation":
         return "results_aggregation"
     raise ConfigError(
         "execution.mode must be full, model_research, "
-        "walkforward, or results_aggregation"
+        "posterior_signal, walkforward, or results_aggregation"
     )
 
 
@@ -1436,29 +1441,11 @@ def _build_preprocess_spec(
     return PreprocessSpec(cleaning=cleaning, scaling=scaling)
 
 
-def _normalize_single_dir_output_path(
-    value: object, config_path: Path, field_name: str
-) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ConfigError(
-            f"data.{field_name} must be a string in {config_path}"
-        )
-    label = value.strip()
-    if not label:
-        raise ConfigError(
-            f"data.{field_name} must not be empty in {config_path}"
-        )
-    if Path(label).name != label or "/" in label or "\\" in label:
-        raise ConfigError(
-            f"data.{field_name} must be a single directory name in {config_path}"
-        )
-    return label
-
-
 def _normalize_relative_output_path(
-    value: object, config_path: Path, field_name: str
+    value: object,
+    config_path: Path,
+    field_name: str,
+    root_name: str = "SIMULATION_SOURCE",
 ) -> str | None:
     if value is None:
         return None
@@ -1478,7 +1465,7 @@ def _normalize_relative_output_path(
     path = PurePosixPath(label)
     if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
         raise ConfigError(
-            f"data.{field_name} must be a relative path under SIMULATION_SOURCE in {config_path}"
+            f"data.{field_name} must be a relative path under {root_name} in {config_path}"
         )
     return label
 
@@ -1508,7 +1495,7 @@ def _build_data_config(
         raise ConfigError(
             f"data.dataset_params.version_label is no longer supported in {config_path}"
         )
-    simulation_output_path = _normalize_single_dir_output_path(
+    simulation_output_path = _normalize_relative_output_path(
         section.get("simulation_output_path"),
         config_path,
         "simulation_output_path",
@@ -1518,11 +1505,18 @@ def _build_data_config(
         config_path,
         "portfolio_output_path",
     )
+    posterior_output_path = _normalize_relative_output_path(
+        section.get("posterior_output_path"),
+        config_path,
+        "posterior_output_path",
+        root_name="POSTERIOR_SIGNAL_SOURCE",
+    )
     try:
         return DataConfig(
             dataset_params=dataset_params,
             simulation_output_path=simulation_output_path,
             portfolio_output_path=portfolio_output_path,
+            posterior_output_path=posterior_output_path,
         )
     except TypeError as exc:
         raise ConfigError(

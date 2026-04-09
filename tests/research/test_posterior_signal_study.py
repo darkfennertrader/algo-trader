@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+
+from algo_trader.application.research.posterior_signal import (
+    PosteriorSignalObservation,
+    run_posterior_signal_study,
+    write_posterior_signal_outputs,
+    write_posterior_signal_plots,
+)
+
+
+def test_posterior_signal_study_reports_positive_signal(
+    tmp_path: Path,
+) -> None:
+    result = run_posterior_signal_study(_observations())
+
+    summary = result.summary.iloc[0]
+
+    assert float(summary["mean_rank_ic"]) > 0.0
+    assert float(summary["mean_top_k_spread"]) > 0.0
+    assert float(summary["mean_top_k_hit_rate"]) > 0.5
+
+    write_posterior_signal_outputs(result=result, output_dir=tmp_path)
+    write_posterior_signal_plots(result=result, output_dir=tmp_path)
+
+    assert (tmp_path / "signal_by_week.csv").exists()
+    assert (tmp_path / "sign_calibration.csv").exists()
+    assert (tmp_path / "signal_summary.csv").exists()
+    assert (tmp_path / "manifest.json").exists()
+    assert (tmp_path / "plots" / "rank_ic_over_time.png").exists()
+    assert (tmp_path / "plots" / "top_k_spread_over_time.png").exists()
+    assert (tmp_path / "plots" / "sign_calibration.png").exists()
+
+
+def _observations() -> tuple[PosteriorSignalObservation, ...]:
+    return (
+        PosteriorSignalObservation(
+            outer_k=40,
+            timestamp="2025-07-04",
+            asset_names=("A", "B", "C", "D"),
+            posterior_mean=np.array([0.10, 0.06, 0.02, -0.03]),
+            posterior_std=np.array([0.04, 0.05, 0.05, 0.06]),
+            p_positive=np.array([0.90, 0.75, 0.60, 0.20]),
+            realized_returns=np.array([0.08, 0.05, 0.01, -0.02]),
+        ),
+        PosteriorSignalObservation(
+            outer_k=41,
+            timestamp="2025-07-11",
+            asset_names=("A", "B", "C", "D"),
+            posterior_mean=np.array([0.07, 0.04, 0.01, -0.01]),
+            posterior_std=np.array([0.04, 0.05, 0.05, 0.05]),
+            p_positive=np.array([0.85, 0.70, 0.55, 0.35]),
+            realized_returns=np.array([0.06, 0.03, 0.00, -0.01]),
+        ),
+    )

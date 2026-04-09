@@ -158,6 +158,27 @@ def test_allocate_herc_uses_predictive_samples() -> None:
     assert torch.isclose(weights.sum(), torch.tensor(1.0), atol=1e-5)
 
 
+def test_allocate_schur_uses_predictive_samples() -> None:
+    samples = torch.randn((24, 3), dtype=torch.float32) * 0.01
+
+    result = hooks._allocate_weights(  # pylint: disable=protected-access
+        request=_request(
+            alloc_spec={
+                "family": "schur",
+                "gamma": 0.5,
+                "distance_estimator": "pearson",
+            },
+            samples=samples,
+            asset_names=("A", "B", "C"),
+        )
+    )
+
+    weights = result.weights
+    assert weights.shape == (3,)
+    assert torch.all(weights >= 0.0)
+    assert torch.isclose(weights.sum(), torch.tensor(1.0), atol=1e-5)
+
+
 def test_allocate_risk_budgeting_rejects_non_long_only() -> None:
     with pytest.raises(ConfigError):
         hooks._allocate_weights(  # pylint: disable=protected-access

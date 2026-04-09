@@ -57,6 +57,30 @@ def allocate_herc(
     return _model_weights(model, runtime_config=runtime_config)
 
 
+def allocate_schur(
+    *,
+    prediction: PredictionPacket,
+    runtime_config: SkfolioRuntimeConfig,
+    gamma: float,
+    distance_estimator: str,
+) -> torch.Tensor:
+    scenarios = _extract_predictive_scenarios(prediction)
+    frame = _build_scenario_frame(scenarios, prediction.asset_names)
+    model = _build_schur_model(
+        runtime_config=runtime_config,
+        gamma=gamma,
+        distance_estimator=distance_estimator,
+    )
+    try:
+        model.fit(frame)
+    except Exception as exc:  # pragma: no cover - library failure path
+        raise SimulationError(
+            "skfolio Schur allocation failed",
+            context={"error": str(exc)},
+        ) from exc
+    return _model_weights(model, runtime_config=runtime_config)
+
+
 def allocate_risk_budgeting(
     *,
     prediction: PredictionPacket,
@@ -141,6 +165,28 @@ def _build_risk_budgeting_model(
             risk_measure_enum=skfolio_module.RiskMeasure,
             extra_risk_measure_enum=skfolio_module.ExtraRiskMeasure,
         ),
+        min_weights=_min_weight(runtime_config),
+        max_weights=_max_weight(runtime_config),
+        transaction_costs=runtime_config.transaction_costs,
+        previous_weights=_serialize_previous_weights(
+            runtime_config=runtime_config,
+        ),
+        raise_on_failure=True,
+    )
+
+
+def _build_schur_model(
+    *,
+    runtime_config: SkfolioRuntimeConfig,
+    gamma: float,
+    distance_estimator: str,
+) -> _FittedSkfolioModel:
+    optimization_module = importlib.import_module("skfolio.optimization")
+    estimator_cls = optimization_module.SchurComplementary
+    return estimator_cls(
+        gamma=gamma,
+        keep_monotonic=True,
+        distance_estimator=_build_distance_estimator(distance_estimator),
         min_weights=_min_weight(runtime_config),
         max_weights=_max_weight(runtime_config),
         transaction_costs=runtime_config.transaction_costs,
@@ -236,4 +282,5 @@ __all__ = [
     "TensorTarget",
     "allocate_herc",
     "allocate_risk_budgeting",
+    "allocate_schur",
 ]

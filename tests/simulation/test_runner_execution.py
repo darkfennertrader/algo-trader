@@ -162,3 +162,91 @@ def test_run_delegates_to_seed_stability_study(
 
     assert result["execution_mode"] == "walkforward"
     assert result["seed_stability"]["seed_count"] == 5
+
+
+def test_run_delegates_to_posterior_signal_analysis(
+    monkeypatch,
+) -> None:
+    config = cast(
+        Any,
+        SimpleNamespace(
+                flags=SimpleNamespace(
+                    execution_mode="posterior_signal",
+                    simulation_mode="full",
+                    use_gpu=False,
+                ),
+            walkforward=SimpleNamespace(
+                num_seeds=1,
+            ),
+            data=SimpleNamespace(
+                posterior_output_path="model_a",
+            ),
+        ),
+    )
+
+    monkeypatch.setattr(runner, "load_config", lambda *_: config)
+    monkeypatch.setattr(
+        runner, "apply_smoke_test_overrides", lambda loaded: loaded
+    )
+    monkeypatch.setattr(
+        runner, "validate_resume_request", lambda **_: None
+    )
+    monkeypatch.setattr(
+        runner,
+        "cleanup_before_simulation_run",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "cleanup_after_simulation_run",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_posterior_signal_analysis",
+        lambda **_: {"posterior_signal": {"status": "ok"}},
+    )
+
+    result = runner.run(config_path=None, resume=False)
+
+    assert result["execution_mode"] == "posterior_signal"
+    assert result["posterior_signal"]["status"] == "ok"
+
+
+def test_run_delegates_to_posterior_signal_seed_stability(
+    monkeypatch,
+) -> None:
+    config = cast(
+        Any,
+        SimpleNamespace(
+                flags=SimpleNamespace(
+                    execution_mode="posterior_signal",
+                    simulation_mode="full",
+                    use_gpu=False,
+                ),
+            walkforward=SimpleNamespace(
+                num_seeds=5,
+            ),
+            data=SimpleNamespace(
+                posterior_output_path="model_a",
+            ),
+        ),
+    )
+
+    monkeypatch.setattr(runner, "load_config", lambda *_: config)
+    monkeypatch.setattr(
+        runner, "apply_smoke_test_overrides", lambda loaded: loaded
+    )
+    monkeypatch.setattr(
+        runner, "validate_resume_request", lambda **_: None
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_posterior_signal_seed_stability",
+        lambda **_: {"posterior_signal_seed_stability": {"seed_count": 5}},
+    )
+
+    result = runner.run(config_path=None, resume=False)
+
+    assert result["execution_mode"] == "posterior_signal"
+    assert result["posterior_signal_seed_stability"]["seed_count"] == 5

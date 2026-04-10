@@ -7,14 +7,19 @@ import torch
 from algo_trader.application.simulation.model_selection import (
     _complexity_scores_post_tune,
     FinalSelectionInputs,
+    PostTuneSelectionContext,
+    _select_es_survivors,
     _select_final_candidate,
+    select_best_candidate_post_tune,
     _variogram_weekly,
 )
+from algo_trader.application.simulation.artifacts import SimulationArtifacts
 from algo_trader.domain.simulation import (
     CandidateSpec,
     ModelSelectionCalibration,
     ModelSelectionComplexity,
     ModelSelectionConfig,
+    ModelSelectionESBand,
 )
 
 
@@ -86,6 +91,7 @@ def test_select_final_candidate_prefers_more_calibrated_survivor() -> None:
             },
             crps_metrics={1: 1.0},
             ql_metrics={1: 1.0},
+            signal_metrics={1: {}},
             basket_diagnostics={1: {}},
             complexity={0: 0.1, 1: 0.2},
         ),
@@ -122,6 +128,7 @@ def test_select_final_candidate_uses_basket_aware_mode() -> None:
             },
             crps_metrics={0: 1.0, 1: 1.0},
             ql_metrics={0: 1.0, 1: 1.0},
+            signal_metrics={0: {}, 1: {}},
             basket_diagnostics={
                 0: {
                     "us_index": {
@@ -189,6 +196,231 @@ def test_select_final_candidate_uses_basket_aware_mode() -> None:
     assert selection["survivors_es"] == [0, 1]
     assert selection["survivors_secondary"] == [0]
     assert selection["basket_scores"][0] < selection["basket_scores"][1]
+
+
+def test_select_final_candidate_uses_signal_aware_mode() -> None:
+    selection = _select_final_candidate(
+        inputs=FinalSelectionInputs(
+            es_metrics={
+                0: {"es_model": 1.0, "se_es": 0.1},
+                1: {"es_model": 1.0, "se_es": 0.1},
+            },
+            calibration_metrics={
+                0: {
+                    "calibration_score": 0.10,
+                    "mean_abs_coverage_error": 0.08,
+                    "max_abs_coverage_error": 0.12,
+                    "pit_uniform_rmse": 0.03,
+                },
+                1: {
+                    "calibration_score": 0.11,
+                    "mean_abs_coverage_error": 0.08,
+                    "max_abs_coverage_error": 0.12,
+                    "pit_uniform_rmse": 0.03,
+                },
+            },
+            crps_metrics={0: 1.0, 1: 1.0},
+            ql_metrics={0: 1.0, 1: 1.0},
+            signal_metrics={
+                0: {
+                    "mean_rank_ic": 0.05,
+                    "positive_rank_ic_fraction": 0.60,
+                    "mean_linear_ic": 0.04,
+                    "mean_top_k_spread": 0.01,
+                    "mean_top_k_hit_rate": 0.55,
+                    "mean_brier_score": 0.18,
+                    "calibration_rmse": 0.12,
+                },
+                1: {
+                    "mean_rank_ic": 0.01,
+                    "positive_rank_ic_fraction": 0.52,
+                    "mean_linear_ic": 0.01,
+                    "mean_top_k_spread": 0.002,
+                    "mean_top_k_hit_rate": 0.49,
+                    "mean_brier_score": 0.24,
+                    "calibration_rmse": 0.18,
+                },
+            },
+            basket_diagnostics={0: {}, 1: {}},
+            complexity={0: 0.2, 1: 0.1},
+        ),
+        model_selection=ModelSelectionConfig(
+            mode="signal_aware",
+            calibration=ModelSelectionCalibration(top_k=2),
+        ),
+    )
+
+    assert selection["best_candidate_id"] == 0
+    assert selection["survivors_calibration"] == [0, 1]
+    assert selection["survivors_es"] == [0, 1]
+    assert selection["survivors_secondary"] == [0]
+    assert selection["signal_scores"][0] < selection["signal_scores"][1]
+
+
+def test_select_es_survivors_enforces_min_keep() -> None:
+    survivors = _select_es_survivors(
+        {
+            0: {"es_model": 1.0, "se_es": 0.1},
+            1: {"es_model": 1.5, "se_es": 0.1},
+            2: {"es_model": 1.7, "se_es": 0.1},
+        },
+        ModelSelectionConfig(es_band=ModelSelectionESBand(min_keep=3)),
+        candidate_ids=[0, 1, 2],
+    )
+
+    assert survivors == [0, 1, 2]
+
+
+def test_select_best_candidate_post_tune_persists_metrics_for_all_candidates(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    secondary_candidate_ids: list[int] = []
+    signal_candidate_ids: list[int] = []
+
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._resolve_device",
+        lambda _use_gpu: torch.device("cpu"),
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._compute_es_metrics",
+        lambda **_kwargs: {
+            0: {"es_model": 1.0, "se_es": 0.1},
+            1: {"es_model": 1.1, "se_es": 0.1},
+            2: {"es_model": 2.0, "se_es": 0.1},
+        },
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._compute_calibration_metrics",
+        lambda **_kwargs: {
+            0: {
+                "calibration_score": 0.10,
+                "mean_abs_coverage_error": 0.08,
+                "max_abs_coverage_error": 0.12,
+                "pit_uniform_rmse": 0.03,
+            },
+            1: {
+                "calibration_score": 0.11,
+                "mean_abs_coverage_error": 0.08,
+                "max_abs_coverage_error": 0.12,
+                "pit_uniform_rmse": 0.03,
+            },
+            2: {
+                "calibration_score": 0.12,
+                "mean_abs_coverage_error": 0.08,
+                "max_abs_coverage_error": 0.12,
+                "pit_uniform_rmse": 0.03,
+            },
+        },
+    )
+
+    def _fake_secondary_metrics(**kwargs):
+        secondary_candidate_ids.extend(kwargs["candidate_ids"])
+        return ({0: 1.0, 1: 1.1, 2: 1.2}, {0: 1.0, 1: 1.1, 2: 1.2})
+
+    def _fake_signal_metrics(**kwargs):
+        signal_candidate_ids.extend(kwargs["candidate_ids"])
+        return {
+            0: {
+                "mean_rank_ic": 0.05,
+                "positive_rank_ic_fraction": 0.60,
+                "mean_linear_ic": 0.04,
+                "mean_top_k_spread": 0.01,
+                "mean_top_k_hit_rate": 0.55,
+                "mean_brier_score": 0.18,
+                "calibration_rmse": 0.12,
+            },
+            1: {
+                "mean_rank_ic": 0.03,
+                "positive_rank_ic_fraction": 0.55,
+                "mean_linear_ic": 0.02,
+                "mean_top_k_spread": 0.005,
+                "mean_top_k_hit_rate": 0.52,
+                "mean_brier_score": 0.20,
+                "calibration_rmse": 0.14,
+            },
+            2: {
+                "mean_rank_ic": 0.01,
+                "positive_rank_ic_fraction": 0.51,
+                "mean_linear_ic": 0.01,
+                "mean_top_k_spread": 0.001,
+                "mean_top_k_hit_rate": 0.49,
+                "mean_brier_score": 0.24,
+                "calibration_rmse": 0.18,
+            },
+        }
+
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._compute_secondary_metrics",
+        _fake_secondary_metrics,
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._compute_signal_metrics",
+        _fake_signal_metrics,
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._build_block_metric_context",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._compute_diagnostic_scores",
+        lambda **_kwargs: (
+            {0: {}, 1: {}, 2: {}},
+            {0: {}, 1: {}, 2: {}},
+            {0: {}, 1: {}, 2: {}},
+        ),
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._complexity_scores_post_tune",
+        lambda **_kwargs: {0: 0.2, 1: 0.1, 2: 0.3},
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._with_best_candidate_block_scores",
+        lambda **kwargs: kwargs["selection"],
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._with_best_candidate_dependence_scores",
+        lambda **kwargs: kwargs["selection"],
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._with_best_candidate_basket_diagnostics",
+        lambda **kwargs: kwargs["selection"],
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._write_postprocess_block_scores_report",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._write_postprocess_dependence_scores_report",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._write_postprocess_basket_diagnostics_report",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "algo_trader.application.simulation.model_selection._write_postprocess_residual_dependence_report",
+        lambda **_kwargs: None,
+    )
+
+    result = select_best_candidate_post_tune(
+        PostTuneSelectionContext(
+            artifacts=SimulationArtifacts(tmp_path),
+            outer_k=40,
+            candidates=(
+                CandidateSpec(candidate_id=0, params={}),
+                CandidateSpec(candidate_id=1, params={}),
+                CandidateSpec(candidate_id=2, params={}),
+            ),
+            model_selection=ModelSelectionConfig(mode="signal_aware"),
+            score_spec={},
+            use_gpu=False,
+        )
+    )
+
+    assert secondary_candidate_ids == [0, 1, 2]
+    assert signal_candidate_ids == [0, 1, 2]
+    assert result.metrics["2"]["mean_rank_ic"] == 0.01
 
 
 def test_variogram_weekly_matches_manual_two_asset_case() -> None:

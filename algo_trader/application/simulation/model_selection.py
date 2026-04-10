@@ -10,6 +10,17 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import torch
 
+from algo_trader.application.signal_metrics import (
+    brier_score,
+    calibration_rmse,
+    hit_rate,
+    mean_spread,
+    pearson_correlation,
+    rest_indices,
+    spearman_correlation,
+    top_indices,
+    top_k_count,
+)
 from algo_trader.domain import (
     BLOCK_ORDER,
     COMMODITIES_BLOCK,
@@ -135,6 +146,7 @@ class FinalSelectionInputs:
     calibration_metrics: Mapping[int, Mapping[str, float]]
     crps_metrics: Mapping[int, float]
     ql_metrics: Mapping[int, float]
+    signal_metrics: Mapping[int, Mapping[str, float]]
     basket_diagnostics: Mapping[int, Mapping[str, Mapping[str, float]]]
     complexity: Mapping[int, float]
 
@@ -145,6 +157,13 @@ class CoverageErrorSummary:
     abs_error_by_level: Mapping[float, float]
     mean_error: float
     max_error: float
+
+
+@dataclass
+class SignalAccumulators:
+    metric_sum: dict[str, torch.Tensor]
+    metric_count: dict[str, torch.Tensor]
+    calibration_values: dict[int, list[tuple[np.ndarray, np.ndarray]]]
 
 
 def reselect_best_candidate(
@@ -166,13 +185,7 @@ def select_best_candidate_post_tune(
     context: PostTuneSelectionContext,
 ) -> PostTuneSelectionResult:
     device = _resolve_device(context.use_gpu)
-    block_context = _build_block_metric_context(
-        base_dir=context.artifacts.base_dir,
-        outer_k=context.outer_k,
-        model_selection=context.model_selection,
-        score_spec=context.score_spec,
-        device=device,
-    )
+    candidate_ids = [int(candidate.candidate_id) for candidate in context.candidates]
     es_metrics = _compute_es_metrics(
         base_dir=context.artifacts.base_dir,
         outer_k=context.outer_k,
@@ -187,26 +200,31 @@ def select_best_candidate_post_tune(
         model_selection=context.model_selection,
         device=device,
     )
-    calibration_survivors = _select_calibration_survivors(
-        calibration_metrics, context.model_selection
-    )
-    survivors = _select_es_survivors(
-        es_metrics,
-        context.model_selection,
-        candidate_ids=calibration_survivors,
-    )
     crps_metrics, ql_metrics = _compute_secondary_metrics(
         base_dir=context.artifacts.base_dir,
         outer_k=context.outer_k,
-        candidate_ids=survivors,
+        candidate_ids=candidate_ids,
+        model_selection=context.model_selection,
+        device=device,
+    )
+    signal_metrics = _compute_signal_metrics(
+        base_dir=context.artifacts.base_dir,
+        outer_k=context.outer_k,
+        candidate_ids=candidate_ids,
         model_selection=context.model_selection,
         device=device,
     )
     block_scores, dependence_scores, basket_diagnostics = _compute_diagnostic_scores(
         base_dir=context.artifacts.base_dir,
         outer_k=context.outer_k,
-        context=block_context,
-        candidate_ids=[int(candidate.candidate_id) for candidate in context.candidates],
+        context=_build_block_metric_context(
+            base_dir=context.artifacts.base_dir,
+            outer_k=context.outer_k,
+            model_selection=context.model_selection,
+            score_spec=context.score_spec,
+            device=device,
+        ),
+        candidate_ids=candidate_ids,
         inputs=BlockScoreInputs(
             es_metrics=es_metrics,
             calibration_metrics=calibration_metrics,
@@ -226,6 +244,7 @@ def select_best_candidate_post_tune(
             calibration_metrics=calibration_metrics,
             crps_metrics=crps_metrics,
             ql_metrics=ql_metrics,
+            signal_metrics=signal_metrics,
             basket_diagnostics=basket_diagnostics,
             complexity=complexity,
         ),
@@ -236,6 +255,7 @@ def select_best_candidate_post_tune(
         calibration_metrics=calibration_metrics,
         crps_metrics=crps_metrics,
         ql_metrics=ql_metrics,
+        signal_metrics=signal_metrics,
         block_scores=block_scores,
         dependence_scores=dependence_scores,
         basket_diagnostics=basket_diagnostics,
@@ -298,6 +318,7 @@ def select_best_candidate_global(
         calibration_metrics,
         crps_metrics,
         ql_metrics,
+        signal_metrics,
         block_scores,
         dependence_scores,
         basket_diagnostics,
@@ -309,6 +330,7 @@ def select_best_candidate_global(
             calibration_metrics=calibration_metrics,
             crps_metrics=crps_metrics,
             ql_metrics=ql_metrics,
+            signal_metrics=signal_metrics,
             basket_diagnostics=basket_diagnostics,
             complexity=complexity,
         ),
@@ -319,6 +341,7 @@ def select_best_candidate_global(
         calibration_metrics=calibration_metrics,
         crps_metrics=crps_metrics,
         ql_metrics=ql_metrics,
+        signal_metrics=signal_metrics,
         block_scores=block_scores,
         dependence_scores=dependence_scores,
         basket_diagnostics=basket_diagnostics,
@@ -439,6 +462,29 @@ def _compute_calibration_metrics(
                 candidate_id=int(candidate.candidate_id),
                 model_selection=model_selection,
                 device=device,
+            )
+    return metrics
+
+
+def _compute_signal_metrics(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    candidate_ids: Sequence[int],
+    model_selection: ModelSelectionConfig,
+    device: torch.device,
+) -> Mapping[int, Mapping[str, float]]:
+    metrics: dict[int, Mapping[str, float]] = {}
+    batch_size = max(1, int(model_selection.batching.candidates))
+    batch_splits = max(1, int(model_selection.batching.splits))
+    for batch in _iter_id_batches(candidate_ids, batch_size):
+        for candidate_id in batch:
+            metrics[int(candidate_id)] = _evaluate_signal_for_candidate(
+                base_dir=base_dir,
+                outer_k=outer_k,
+                candidate_id=int(candidate_id),
+                device=device,
+                batch_splits=batch_splits,
             )
     return metrics
 
@@ -1211,6 +1257,27 @@ def _evaluate_calibration_for_candidate(
     )
 
 
+def _evaluate_signal_for_candidate(
+    *,
+    base_dir: Path,
+    outer_k: int,
+    candidate_id: int,
+    device: torch.device,
+    batch_splits: int,
+) -> Mapping[str, float]:
+    payloads = _load_candidate_payloads(
+        base_dir=base_dir,
+        outer_k=outer_k,
+        candidate_id=candidate_id,
+    )
+    group_metrics = _aggregate_signal_groups(
+        payloads=payloads,
+        device=device,
+        batch_splits=batch_splits,
+    )
+    return _summarize_signal_metrics(group_metrics)
+
+
 def _load_candidate_payloads(
     *,
     base_dir: Path,
@@ -1363,6 +1430,201 @@ def _aggregate_calibration_groups(
     }
     pit_group = _safe_divide(accumulators.pit_sum, accumulators.pit_count)
     return coverage_group, pit_group
+
+
+def _aggregate_signal_groups(
+    *,
+    payloads: Sequence[Mapping[str, Any]],
+    device: torch.device,
+    batch_splits: int,
+) -> Mapping[str, torch.Tensor]:
+    accumulators, group_count = _init_signal_accumulators(
+        payloads=payloads,
+        device=device,
+    )
+    for batch in _iter_payload_batches(payloads, batch_splits):
+        for payload in batch:
+            _update_signal_accumulators(
+                accumulators=accumulators,
+                payload=payload,
+                device=device,
+                group_count=group_count,
+            )
+    result = {
+        metric: _safe_divide(
+            accumulators.metric_sum[metric],
+            accumulators.metric_count[metric],
+        )
+        for metric in accumulators.metric_sum
+    }
+    result["calibration_rmse"] = _signal_calibration_by_group(
+        accumulators.calibration_values,
+        device=device,
+        group_count=group_count,
+        dtype=_infer_payload_dtype(payloads),
+    )
+    return result
+
+
+def _init_signal_accumulators(
+    *,
+    payloads: Sequence[Mapping[str, Any]],
+    device: torch.device,
+) -> tuple[SignalAccumulators, int]:
+    group_count = _infer_group_count(payloads)
+    dtype = _infer_payload_dtype(payloads)
+    metric_names = (
+        "mean_rank_ic",
+        "positive_rank_ic_fraction",
+        "mean_linear_ic",
+        "mean_top_k_spread",
+        "mean_top_k_hit_rate",
+        "mean_confidence_top_k_spread",
+        "mean_brier_score",
+        "mean_posterior_std",
+    )
+    return (
+        SignalAccumulators(
+            metric_sum={
+                name: torch.zeros(group_count, device=device, dtype=dtype)
+                for name in metric_names
+            },
+            metric_count={
+                name: torch.zeros(group_count, device=device, dtype=dtype)
+                for name in metric_names
+            },
+            calibration_values={group_id: [] for group_id in range(group_count)},
+        ),
+        group_count,
+    )
+
+
+def _update_signal_accumulators(
+    *,
+    accumulators: SignalAccumulators,
+    payload: Mapping[str, Any],
+    device: torch.device,
+    group_count: int,
+) -> None:
+    z_true, z_samples, group_ids = _prepare_z_payload(payload, device)
+    weekly_metrics = _signal_weekly_metrics(
+        z_true=z_true.detach().cpu().numpy(),
+        z_samples=z_samples.detach().cpu().numpy(),
+    )
+    for metric, values in weekly_metrics.items():
+        group_values, present = _group_scalar_mean(
+            values=torch.as_tensor(values, device=device, dtype=z_true.dtype),
+            group_ids=group_ids,
+            group_count=group_count,
+        )
+        accumulators.metric_sum[metric][present] = (
+            accumulators.metric_sum[metric][present] + group_values[present]
+        )
+        accumulators.metric_count[metric][present] = (
+            accumulators.metric_count[metric][present] + 1
+        )
+    p_positive = (z_samples > 0.0).to(z_true.dtype).mean(dim=0).detach().cpu().numpy()
+    actual_positive = (z_true > 0.0).to(z_true.dtype).detach().cpu().numpy()
+    groups = group_ids.detach().cpu().numpy()
+    for group_id in range(group_count):
+        mask = groups == group_id
+        if not np.any(mask):
+            continue
+        accumulators.calibration_values[group_id].append(
+            (
+                p_positive[mask].reshape(-1),
+                actual_positive[mask].reshape(-1),
+            )
+        )
+
+
+def _signal_weekly_metrics(
+    *,
+    z_true: np.ndarray,
+    z_samples: np.ndarray,
+) -> Mapping[str, np.ndarray]:
+    posterior_mean = np.mean(z_samples, axis=0)
+    posterior_std = np.std(
+        z_samples,
+        axis=0,
+        ddof=1 if z_samples.shape[0] > 1 else 0,
+    )
+    p_positive = np.mean(z_samples > 0.0, axis=0)
+    top_k = top_k_count(z_true.shape[1])
+    rank_ic: list[float] = []
+    positive_rank_ic: list[float] = []
+    linear_ic: list[float] = []
+    top_k_spread: list[float] = []
+    top_k_hit_rate: list[float] = []
+    confidence_top_k_spread: list[float] = []
+    brier_values: list[float] = []
+    posterior_std_values: list[float] = []
+    for mean_row, std_row, p_row, realized_row in zip(
+        posterior_mean,
+        posterior_std,
+        p_positive,
+        z_true,
+        strict=True,
+    ):
+        top_idx = top_indices(mean_row, top_k)
+        confidence_idx = top_indices(p_row, top_k)
+        rest_idx = rest_indices(realized_row.shape[0], top_idx)
+        confidence_rest_idx = rest_indices(realized_row.shape[0], confidence_idx)
+        rank_ic_value = spearman_correlation(mean_row, realized_row)
+        rank_ic.append(rank_ic_value)
+        positive_rank_ic.append(float(rank_ic_value > 0.0))
+        linear_ic.append(pearson_correlation(mean_row, realized_row))
+        top_k_spread.append(mean_spread(realized_row, top_idx, rest_idx))
+        top_k_hit_rate.append(hit_rate(realized_row, top_idx))
+        confidence_top_k_spread.append(
+            mean_spread(realized_row, confidence_idx, confidence_rest_idx)
+        )
+        brier_values.append(brier_score(p_row, realized_row > 0.0))
+        posterior_std_values.append(float(np.mean(std_row)))
+    return {
+        "mean_rank_ic": np.asarray(rank_ic, dtype=float),
+        "positive_rank_ic_fraction": np.asarray(positive_rank_ic, dtype=float),
+        "mean_linear_ic": np.asarray(linear_ic, dtype=float),
+        "mean_top_k_spread": np.asarray(top_k_spread, dtype=float),
+        "mean_top_k_hit_rate": np.asarray(top_k_hit_rate, dtype=float),
+        "mean_confidence_top_k_spread": np.asarray(
+            confidence_top_k_spread,
+            dtype=float,
+        ),
+        "mean_brier_score": np.asarray(brier_values, dtype=float),
+        "mean_posterior_std": np.asarray(posterior_std_values, dtype=float),
+    }
+
+
+def _signal_calibration_by_group(
+    calibration_values: Mapping[int, list[tuple[np.ndarray, np.ndarray]]],
+    *,
+    device: torch.device,
+    group_count: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    values = torch.full(
+        (group_count,),
+        float("nan"),
+        device=device,
+        dtype=dtype,
+    )
+    for group_id, pairs in calibration_values.items():
+        if not pairs:
+            continue
+        predicted = np.concatenate([pair[0] for pair in pairs])
+        actual = np.concatenate([pair[1] for pair in pairs])
+        values[group_id] = float(calibration_rmse(predicted, actual))
+    return values
+
+
+def _summarize_signal_metrics(
+    signal_group: Mapping[str, torch.Tensor],
+) -> Mapping[str, float]:
+    return {
+        metric: _median_over_defined(values)
+        for metric, values in signal_group.items()
+    }
 
 
 def _prepare_u_payload(
@@ -1795,10 +2057,10 @@ def _select_es_survivors(
     )
     survivors = [
         candidate_id
-        for candidate_id, values in filtered
+        for candidate_id, values in ordered
         if values["es_model"] <= threshold
     ]
-    if not survivors:
+    if len(survivors) < model_selection.es_band.min_keep:
         survivors = [
             candidate_id
             for candidate_id, _ in ordered[: model_selection.es_band.min_keep]
@@ -1826,6 +2088,11 @@ def _select_final_candidate(
         candidate_ids=calibration_survivors,
     )
     secondary = _secondary_scores(survivors, inputs.crps_metrics, inputs.ql_metrics)
+    signal_scores = _signal_scores(
+        survivors=survivors,
+        signal_metrics=inputs.signal_metrics,
+        model_selection=model_selection,
+    )
     basket_scores = _basket_scores(
         survivors=survivors,
         basket_diagnostics=inputs.basket_diagnostics,
@@ -1834,6 +2101,7 @@ def _select_final_candidate(
     survivors2, adjusted_scores = _final_survivors(
         survivors=survivors,
         secondary=secondary,
+        signal_scores=signal_scores,
         basket_scores=basket_scores,
         model_selection=model_selection,
     )
@@ -1854,6 +2122,8 @@ def _select_final_candidate(
     }
     if basket_scores:
         selection["basket_scores"] = basket_scores
+    if signal_scores:
+        selection["signal_scores"] = signal_scores
     if adjusted_scores:
         selection["adjusted_scores"] = adjusted_scores
     return selection
@@ -2105,6 +2375,7 @@ def _final_survivors(
     *,
     survivors: Sequence[int],
     secondary: Mapping[int, int],
+    signal_scores: Mapping[int, int],
     basket_scores: Mapping[int, float],
     model_selection: ModelSelectionConfig,
 ) -> tuple[list[int], Mapping[int, int]]:
@@ -2115,6 +2386,19 @@ def _final_survivors(
             survivors=survivors,
             secondary=secondary,
             basket_scores=basket_scores,
+        )
+        min_score = min(adjusted.values())
+        survivors2 = [
+            candidate_id
+            for candidate_id, score in adjusted.items()
+            if score == min_score
+        ]
+        return survivors2, adjusted
+    if model_selection.mode == "signal_aware":
+        adjusted = _adjusted_scores(
+            survivors=survivors,
+            secondary=secondary,
+            basket_scores=signal_scores,
         )
         min_score = min(adjusted.values())
         survivors2 = [
@@ -2163,6 +2447,76 @@ def _basket_scores(
             model_selection=model_selection,
         )
     return scores
+
+
+def _signal_scores(
+    *,
+    survivors: Sequence[int],
+    signal_metrics: Mapping[int, Mapping[str, float]],
+    model_selection: ModelSelectionConfig,
+) -> Mapping[int, int]:
+    if model_selection.mode != "signal_aware":
+        return {}
+    required = (
+        "mean_rank_ic",
+        "positive_rank_ic_fraction",
+        "mean_linear_ic",
+        "mean_top_k_spread",
+        "mean_top_k_hit_rate",
+        "mean_brier_score",
+        "calibration_rmse",
+    )
+    descending_ranks = (
+        "mean_rank_ic",
+        "positive_rank_ic_fraction",
+        "mean_linear_ic",
+        "mean_top_k_spread",
+        "mean_top_k_hit_rate",
+    )
+    signal_ranks = {
+        key: _rank_values(
+            {
+                candidate_id: _signal_metric_value(
+                    signal_metrics,
+                    candidate_id,
+                    key,
+                    descending=key in descending_ranks,
+                )
+                for candidate_id in survivors
+            },
+            survivors,
+        )
+        for key in required
+    }
+    return {
+        candidate_id: sum(
+            metric_ranks[candidate_id]
+            for metric_ranks in signal_ranks.values()
+        )
+        for candidate_id in survivors
+    }
+
+
+def _signal_metric_value(
+    signal_metrics: Mapping[int, Mapping[str, float]],
+    candidate_id: int,
+    key: str,
+    *,
+    descending: bool,
+) -> float:
+    metrics = signal_metrics.get(candidate_id)
+    if metrics is None:
+        raise SimulationError(
+            "Signal metrics missing for candidate selection",
+            context={"candidate_id": str(candidate_id)},
+        )
+    value = float(metrics.get(key, float("nan")))
+    if not np.isfinite(value):
+        raise SimulationError(
+            "Signal metric is missing or invalid",
+            context={"candidate_id": str(candidate_id), "metric": key},
+        )
+    return -value if descending else value
 
 
 def _basket_score_for_candidate(
@@ -2295,6 +2649,7 @@ def _build_metrics_payload(
     calibration_metrics: Mapping[int, Mapping[str, float]],
     crps_metrics: Mapping[int, float],
     ql_metrics: Mapping[int, float],
+    signal_metrics: Mapping[int, Mapping[str, float]],
     block_scores: Mapping[int, Mapping[str, Mapping[str, float]]],
     dependence_scores: Mapping[int, Mapping[str, Mapping[str, float]]],
     basket_diagnostics: Mapping[int, Mapping[str, Mapping[str, float]]],
@@ -2312,6 +2667,10 @@ def _build_metrics_payload(
             },
             "crps_model": float(crps_metrics.get(candidate_id, float("nan"))),
             "ql_model": float(ql_metrics.get(candidate_id, float("nan"))),
+            **{
+                key: float(val)
+                for key, val in signal_metrics.get(candidate_id, {}).items()
+            },
             "block_scores": _serialize_candidate_block_scores(
                 block_scores.get(candidate_id, {})
             ),
@@ -2387,6 +2746,7 @@ def _aggregate_global_metrics(
     Mapping[int, Mapping[str, float]],
     Mapping[int, float],
     Mapping[int, float],
+    Mapping[int, Mapping[str, float]],
     Mapping[int, Mapping[str, Mapping[str, float]]],
     Mapping[int, Mapping[str, Mapping[str, float]]],
     Mapping[int, Mapping[str, Mapping[str, float]]],
@@ -2397,6 +2757,7 @@ def _aggregate_global_metrics(
     calibration_metrics: dict[int, Mapping[str, float]] = {}
     crps_metrics: dict[int, float] = {}
     ql_metrics: dict[int, float] = {}
+    signal_metrics: dict[int, Mapping[str, float]] = {}
     block_score_metrics: dict[int, Mapping[str, Mapping[str, float]]] = {}
     dependence_score_metrics: dict[int, Mapping[str, Mapping[str, float]]] = {}
     basket_diagnostic_metrics: dict[int, Mapping[str, Mapping[str, float]]] = {}
@@ -2420,6 +2781,10 @@ def _aggregate_global_metrics(
         }
         crps_metrics[candidate_id] = _median_or_nan(crps_vals)
         ql_metrics[candidate_id] = _median_or_nan(ql_vals)
+        signal_metrics[candidate_id] = {
+            key: _median_or_nan(_collect_metric(metrics_list, candidate_id, key))
+            for key in _collect_signal_metric_keys(metrics_list)
+        }
         block_score_metrics[candidate_id] = _aggregate_block_scores_for_candidate(
             metrics_list=metrics_list,
             candidate_id=candidate_id,
@@ -2438,6 +2803,7 @@ def _aggregate_global_metrics(
         calibration_metrics,
         crps_metrics,
         ql_metrics,
+        signal_metrics,
         block_score_metrics,
         dependence_score_metrics,
         basket_diagnostic_metrics,
@@ -2468,6 +2834,31 @@ def _collect_calibration_metric_keys(
                     dynamic.add(str(key))
     ordered = sorted(fixed | dynamic)
     return tuple(ordered)
+
+
+def _collect_signal_metric_keys(
+    metrics_list: Sequence[Mapping[str, Mapping[str, Any]]],
+) -> tuple[str, ...]:
+    keys = {
+        "mean_rank_ic",
+        "positive_rank_ic_fraction",
+        "mean_linear_ic",
+        "mean_top_k_spread",
+        "mean_top_k_hit_rate",
+        "mean_confidence_top_k_spread",
+        "mean_brier_score",
+        "calibration_rmse",
+        "mean_posterior_std",
+    }
+    present: set[str] = set()
+    for metrics in metrics_list:
+        for entry in metrics.values():
+            if not isinstance(entry, Mapping):
+                continue
+            for key in keys:
+                if key in entry:
+                    present.add(key)
+    return tuple(sorted(present))
 
 
 def _aggregate_block_scores_for_candidate(

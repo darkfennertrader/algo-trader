@@ -10,6 +10,9 @@ from algo_trader.application.research.posterior_signal import (
     write_posterior_signal_outputs,
     write_posterior_signal_plots,
 )
+from algo_trader.application.research.posterior_signal.runner import (
+    resolve_source_study_dir,
+)
 
 
 def test_posterior_signal_study_reports_positive_signal(
@@ -33,6 +36,17 @@ def test_posterior_signal_study_reports_positive_signal(
     assert (tmp_path / "plots" / "rank_ic_over_time.png").exists()
     assert (tmp_path / "plots" / "top_k_spread_over_time.png").exists()
     assert (tmp_path / "plots" / "sign_calibration.png").exists()
+
+
+def test_resolve_source_study_dir_prefers_walkforward_layout(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "experiment"
+    walkforward_inputs = source_root / "walkforward" / "inputs"
+    walkforward_inputs.mkdir(parents=True)
+    (walkforward_inputs / "panel_tensor.pt").write_bytes(b"test")
+
+    assert resolve_source_study_dir(source_root) == source_root / "walkforward"
 
 
 def _observations() -> tuple[PosteriorSignalObservation, ...]:

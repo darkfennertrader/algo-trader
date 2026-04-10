@@ -132,6 +132,19 @@ def test_build_model_selection_parses_basket_aware_mode() -> None:
     assert selection.basket.pit_weight == 4.0
 
 
+def test_build_model_selection_parses_signal_aware_mode() -> None:
+    selection = simulation_config._build_model_selection_config(  # pylint: disable=protected-access
+        {
+            "model_selection": {
+                "mode": "signal_aware",
+            }
+        },
+        Path("simulation.yml"),
+    )
+
+    assert selection.mode == "signal_aware"
+
+
 def test_build_flags_parses_execution_mode() -> None:
     build_flags = getattr(simulation_config, "_build_flags")
     flags = build_flags(

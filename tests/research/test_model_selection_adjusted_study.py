@@ -115,6 +115,13 @@ def _candidate_payload(values: dict[str, float]) -> dict[str, object]:
         "pit_uniform_rmse": values["pit"],
         "crps_model": values["crps"],
         "ql_model": values["ql"],
+        "mean_rank_ic": 0.0,
+        "positive_rank_ic_fraction": 0.5,
+        "mean_linear_ic": 0.0,
+        "mean_top_k_spread": 0.0,
+        "mean_top_k_hit_rate": 0.5,
+        "mean_brier_score": 0.25,
+        "calibration_rmse": 0.1,
         "complexity": 0.01,
         "basket_diagnostics": {
             "us_index": _basket_payload(values["us_index"]),

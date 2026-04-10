@@ -947,14 +947,17 @@ def _build_svi_loss_config(
 
 def _build_model_selection_mode(
     section: Mapping[str, Any], config_path: Path
-) -> Literal["global_calibrated", "basket_aware"]:
+) -> Literal["global_calibrated", "basket_aware", "signal_aware"]:
     raw_mode = str(section.get("mode", "global_calibrated")).strip().lower()
-    if raw_mode not in {"global_calibrated", "basket_aware"}:
+    if raw_mode not in {"global_calibrated", "basket_aware", "signal_aware"}:
         raise ConfigError(
-            "model_selection.mode must be 'global_calibrated' or "
-            f"'basket_aware' in {config_path}"
+            "model_selection.mode must be 'global_calibrated', "
+            f"'basket_aware', or 'signal_aware' in {config_path}"
         )
-    return cast(Literal["global_calibrated", "basket_aware"], raw_mode)
+    return cast(
+        Literal["global_calibrated", "basket_aware", "signal_aware"],
+        raw_mode,
+    )
 
 
 def _build_fan_charts_config(

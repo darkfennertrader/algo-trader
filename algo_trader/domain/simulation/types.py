@@ -383,7 +383,9 @@ class DiagnosticsConfig:
 class ModelSelectionConfig:
     enable: bool = False
     phase_name: str = "post_tune_model_selection"
-    mode: Literal["global_calibrated", "basket_aware"] = "global_calibrated"
+    mode: Literal[
+        "global_calibrated", "basket_aware", "signal_aware"
+    ] = "global_calibrated"
     calibration: ModelSelectionCalibration = field(
         default_factory=ModelSelectionCalibration
     )

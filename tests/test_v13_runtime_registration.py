@@ -58,3 +58,30 @@ def test_v13_l1_runtime_guide_accepts_prediction_batch() -> None:
 
     pyro.clear_param_store()
     poutine.trace(guide).get_trace(predict_batch)
+
+
+def test_v13_l2_runtime_registry_builds_model_and_guide() -> None:
+    model = modeling.default_model_registry().get(
+        "basket_consistency_model_v13_l2_online_filtering"
+    )
+    guide = modeling.default_guide_registry().get(
+        "basket_consistency_guide_v13_l2_online_filtering"
+    )
+    train_batch = _runtime_batch_v13(with_targets=True)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(train_batch)
+    trace = poutine.trace(model).get_trace(train_batch)
+
+    assert "basket_consistency_level_obs" in trace.nodes
+    assert "basket_consistency_spread_obs" in trace.nodes
+
+
+def test_v13_l2_runtime_guide_accepts_prediction_batch() -> None:
+    guide = modeling.default_guide_registry().get(
+        "basket_consistency_guide_v13_l2_online_filtering"
+    )
+    predict_batch = _runtime_batch_v13(with_targets=False)
+
+    pyro.clear_param_store()
+    poutine.trace(guide).get_trace(predict_batch)

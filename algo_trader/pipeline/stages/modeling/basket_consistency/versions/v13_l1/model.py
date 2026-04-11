@@ -50,8 +50,10 @@ from .guide import BasketConsistencyGuideV13L1OnlineFiltering
 from .shared import (
     BasketConsistencyConfig,
     BasketConsistencyCoordinates,
+    BasketObservationGroup,
     BasketConsistencyPosteriorMeans,
     basket_scale_from_covariance,
+    build_basket_observation_groups,
     build_basket_consistency_config,
     build_basket_consistency_coordinates,
     build_basket_consistency_transform,
@@ -91,6 +93,14 @@ class _NamedTimeSite:
     y_obs: torch.Tensor | None
     time_mask: torch.BoolTensor | None
     obs_scale: float | None
+
+
+@dataclass(frozen=True)
+class _GroupedBasketInputs:
+    basket_df: float
+    basket_obs: torch.Tensor
+    basket_mean: torch.Tensor
+    basket_scale: torch.Tensor
 
 
 @dataclass
@@ -335,34 +345,73 @@ def _sample_basket_observations(
         basket_scale=inputs.basket_params.basket_scale,
         eps=inputs.overlay.eps,
     )
-    basket_dist = dist.StudentT(
-        df=inputs.overlay.df,
-        loc=whitened_mean,
-        scale=basket_scale,
-    ).to_event(1)
-    _sample_named_time_site(
-        time_count=int(whitened_mean.shape[0]),
-        site=_NamedTimeSite(
-            name="basket_consistency_obs",
-            obs_dist=basket_dist,
-            y_obs=whitened_obs,
-            time_mask=inputs.batch.observations.time_mask,
-            obs_scale=_basket_obs_scale(
+    for group in build_basket_observation_groups(
+        config=inputs.overlay,
+        basket_names=inputs.coordinates.basket_names,
+        device=whitened_mean.device,
+    ):
+        _sample_named_time_site(
+            time_count=int(whitened_mean.shape[0]),
+            site=_build_group_time_site(
+                grouped_inputs=_GroupedBasketInputs(
+                    basket_df=inputs.overlay.df,
+                    basket_obs=whitened_obs,
+                    basket_mean=whitened_mean,
+                    basket_scale=basket_scale,
+                ),
+                group=group,
+                time_mask=inputs.batch.observations.time_mask,
                 base_obs_scale=inputs.batch.observations.obs_scale,
-                overlay=inputs.overlay,
             ),
-        ),
-    )
+        )
 
 
 def _basket_obs_scale(
     *,
     base_obs_scale: float | None,
-    overlay: BasketConsistencyConfig,
+    obs_weight: float,
 ) -> float | None:
     if base_obs_scale is None:
-        return overlay.obs_weight
-    return float(base_obs_scale) * overlay.obs_weight
+        return obs_weight
+    return float(base_obs_scale) * obs_weight
+
+
+def _build_group_time_site(
+    *,
+    grouped_inputs: _GroupedBasketInputs,
+    group: BasketObservationGroup,
+    time_mask: torch.BoolTensor | None,
+    base_obs_scale: float | None,
+) -> _NamedTimeSite:
+    return _NamedTimeSite(
+        name=group.name,
+        obs_dist=_build_group_distribution(
+            basket_df=grouped_inputs.basket_df,
+            basket_mean=grouped_inputs.basket_mean,
+            basket_scale=grouped_inputs.basket_scale,
+            mask=group.mask,
+        ),
+        y_obs=grouped_inputs.basket_obs[:, group.mask],
+        time_mask=time_mask,
+        obs_scale=_basket_obs_scale(
+            base_obs_scale=base_obs_scale,
+            obs_weight=group.obs_weight,
+        ),
+    )
+
+
+def _build_group_distribution(
+    *,
+    basket_df: float,
+    basket_mean: torch.Tensor,
+    basket_scale: torch.Tensor,
+    mask: torch.BoolTensor,
+) -> dist.TorchDistribution:
+    return dist.StudentT(
+        df=basket_df,
+        loc=basket_mean[:, mask],
+        scale=basket_scale[:, mask],
+    ).to_event(1)
 
 
 def _sample_named_time_site(

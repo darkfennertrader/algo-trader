@@ -13,18 +13,26 @@ from .progress import (
     build_walkforward_progress,
 )
 from .pathing import resolve_portfolio_base_dir
-from .seed_stability import run_seed_stability_study
+from .posterior_policies import (
+    PosteriorConfidencePolicyConfig,
+    VALID_POSTERIOR_POLICY_BLOCK_SCOPES,
+    VALID_POSTERIOR_POLICY_SCORE_NAMES,
+    allocate_posterior_confidence,
+)
 
 __all__ = [
     "OuterEvaluationContext",
     "PortfolioSpec",
+    "PosteriorConfidencePolicyConfig",
     "SeedStudyProgress",
+    "VALID_POSTERIOR_POLICY_BLOCK_SCOPES",
+    "VALID_POSTERIOR_POLICY_SCORE_NAMES",
+    "allocate_posterior_confidence",
     "WalkforwardProgress",
     "build_seed_stability_progress",
     "build_walkforward_progress",
     "evaluate_outer_walk_forward",
     "resolve_portfolio_base_dir",
-    "run_seed_stability_study",
     "write_downstream_metrics",
     "write_downstream_outputs",
     "write_downstream_plots",

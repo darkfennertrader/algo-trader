@@ -6,6 +6,7 @@ from algo_trader.domain import ConfigError
 
 VALID_ALLOCATION_FAMILIES = (
     "long_only",
+    "posterior_confidence",
     "equal_weight",
     "random",
     "de_risked",

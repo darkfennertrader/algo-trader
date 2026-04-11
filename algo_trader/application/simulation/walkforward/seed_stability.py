@@ -11,7 +11,7 @@ import pandas as pd
 from algo_trader.domain import ConfigError, SimulationError
 from algo_trader.domain.simulation import SimulationConfig
 
-from ..artifacts import resolve_simulation_output_dir
+from ..artifacts import resolve_saved_study_dir, resolve_simulation_output_dir
 from ..config import config_to_input_dict
 from ..io_utils import write_json_file
 from ..seed_stability_common import (
@@ -60,15 +60,16 @@ def _validate_seed_stability_config(config: SimulationConfig) -> None:
 
 
 def _resolve_source_dir(config: SimulationConfig) -> Path:
-    source_dir = resolve_simulation_output_dir(
+    source_root = resolve_simulation_output_dir(
         simulation_output_path=config.data.simulation_output_path,
         dataset_params=config.data.dataset_params,
     )
-    if not source_dir.exists():
+    if not source_root.exists():
         raise SimulationError(
             "Seed-stability source experiment directory is missing",
-            context={"path": str(source_dir)},
+            context={"path": str(source_root)},
         )
+    source_dir = resolve_saved_study_dir(source_root)
     _validate_source_inputs(source_dir)
     _validate_source_best_configs(source_dir)
     return source_dir

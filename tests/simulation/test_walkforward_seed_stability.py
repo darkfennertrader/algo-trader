@@ -151,3 +151,31 @@ def test_resolve_study_dir_uses_portfolio_output_path(
     )
 
     assert study_dir == tmp_path / "portfolio" / "herc" / "seed_stability"
+
+
+def test_resolve_source_dir_accepts_nested_walkforward_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SIMULATION_SOURCE", str(tmp_path))
+    source_root = tmp_path / "validated_model"
+    walkforward_dir = source_root / "walkforward"
+    (walkforward_dir / "inputs").mkdir(parents=True)
+    (walkforward_dir / "outer").mkdir(parents=True)
+    (walkforward_dir / "inputs" / "panel_tensor.pt").write_text(
+        "panel", encoding="utf-8"
+    )
+    (walkforward_dir / "outer" / "best_config.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    config = SimpleNamespace(
+        data=SimpleNamespace(
+            simulation_output_path="validated_model",
+            dataset_params={},
+        )
+    )
+
+    resolve_source_dir = getattr(seed_stability, "_resolve_source_dir")
+    source_dir = resolve_source_dir(config)
+
+    assert source_dir == walkforward_dir

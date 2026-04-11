@@ -101,12 +101,12 @@ from .walkforward import (
     WalkforwardProgress,
     build_walkforward_progress,
     evaluate_outer_walk_forward,
-    run_seed_stability_study,
     resolve_portfolio_base_dir,
     write_downstream_metrics,
     write_downstream_outputs,
     write_downstream_plots,
 )
+from .walkforward.seed_stability import run_seed_stability_study
 
 logger = logging.getLogger(__name__)
 

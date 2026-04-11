@@ -17,6 +17,10 @@ from .allocation_common import (
     optional_float_value,
 )
 from .config_utils import coerce_mapping, require_bool
+from .walkforward.posterior_policies import (
+    VALID_POSTERIOR_POLICY_BLOCK_SCOPES,
+    VALID_POSTERIOR_POLICY_SCORE_NAMES,
+)
 
 
 def _build_allocation_config(
@@ -148,6 +152,11 @@ def _validate_family_params(
             params=params, field=field, config_path=config_path
         )
         return
+    if family == "posterior_confidence":
+        _validate_posterior_confidence_params(
+            params=params, field=field, config_path=config_path
+        )
+        return
     if family == "herc":
         _validate_herc_params(
             params=params, field=field, config_path=config_path
@@ -201,6 +210,55 @@ def _validate_long_only_params(
         raise ConfigError(
             f"{field}.use_previous_weights is not supported for long_only "
             f"in {config_path}"
+        )
+
+
+def _validate_posterior_confidence_params(
+    *,
+    params: Mapping[str, Any],
+    field: str,
+    config_path: Path,
+) -> None:
+    portfolio_style = str(
+        params.get("portfolio_style", "long_only")
+    ).strip().lower()
+    if portfolio_style != "long_only":
+        raise ConfigError(
+            f"{field}.family=posterior_confidence supports only "
+            f"{field}.portfolio_style=long_only in {config_path}"
+        )
+    if "gross_exposure" in params:
+        raise ConfigError(
+            f"{field}.gross_exposure is not supported for "
+            f"posterior_confidence in {config_path}"
+        )
+    if "min_weight" in params or "max_weight" in params:
+        raise ConfigError(
+            f"{field}.min_weight and {field}.max_weight are not supported "
+            f"for posterior_confidence in {config_path}"
+        )
+    score_name = str(
+        params.get("score_name", "posterior_mean_over_std")
+    ).strip().lower()
+    if score_name not in VALID_POSTERIOR_POLICY_SCORE_NAMES:
+        raise ConfigError(
+            f"{field}.score_name must be one of "
+            f"{', '.join(VALID_POSTERIOR_POLICY_SCORE_NAMES)} in {config_path}"
+        )
+    block_scope = str(params.get("block_scope", "full")).strip().lower()
+    if block_scope not in VALID_POSTERIOR_POLICY_BLOCK_SCOPES:
+        raise ConfigError(
+            f"{field}.block_scope must be one of "
+            f"{', '.join(VALID_POSTERIOR_POLICY_BLOCK_SCOPES)} in {config_path}"
+        )
+    score_threshold = _optional_float(
+        params.get("score_threshold"),
+        field=f"{field}.score_threshold",
+        config_path=config_path,
+    )
+    if score_threshold is not None and score_threshold < 0.0:
+        raise ConfigError(
+            f"{field}.score_threshold must be >= 0 in {config_path}"
         )
 
 

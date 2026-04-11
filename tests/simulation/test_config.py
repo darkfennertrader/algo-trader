@@ -516,6 +516,68 @@ def test_load_config_rejects_long_only_use_previous_weights() -> None:
         )
 
 
+def test_load_config_parses_posterior_confidence_primary() -> None:
+    build_allocation_config = getattr(
+        simulation_config, "_build_allocation_config"
+    )
+    config = build_allocation_config(
+        {
+            "allocation": {
+                "primary": {
+                    "family": "posterior_confidence",
+                    "score_name": "posterior_mean_over_std",
+                    "block_scope": "indices",
+                    "score_threshold": 0.15,
+                },
+                "baselines": [{"family": "equal_weight"}],
+            }
+        },
+        Path("simulation.yml"),
+    )
+
+    assert config.primary.family == "posterior_confidence"
+    assert config.primary.params["score_name"] == "posterior_mean_over_std"
+    assert config.primary.params["block_scope"] == "indices"
+
+
+def test_load_config_rejects_invalid_posterior_confidence_score_name() -> None:
+    build_allocation_config = getattr(
+        simulation_config, "_build_allocation_config"
+    )
+
+    with pytest.raises(ConfigError):
+        build_allocation_config(
+            {
+                "allocation": {
+                    "primary": {
+                        "family": "posterior_confidence",
+                        "score_name": "bad_score",
+                    }
+                }
+            },
+            Path("simulation.yml"),
+        )
+
+
+def test_load_config_rejects_invalid_posterior_confidence_block_scope() -> None:
+    build_allocation_config = getattr(
+        simulation_config, "_build_allocation_config"
+    )
+
+    with pytest.raises(ConfigError):
+        build_allocation_config(
+            {
+                "allocation": {
+                    "primary": {
+                        "family": "posterior_confidence",
+                        "block_scope": "bad_block",
+                    }
+                }
+            },
+            Path("simulation.yml"),
+        )
+
+
 def test_load_config_parses_herc_primary() -> None:
     build_allocation_config = getattr(
         simulation_config, "_build_allocation_config"

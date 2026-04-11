@@ -24,6 +24,12 @@ from .skfolio_allocators import (
     allocate_risk_budgeting,
     allocate_schur,
 )
+from .walkforward.posterior_policies import (
+    PosteriorConfidencePolicyConfig,
+    VALID_POSTERIOR_POLICY_BLOCK_SCOPES,
+    VALID_POSTERIOR_POLICY_SCORE_NAMES,
+    allocate_posterior_confidence,
+)
 
 AllocatorMethod = str
 PortfolioStyle = str
@@ -40,14 +46,27 @@ class _SkfolioOptions:
 
 
 @dataclass(frozen=True)
+class _PosteriorPolicyOptions:
+    score_name: str
+    block_scope: str
+    score_threshold: float
+
+
+@dataclass(frozen=True)
+class _WeightBounds:
+    min_weight: float | None
+    max_weight: float | None
+
+
+@dataclass(frozen=True)
 class _AllocationParams:
     method: AllocatorMethod
     portfolio_style: PortfolioStyle
     gross_exposure: float
     random_seed: int | None
-    min_weight: float | None
-    max_weight: float | None
+    weight_bounds: _WeightBounds
     skfolio: _SkfolioOptions
+    posterior_policy: _PosteriorPolicyOptions
 
 
 @dataclass(frozen=True)
@@ -86,6 +105,11 @@ def _allocate_weights(
             n_assets=n_assets,
             params=params,
             tensor_spec=tensor_spec,
+        )
+    elif params.method == "posterior_confidence":
+        weights = _allocate_posterior_confidence_policy(
+            prediction=prediction,
+            params=params,
         )
     elif params.method == "herc":
         weights = _allocate_herc(
@@ -151,14 +175,21 @@ def _parse_allocation_params(
         portfolio_style=cast(PortfolioStyle, portfolio_style),
         gross_exposure=gross_exposure,
         random_seed=random_seed,
-        min_weight=min_weight,
-        max_weight=max_weight,
+        weight_bounds=_WeightBounds(
+            min_weight=min_weight,
+            max_weight=max_weight,
+        ),
         skfolio=_SkfolioOptions(
             risk_measure=risk_measure,
             distance_estimator=distance_estimator,
             gamma=gamma,
             use_previous_weights=use_previous_weights,
             transaction_costs=transaction_costs,
+        ),
+        posterior_policy=_PosteriorPolicyOptions(
+            score_name=_resolve_posterior_score_name(alloc_spec, method),
+            block_scope=_resolve_block_scope(alloc_spec, method),
+            score_threshold=_resolve_score_threshold(alloc_spec, method),
         ),
     )
 
@@ -208,11 +239,11 @@ def _resolve_gross_exposure(
     alloc_spec: Mapping[str, Any],
     method: str,
 ) -> float:
-    if method == "long_only":
+    if method in {"long_only", "posterior_confidence"}:
         if "gross_exposure" in alloc_spec:
             raise ConfigError(
                 "allocation.spec.gross_exposure is not supported for "
-                "allocation.spec.family=long_only"
+                f"allocation.spec.family={method}"
             )
         return 1.0
     gross_default = 0.10 if method == "de_risked" else 1.0
@@ -223,12 +254,58 @@ def _resolve_use_previous_weights(
     alloc_spec: Mapping[str, Any],
     method: str,
 ) -> bool:
-    if method == "long_only" and "use_previous_weights" in alloc_spec:
+    if method in {"long_only", "posterior_confidence"} and "use_previous_weights" in alloc_spec:
         raise ConfigError(
             "allocation.spec.use_previous_weights is not supported for "
-            "allocation.spec.family=long_only"
+            f"allocation.spec.family={method}"
         )
     return bool(alloc_spec.get("use_previous_weights", False))
+
+
+def _resolve_posterior_score_name(
+    alloc_spec: Mapping[str, Any],
+    method: str,
+) -> str:
+    if method != "posterior_confidence":
+        return "posterior_mean_over_std"
+    raw = str(
+        alloc_spec.get("score_name", "posterior_mean_over_std")
+    ).strip().lower()
+    if raw not in VALID_POSTERIOR_POLICY_SCORE_NAMES:
+        raise ConfigError(
+            "allocation.spec.score_name must be posterior_mean_over_std or "
+            "positive_probability_edge"
+        )
+    return raw
+
+
+def _resolve_block_scope(
+    alloc_spec: Mapping[str, Any],
+    method: str,
+) -> str:
+    if method != "posterior_confidence":
+        return "full"
+    raw = str(alloc_spec.get("block_scope", "full")).strip().lower()
+    if raw not in VALID_POSTERIOR_POLICY_BLOCK_SCOPES:
+        raise ConfigError(
+            "allocation.spec.block_scope must be full, fx, indices, or "
+            "commodities"
+        )
+    return raw
+
+
+def _resolve_score_threshold(
+    alloc_spec: Mapping[str, Any],
+    method: str,
+) -> float:
+    if method != "posterior_confidence":
+        return 0.0
+    raw = _optional_float(alloc_spec.get("score_threshold"), "score_threshold")
+    if raw is None:
+        return 0.0
+    if raw < 0.0:
+        raise ConfigError("allocation.spec.score_threshold must be >= 0")
+    return raw
 
 
 def _resolve_risk_measure_name(
@@ -329,8 +406,16 @@ def _allocate_long_only(
             dtype=tensor_spec.dtype,
         )
     scores = _long_only_scores(prediction)
-    min_weight = 0.0 if params.min_weight is None else params.min_weight
-    max_weight = params.gross_exposure if params.max_weight is None else params.max_weight
+    min_weight = (
+        0.0
+        if params.weight_bounds.min_weight is None
+        else params.weight_bounds.min_weight
+    )
+    max_weight = (
+        params.gross_exposure
+        if params.weight_bounds.max_weight is None
+        else params.weight_bounds.max_weight
+    )
     return _capped_long_only_weights(
         scores=scores,
         gross_exposure=params.gross_exposure,
@@ -509,6 +594,26 @@ def _allocate_de_risked(
     )
 
 
+def _allocate_posterior_confidence_policy(
+    *,
+    prediction: PredictionPacket,
+    params: _AllocationParams,
+) -> torch.Tensor:
+    if params.portfolio_style != "long_only":
+        raise ConfigError(
+            "allocation.spec.family=posterior_confidence supports only "
+            "allocation.spec.portfolio_style=long_only"
+        )
+    return allocate_posterior_confidence(
+        prediction=prediction,
+        config=PosteriorConfidencePolicyConfig(
+            score_name=params.posterior_policy.score_name,
+            block_scope=params.posterior_policy.block_scope,
+            score_threshold=params.posterior_policy.score_threshold,
+        ),
+    )
+
+
 def _allocate_herc(
     *,
     prediction: PredictionPacket,
@@ -652,8 +757,8 @@ def _build_skfolio_runtime_config(
 ) -> SkfolioRuntimeConfig:
     return SkfolioRuntimeConfig(
         risk_measure=params.skfolio.risk_measure,
-        min_weight=params.min_weight,
-        max_weight=params.max_weight,
+        min_weight=params.weight_bounds.min_weight,
+        max_weight=params.weight_bounds.max_weight,
         transaction_costs=params.skfolio.transaction_costs,
         previous_weights=previous_weights,
         use_previous_weights=params.skfolio.use_previous_weights,

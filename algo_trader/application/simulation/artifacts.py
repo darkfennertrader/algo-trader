@@ -457,6 +457,17 @@ def resolve_relative_simulation_output_dir(*, output_path: str) -> Path:
     return resolve_simulation_root_dir() / output_path
 
 
+def resolve_saved_study_dir(source_root: Path) -> Path:
+    direct_inputs = source_root / "inputs" / "panel_tensor.pt"
+    if direct_inputs.exists():
+        return source_root
+    walkforward_dir = source_root / "walkforward"
+    walkforward_inputs = walkforward_dir / "inputs" / "panel_tensor.pt"
+    if walkforward_inputs.exists():
+        return walkforward_dir
+    return source_root
+
+
 def _resolve_latest_version_label(
     dataset_params: Mapping[str, Any],
 ) -> str:

@@ -297,3 +297,92 @@ def test_allocate_long_only_rejects_use_previous_weights() -> None:
                 },
             ),
         )
+
+
+def test_allocate_posterior_confidence_weights_positive_scores() -> None:
+    prediction = PredictionPacket(
+        rebalance_index=0,
+        rebalance_timestamp=None,
+        asset_names=("A", "B", "C"),
+        tradable_mask=cast(
+            torch.BoolTensor,
+            torch.tensor([True, True, True], dtype=torch.bool),
+        ),
+        mu=torch.tensor([0.20, 0.10, -0.10], dtype=torch.float32),
+        covariance=torch.diag(torch.tensor([0.01, 0.04, 0.09])),
+        samples=None,
+    )
+    request = AllocationRequest(
+        prediction=prediction,
+        allocation_spec={
+            "family": "posterior_confidence",
+            "score_name": "posterior_mean_over_std",
+        },
+        previous_weights=None,
+    )
+
+    result = hooks.default_hooks().allocate(request)
+
+    weights = result.weights
+    assert torch.isclose(weights.sum(), torch.tensor(1.0), atol=1e-6)
+    assert float(weights[0]) > float(weights[1]) > float(weights[2])
+    assert float(weights[2]) == 0.0
+
+
+def test_allocate_posterior_confidence_scopes_to_selected_block() -> None:
+    prediction = PredictionPacket(
+        rebalance_index=0,
+        rebalance_timestamp=None,
+        asset_names=("EUR.USD", "SPX", "DAX", "XAU.USD"),
+        tradable_mask=cast(
+            torch.BoolTensor,
+            torch.tensor([True, True, True, True], dtype=torch.bool),
+        ),
+        mu=torch.tensor([0.30, 0.10, 0.20, 0.40], dtype=torch.float32),
+        covariance=torch.diag(torch.tensor([0.01, 0.01, 0.01, 0.01])),
+        samples=None,
+    )
+    request = AllocationRequest(
+        prediction=prediction,
+        allocation_spec={
+            "family": "posterior_confidence",
+            "score_name": "posterior_mean_over_std",
+            "block_scope": "indices",
+        },
+        previous_weights=None,
+    )
+
+    result = hooks.default_hooks().allocate(request)
+
+    weights = result.weights
+    assert torch.allclose(weights[[0, 3]], torch.zeros(2))
+    assert torch.isclose(weights.sum(), torch.tensor(1.0), atol=1e-6)
+    assert float(weights[2]) > float(weights[1]) > 0.0
+
+
+def test_allocate_posterior_confidence_abstains_below_threshold() -> None:
+    prediction = PredictionPacket(
+        rebalance_index=0,
+        rebalance_timestamp=None,
+        asset_names=("A", "B"),
+        tradable_mask=cast(
+            torch.BoolTensor,
+            torch.tensor([True, True], dtype=torch.bool),
+        ),
+        mu=torch.tensor([0.10, 0.05], dtype=torch.float32),
+        covariance=torch.diag(torch.tensor([0.04, 0.09])),
+        samples=None,
+    )
+    request = AllocationRequest(
+        prediction=prediction,
+        allocation_spec={
+            "family": "posterior_confidence",
+            "score_name": "posterior_mean_over_std",
+            "score_threshold": 1.0,
+        },
+        previous_weights=None,
+    )
+
+    result = hooks.default_hooks().allocate(request)
+
+    assert torch.allclose(result.weights, torch.zeros(2))

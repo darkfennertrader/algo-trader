@@ -10,17 +10,17 @@ from algo_trader.pipeline.stages.modeling.registry_core import register_predicto
 from ..runtime_helpers import BasketConsistencyFollowupPredictor, build_followup_predictor
 
 
-@register_predictor("basket_consistency_predict_v13_l2_online_filtering")
-def build_basket_consistency_predict_v13_l2_online_filtering(
+@register_predictor("basket_consistency_predict_v13_l3_online_filtering")
+def build_basket_consistency_predict_v13_l3_online_filtering(
     params: Mapping[str, Any],
 ) -> BasketConsistencyFollowupPredictor:
     return build_followup_predictor(
         params=params,
-        predictor_name="basket_consistency_predict_v13_l2_online_filtering",
+        predictor_name="basket_consistency_predict_v13_l3_online_filtering",
     )
 
 
 __all__ = [
-    "build_basket_consistency_predict_v13_l2_online_filtering",
+    "build_basket_consistency_predict_v13_l3_online_filtering",
     "predict_basket_consistency_v13_l1",
 ]

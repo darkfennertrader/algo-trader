@@ -53,11 +53,53 @@ class BasketConsistencyGuideV13L1OnlineFiltering(PyroGuide):
             dtype=context.dtype,
             enabled=self.config.index_t_copula_enabled,
         )
-        _sample_basket_consistency_sites(
+        self._sample_basket_consistency_sites(
             batch=context.batch,
             device=context.device,
             dtype=context.dtype,
             enabled=self.config.basket_consistency_enabled,
+        )
+
+    def _sample_basket_consistency_sites(
+        self,
+        *,
+        batch: Any,
+        device: torch.device,
+        dtype: torch.dtype,
+        enabled: bool,
+    ) -> None:
+        if not enabled:
+            return
+        coordinates = self._build_basket_coordinates(
+            batch=batch,
+            device=device,
+            dtype=dtype,
+        )
+        if coordinates.basket_count == 0:
+            return
+        initial = initial_basket_consistency_posterior_means(
+            count=coordinates.basket_count,
+            device=device,
+            dtype=dtype,
+        )
+        scale = pyro.param(
+            "basket_consistency_scale_q",
+            initial.basket_scale,
+            constraint=constraints.positive,
+        )
+        pyro.sample("basket_consistency_scale", dist.Delta(scale, event_dim=1))
+
+    def _build_basket_coordinates(
+        self,
+        *,
+        batch: Any,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Any:
+        return build_basket_consistency_coordinates(
+            assets=batch.assets,
+            device=device,
+            dtype=dtype,
         )
 
     def build_filtering_state(self, batch: ModelBatch) -> FilteringState:
@@ -119,36 +161,6 @@ def _build_guide_config(params: Mapping[str, Any]) -> V13L1GuideConfig:
             values.get("basket_consistency_enabled", True)
         ),
     )
-
-
-def _sample_basket_consistency_sites(
-    *,
-    batch: Any,
-    device: torch.device,
-    dtype: torch.dtype,
-    enabled: bool,
-) -> None:
-    if not enabled:
-        return
-    coordinates = build_basket_consistency_coordinates(
-        assets=batch.assets,
-        device=device,
-        dtype=dtype,
-    )
-    if coordinates.basket_count == 0:
-        return
-    initial = initial_basket_consistency_posterior_means(
-        count=coordinates.basket_count,
-        device=device,
-        dtype=dtype,
-    )
-    scale = pyro.param(
-        "basket_consistency_scale_q",
-        initial.basket_scale,
-        constraint=constraints.positive,
-    )
-    pyro.sample("basket_consistency_scale", dist.Delta(scale, event_dim=1))
-
 
 def _sample_index_t_copula_mix_sites(
     *,

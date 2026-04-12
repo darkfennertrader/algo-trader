@@ -1,13 +1,12 @@
 from __future__ import annotations
-# pylint: disable=duplicate-code
 
 from dataclasses import dataclass
-from typing import Any, Mapping, cast
+from typing import Any, cast
 
 import numpy as np
 import torch
 
-from algo_trader.domain import ConfigError
+from algo_trader.pipeline.stages.modeling.config_support import coerce_mapping
 from algo_trader.pipeline.stages.modeling.multi_asset_block.shared_v3_l1_unified import (
     RuntimeAssetMetadata,
 )
@@ -75,19 +74,15 @@ class BasketObservationGroup:
     obs_weight: float
 
 
-@dataclass(frozen=True)
-class _BasketObservationGroupSpec:
-    name: str
-    selected_names: frozenset[str]
-    obs_weight: float
+BasketObservationGroupSpec = tuple[str, frozenset[str], float]
 
 
 def build_basket_consistency_config(raw: object) -> BasketConsistencyConfig:
-    values = _coerce_mapping(raw, label="model.params.basket_consistency")
+    values = coerce_mapping(raw, label="model.params.basket_consistency")
     if not values:
         return BasketConsistencyConfig()
     base = BasketConsistencyConfig()
-    scale_values = _coerce_mapping(
+    scale_values = coerce_mapping(
         values.get("prior_scales"),
         label="model.params.basket_consistency.prior_scales",
     )
@@ -263,61 +258,35 @@ def build_basket_observation_groups(
 ) -> tuple[BasketObservationGroup, ...]:
     if not _uses_split_weights(config):
         return (
-            BasketObservationGroup(
-                name="basket_consistency_obs",
-                mask=cast(
-                    torch.BoolTensor,
-                    torch.ones(
-                        len(basket_names),
-                        device=device,
-                        dtype=torch.bool,
-                    ),
-                ),
-                obs_weight=float(config.obs_weight),
+            build_full_basket_observation_group(
+                basket_names=basket_names,
+                device=device,
+                obs_weight=config.obs_weight,
             ),
         )
-    groups: list[BasketObservationGroup] = []
-    _append_basket_group(
-        groups=groups,
-        basket_names=basket_names,
-        spec=_BasketObservationGroupSpec(
-            name="basket_consistency_level_obs",
-            selected_names=_LEVEL_BASKETS,
-            obs_weight=_resolve_group_weight(
+    specs = (
+        (
+            "basket_consistency_level_obs",
+            _LEVEL_BASKETS,
+            resolve_basket_group_weight(
                 configured=config.level_obs_weight,
                 fallback=config.obs_weight,
             ),
         ),
-        device=device,
-    )
-    _append_basket_group(
-        groups=groups,
-        basket_names=basket_names,
-        spec=_BasketObservationGroupSpec(
-            name="basket_consistency_spread_obs",
-            selected_names=_SPREAD_BASKETS,
-            obs_weight=_resolve_group_weight(
+        (
+            "basket_consistency_spread_obs",
+            _SPREAD_BASKETS,
+            resolve_basket_group_weight(
                 configured=config.spread_obs_weight,
                 fallback=config.obs_weight,
             ),
         ),
-        device=device,
     )
-    if groups:
-        return tuple(groups)
-    return (
-        BasketObservationGroup(
-            name="basket_consistency_obs",
-            mask=cast(
-                torch.BoolTensor,
-                torch.ones(
-                    len(basket_names),
-                    device=device,
-                    dtype=torch.bool,
-                ),
-            ),
-            obs_weight=float(config.obs_weight),
-        ),
+    return build_custom_basket_observation_groups(
+        basket_names=basket_names,
+        specs=specs,
+        device=device,
+        fallback_weight=config.obs_weight,
     )
 
 
@@ -406,38 +375,53 @@ def _whitening_matrix(covariance: torch.Tensor) -> torch.Tensor:
         dtype=covariance.dtype,
     )
 
-
-def _coerce_mapping(raw: object, *, label: str) -> Mapping[str, Any]:
-    if raw is None:
-        return {}
-    if not isinstance(raw, Mapping):
-        raise ConfigError(f"{label} must be a mapping")
-    return dict(raw)
-
-
-def _append_basket_group(
+def build_custom_basket_observation_groups(
     *,
-    groups: list[BasketObservationGroup],
     basket_names: tuple[str, ...],
-    spec: _BasketObservationGroupSpec,
+    specs: tuple[BasketObservationGroupSpec, ...],
     device: torch.device,
-) -> None:
-    mask = cast(
+    fallback_weight: float,
+) -> tuple[BasketObservationGroup, ...]:
+    groups: list[BasketObservationGroup] = []
+    for name, selected_names, obs_weight in specs:
+        mask = build_basket_observation_mask(
+            basket_names=basket_names,
+            selected_names=selected_names,
+            device=device,
+        )
+        if bool(mask.any()):
+            groups.append(
+                BasketObservationGroup(
+                    name=name,
+                    mask=mask,
+                    obs_weight=obs_weight,
+                )
+            )
+    if groups:
+        return tuple(groups)
+    return (
+        build_full_basket_observation_group(
+            basket_names=basket_names,
+            device=device,
+            obs_weight=fallback_weight,
+        ),
+    )
+
+
+def build_basket_observation_mask(
+    *,
+    basket_names: tuple[str, ...],
+    selected_names: frozenset[str],
+    device: torch.device,
+) -> torch.BoolTensor:
+    return cast(
         torch.BoolTensor,
         torch.as_tensor(
-            [basket_name in spec.selected_names for basket_name in basket_names],
+            [basket_name in selected_names for basket_name in basket_names],
             device=device,
             dtype=torch.bool,
         ),
     )
-    if bool(mask.any()):
-        groups.append(
-            BasketObservationGroup(
-                name=spec.name,
-                mask=mask,
-                obs_weight=spec.obs_weight,
-            )
-        )
 
 
 def _optional_float(raw: Any) -> float | None:
@@ -446,10 +430,26 @@ def _optional_float(raw: Any) -> float | None:
     return float(raw)
 
 
-def _resolve_group_weight(*, configured: float | None, fallback: float) -> float:
+def resolve_basket_group_weight(*, configured: float | None, fallback: float) -> float:
     if configured is None:
         return float(fallback)
     return float(configured)
+
+
+def build_full_basket_observation_group(
+    *,
+    basket_names: tuple[str, ...],
+    device: torch.device,
+    obs_weight: float,
+) -> BasketObservationGroup:
+    return BasketObservationGroup(
+        name="basket_consistency_obs",
+        mask=cast(
+            torch.BoolTensor,
+            torch.ones(len(basket_names), device=device, dtype=torch.bool),
+        ),
+        obs_weight=float(obs_weight),
+    )
 
 
 def _uses_split_weights(config: BasketConsistencyConfig) -> bool:
@@ -457,23 +457,3 @@ def _uses_split_weights(config: BasketConsistencyConfig) -> bool:
         config.level_obs_weight is not None
         or config.spread_obs_weight is not None
     )
-
-
-__all__ = [
-    "BasketConsistencyConfig",
-    "BasketConsistencyCoordinates",
-    "BasketObservationGroup",
-    "BasketConsistencyPosteriorMeans",
-    "BasketConsistencyPriorScaleConfig",
-    "BasketConsistencyTransform",
-    "basket_scale_from_covariance",
-    "build_basket_observation_groups",
-    "build_basket_consistency_config",
-    "build_basket_consistency_coordinates",
-    "build_basket_consistency_transform",
-    "initial_basket_consistency_posterior_means",
-    "project_basket_covariance",
-    "project_basket_mean",
-    "whiten_basket_covariance",
-    "whiten_basket_observations",
-]

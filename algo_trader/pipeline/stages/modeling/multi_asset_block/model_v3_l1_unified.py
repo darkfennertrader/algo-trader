@@ -8,6 +8,7 @@ import pyro.distributions as dist
 import torch
 
 from algo_trader.domain import ConfigError
+from algo_trader.pipeline.stages.modeling.config_support import coerce_mapping
 from algo_trader.pipeline.stages.modeling.protocols import ModelBatch, PyroGuide, PyroModel
 from algo_trader.pipeline.stages.modeling.registry_core import register_model
 from algo_trader.pipeline.stages.modeling.runtime_support import (
@@ -156,7 +157,7 @@ def build_multi_asset_block_model_v3_l1_unified_online_filtering(
 
 
 def _build_model_priors(params: Mapping[str, Any]) -> V3L1UnifiedModelPriors:
-    values = _coerce_mapping(params, label="model.params")
+    values = coerce_mapping(params, label="model.params")
     if not values:
         return V3L1UnifiedModelPriors()
     extra = set(values) - {"mean", "factors", "regime"}
@@ -173,7 +174,7 @@ def _build_model_priors(params: Mapping[str, Any]) -> V3L1UnifiedModelPriors:
 
 
 def _build_mean_priors(raw: object) -> MeanPriors:
-    values = _coerce_mapping(raw, label="model.params.mean")
+    values = coerce_mapping(raw, label="model.params.mean")
     if not values:
         return MeanPriors()
     base = MeanPriors()
@@ -190,7 +191,7 @@ def _build_mean_priors(raw: object) -> MeanPriors:
 
 
 def _build_factor_priors(raw: object) -> FactorPriors:
-    values = _coerce_mapping(raw, label="model.params.factors")
+    values = coerce_mapping(raw, label="model.params.factors")
     if not values:
         return FactorPriors()
     base = FactorPriors()
@@ -235,7 +236,7 @@ def _build_factor_priors(raw: object) -> FactorPriors:
 
 
 def _build_regime_priors(raw: object) -> RegimePriors:
-    values = _coerce_mapping(raw, label="model.params.regime")
+    values = coerce_mapping(raw, label="model.params.regime")
     if not values:
         return RegimePriors()
     return RegimePriors(
@@ -248,21 +249,13 @@ def _build_regime_priors(raw: object) -> RegimePriors:
 
 
 def _build_regime_block(raw: object, base: RegimeBlockPriors) -> RegimeBlockPriors:
-    values = _coerce_mapping(raw, label="model.params.regime.block")
+    values = coerce_mapping(raw, label="model.params.regime.block")
     if not values:
         return base
     return RegimeBlockPriors(
         phi=float(values.get("phi", base.phi)),
         s_u_scale=float(values.get("s_u_scale", base.s_u_scale)),
     )
-
-
-def _coerce_mapping(raw: object, *, label: str) -> Mapping[str, Any]:
-    if raw is None:
-        return {}
-    if not isinstance(raw, Mapping):
-        raise ConfigError(f"{label} must be a mapping")
-    return dict(raw)
 
 
 def _build_context(

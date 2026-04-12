@@ -117,10 +117,14 @@ class BasketConsistencyModelV13L1OnlineFiltering(PyroModel):
         regime_scales = _sample_base_regime_scales(context)
         regime_path = _sample_base_regime_path(context, regime_scales)
         mix = _sample_index_t_copula_mix(context, self.priors.index_t_copula)
-        coordinates = build_basket_consistency_coordinates(
+        coordinates = self._build_basket_coordinates(
             assets=context.batch.assets,
             device=context.device,
             dtype=context.dtype,
+        )
+        observation_groups = self._build_basket_observation_groups(
+            basket_names=coordinates.basket_names,
+            device=context.device,
         )
         basket_params = _sample_basket_consistency_sites(
             count=coordinates.basket_count,
@@ -152,6 +156,32 @@ class BasketConsistencyModelV13L1OnlineFiltering(PyroModel):
                 coordinates=coordinates,
                 basket_params=basket_params,
             ),
+            groups=observation_groups,
+        )
+
+    def _build_basket_coordinates(
+        self,
+        *,
+        assets: Any,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> BasketConsistencyCoordinates:
+        return build_basket_consistency_coordinates(
+            assets=assets,
+            device=device,
+            dtype=dtype,
+        )
+
+    def _build_basket_observation_groups(
+        self,
+        *,
+        basket_names: tuple[str, ...],
+        device: torch.device,
+    ) -> tuple[BasketObservationGroup, ...]:
+        return build_basket_observation_groups(
+            config=self.priors.basket_consistency,
+            basket_names=basket_names,
+            device=device,
         )
 
     def posterior_predict(
@@ -307,6 +337,7 @@ def _build_raw_observation_distribution(
 def _sample_basket_observations(
     *,
     inputs: _BasketObservationInputs,
+    groups: tuple[BasketObservationGroup, ...],
 ) -> None:
     if not inputs.overlay.enabled or inputs.coordinates.basket_count == 0:
         return
@@ -345,11 +376,7 @@ def _sample_basket_observations(
         basket_scale=inputs.basket_params.basket_scale,
         eps=inputs.overlay.eps,
     )
-    for group in build_basket_observation_groups(
-        config=inputs.overlay,
-        basket_names=inputs.coordinates.basket_names,
-        device=whitened_mean.device,
-    ):
+    for group in groups:
         _sample_named_time_site(
             time_count=int(whitened_mean.shape[0]),
             site=_build_group_time_site(

@@ -152,6 +152,70 @@ def _build_registry() -> dict[str, RenderSpec]:
                 ("base",),
             ),
         },
+        "v13_l3": {
+            "version": "v13_l3",
+            "batch": {
+                "asset_names": (
+                    "EUR.USD",
+                    "IBUS30",
+                    "IBUS500",
+                    "IBUST100",
+                    "IBDE40",
+                    "IBES35",
+                    "IBEU50",
+                    "IBFR40",
+                    "IBGB100",
+                    "IBNL25",
+                    "IBCH20",
+                    "XAU.USD",
+                ),
+                "state_size": 4,
+            },
+            "predict_graph": {
+                "name": "predict_v13_l3",
+                "nodes": (
+                    ("baseline", "baseline\ntrusted v13_l1 raw-space backbone"),
+                    ("family", "narrow v13_l3 follow-up"),
+                    ("basket", "same decision-basket map"),
+                    ("relative", "relative index target\nus-vs-equal, europe-vs-equal"),
+                    ("spread", "retain us-minus-europe spread target"),
+                    ("out", "outputs\nsamples / mean / covariance"),
+                ),
+                "edges": (
+                    ("baseline", "family"),
+                    ("family", "basket"),
+                    ("basket", "relative"),
+                    ("basket", "spread"),
+                    ("relative", "out"),
+                    ("spread", "out"),
+                ),
+            },
+            "concept_graph": {
+                "name": "concept_v13_l3",
+                "nodes": (
+                    ("source", "posterior-signal slice diagnostics"),
+                    ("family", "v13_l3 basket consistency"),
+                    ("thesis", "index weakness looks relative,\nnot only level-based"),
+                    ("goal", "keep raw returns in the main likelihood,\nbut regularize index-relative baskets"),
+                    ("criteria", "improve index slice signal\nwithout using trading metrics for promotion"),
+                ),
+                "edges": (
+                    ("source", "family"),
+                    ("family", "thesis"),
+                    ("thesis", "goal"),
+                    ("goal", "criteria"),
+                ),
+            },
+            "model_module": "algo_trader.pipeline.stages.modeling.basket_consistency.versions.v13_l3.model",
+            "model_builder_attr": "build_basket_consistency_model_v13_l3_online_filtering",
+            "guide_module": "algo_trader.pipeline.stages.modeling.basket_consistency.versions.v13_l3.guide",
+            "guide_builder_attr": "build_basket_consistency_guide_v13_l3_online_filtering",
+            "split": build_v3_l1_based_split(
+                "algo_trader.pipeline.stages.modeling.basket_consistency.versions.v13_l3.model",
+                "V13L1ModelPriors",
+                ("base",),
+            ),
+        },
     }
 
 

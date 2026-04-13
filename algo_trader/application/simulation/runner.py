@@ -860,21 +860,30 @@ def _load_dataset_for_run(
                 context={"path": str(base_dir)},
             )
         tensor_path = _panel_tensor_path(base_dir)
-        if not tensor_path.exists():
+        if tensor_path.exists():
+            dataset = load_panel_tensor_dataset(
+                paths=DataPaths(tensor_path=str(tensor_path)),
+                device=device,
+            )
+            logger.info(
+                "Using existing simulation inputs path=%s", tensor_path
+            )
+            return dataset, True
+        if _requires_existing_saved_inputs(config.flags.execution_mode):
             raise SimulationError(
                 "panel_tensor.pt missing in simulation output directory",
                 context={"path": str(tensor_path)},
             )
-        dataset = load_panel_tensor_dataset(
-            paths=DataPaths(tensor_path=str(tensor_path)),
-            device=device,
-        )
-        logger.info(
-            "Using existing simulation inputs path=%s", tensor_path
-        )
-        return dataset, True
     dataset = _load_dataset(config, device)
     return dataset, False
+
+
+def _requires_existing_saved_inputs(execution_mode: str) -> bool:
+    return execution_mode in {
+        "posterior_signal",
+        "walkforward",
+        "results_aggregation",
+    }
 
 @dataclass(frozen=True)
 class OuterFoldContext:

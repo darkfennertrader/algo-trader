@@ -317,7 +317,8 @@ def _orthonormalize_entries(
     for name, vector in entries:
         candidate = vector.clone()
         for basis_vector in accepted_basis:
-            candidate = candidate - candidate.dot(basis_vector) * basis_vector
+            projection = torch.sum(candidate * basis_vector)
+            candidate = candidate - projection * basis_vector
         norm = float(candidate.norm())
         if norm <= float(eps):
             continue

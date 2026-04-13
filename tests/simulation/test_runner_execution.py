@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
+import pytest
 import torch
 
 from algo_trader.application.simulation import runner
@@ -250,3 +251,53 @@ def test_run_delegates_to_posterior_signal_seed_stability(
 
     assert result["execution_mode"] == "posterior_signal"
     assert result["posterior_signal_seed_stability"]["seed_count"] == 5
+
+
+def test_load_dataset_for_run_allows_existing_dir_without_inputs_in_model_research(
+    monkeypatch, tmp_path
+) -> None:
+    sentinel_dataset = cast(Any, object())
+    config = cast(
+        Any,
+        SimpleNamespace(
+            flags=SimpleNamespace(execution_mode="model_research"),
+        ),
+    )
+
+    monkeypatch.setattr(runner, "is_smoke_test_enabled", lambda *_: False)
+    monkeypatch.setattr(
+        runner,
+        "_load_dataset",
+        lambda *_args, **_kwargs: sentinel_dataset,
+    )
+
+    dataset, reused = runner._load_dataset_for_run(  # pylint: disable=protected-access
+        config=config,
+        base_dir=tmp_path,
+        device="cpu",
+    )
+
+    assert dataset is sentinel_dataset
+    assert not reused
+
+
+def test_load_dataset_for_run_requires_inputs_for_walkforward(
+    monkeypatch, tmp_path
+) -> None:
+    config = cast(
+        Any,
+        SimpleNamespace(
+            flags=SimpleNamespace(execution_mode="walkforward"),
+        ),
+    )
+
+    monkeypatch.setattr(runner, "is_smoke_test_enabled", lambda *_: False)
+
+    with pytest.raises(Exception) as exc_info:
+        runner._load_dataset_for_run(  # pylint: disable=protected-access
+            config=config,
+            base_dir=tmp_path,
+            device="cpu",
+        )
+
+    assert "panel_tensor.pt missing" in str(exc_info.value)

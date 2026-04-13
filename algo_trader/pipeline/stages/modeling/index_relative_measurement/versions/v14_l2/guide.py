@@ -10,29 +10,29 @@ from algo_trader.pipeline.stages.modeling.protocols import PyroGuide
 from algo_trader.pipeline.stages.modeling.registry_core import register_guide
 
 from ..runtime_helpers import build_index_relative_measurement_guide
-from .defaults import guide_default_params_v14_l1, merge_nested_params
+from .defaults import guide_default_params_v14_l2, merge_nested_params
 
 
-class IndexRelativeMeasurementGuideV14L1OnlineFiltering(
+class IndexRelativeMeasurementGuideV14L2OnlineFiltering(
     DependenceLayerGuideV4L1OnlineFiltering
 ):
     pass
 
 
-@register_guide("index_relative_measurement_guide_v14_l1_online_filtering")
-def build_index_relative_measurement_guide_v14_l1_online_filtering(
+@register_guide("index_relative_measurement_guide_v14_l2_online_filtering")
+def build_index_relative_measurement_guide_v14_l2_online_filtering(
     params: Mapping[str, Any]
 ) -> PyroGuide:
     return build_index_relative_measurement_guide(
         params=params,
-        defaults=guide_default_params_v14_l1(),
-        guide_type=IndexRelativeMeasurementGuideV14L1OnlineFiltering,
+        defaults=guide_default_params_v14_l2(),
+        guide_type=IndexRelativeMeasurementGuideV14L2OnlineFiltering,
     )
 
 
 __all__ = [
-    "IndexRelativeMeasurementGuideV14L1OnlineFiltering",
+    "IndexRelativeMeasurementGuideV14L2OnlineFiltering",
     "V4L1GuideConfig",
-    "build_index_relative_measurement_guide_v14_l1_online_filtering",
+    "build_index_relative_measurement_guide_v14_l2_online_filtering",
     "merge_nested_params",
 ]

@@ -87,6 +87,71 @@ def _build_registry() -> dict[str, RenderSpec]:
                 ("base",),
             ),
         }
+        ,
+        "v14_l2": {
+            "version": "v14_l2",
+            "batch": {
+                "asset_names": (
+                    "EUR.USD",
+                    "IBUS30",
+                    "IBUS500",
+                    "IBUST100",
+                    "IBDE40",
+                    "IBES35",
+                    "IBEU50",
+                    "IBFR40",
+                    "IBGB100",
+                    "IBNL25",
+                    "IBCH20",
+                    "XAU.USD",
+                ),
+                "state_size": 4,
+            },
+            "predict_graph": {
+                "name": "predict_v14_l2",
+                "nodes": (
+                    ("baseline", "baseline\ntrusted v4_l1 raw-space backbone"),
+                    ("family", "v14_l2 per-index relative measurement"),
+                    ("nonindex", "raw non-index observations\nFX + commodities"),
+                    ("index", "level + per-index relative basis"),
+                    ("groups", "level / per-index relative / residual\ngroups"),
+                    ("out", "outputs\nsamples / mean / covariance"),
+                ),
+                "edges": (
+                    ("baseline", "family"),
+                    ("family", "nonindex"),
+                    ("family", "index"),
+                    ("index", "groups"),
+                    ("nonindex", "out"),
+                    ("groups", "out"),
+                ),
+            },
+            "concept_graph": {
+                "name": "concept_v14_l2",
+                "nodes": (
+                    ("source", "v14_l1 improved index calibration\nbut not monetization"),
+                    ("family", "v14_l2 index_relative_measurement"),
+                    ("thesis", "supervise the actual per-index relative problem,\nnot only coarse regional relative coordinates"),
+                    ("goal", "improve top-k spread / hit rate\nwithin the index slice"),
+                    ("criteria", "better index-slice posterior signal\nwithout using trading metrics for promotion"),
+                ),
+                "edges": (
+                    ("source", "family"),
+                    ("family", "thesis"),
+                    ("thesis", "goal"),
+                    ("goal", "criteria"),
+                ),
+            },
+            "model_module": "algo_trader.pipeline.stages.modeling.index_relative_measurement.versions.v14_l2.model",
+            "model_builder_attr": "build_index_relative_measurement_model_v14_l2_online_filtering",
+            "guide_module": "algo_trader.pipeline.stages.modeling.index_relative_measurement.versions.v14_l2.guide",
+            "guide_builder_attr": "build_index_relative_measurement_guide_v14_l2_online_filtering",
+            "split": build_v3_l1_based_split(
+                "algo_trader.pipeline.stages.modeling.index_relative_measurement.versions.v14_l2.model",
+                "V14L2ModelPriors",
+                ("base",),
+            ),
+        },
     }
 
 

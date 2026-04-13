@@ -10,16 +10,16 @@ from ..runtime_helpers import (
 )
 
 
-@register_predictor("index_relative_measurement_predict_v14_l1_online_filtering")
-def build_index_relative_measurement_predict_v14_l1_online_filtering(
+@register_predictor("index_relative_measurement_predict_v14_l2_online_filtering")
+def build_index_relative_measurement_predict_v14_l2_online_filtering(
     params: Mapping[str, object]
 ) -> IndexRelativeMeasurementPredictor:
     return build_index_relative_measurement_predictor(
         params=params,
-        label="index_relative_measurement_predict_v14_l1_online_filtering",
+        label="index_relative_measurement_predict_v14_l2_online_filtering",
     )
 
 
 __all__ = [
-    "build_index_relative_measurement_predict_v14_l1_online_filtering",
+    "build_index_relative_measurement_predict_v14_l2_online_filtering",
 ]

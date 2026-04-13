@@ -11,49 +11,49 @@ from ..model_runtime import (
     build_index_relative_measurement_model_priors,
 )
 from ..runtime_helpers import (
-    predict_index_relative_measurement_runtime as predict_index_relative_measurement_v14_l1,
+    predict_index_relative_measurement_runtime as predict_index_relative_measurement_v14_l2,
 )
-from .defaults import merge_nested_params, model_default_params_v14_l1
+from .defaults import merge_nested_params, model_default_params_v14_l2
 from .shared import (
     build_index_relative_measurement_config,
     build_index_relative_measurement_coordinates,
     build_index_relative_observation_groups,
 )
 
-V14L1ModelPriors = IndexRelativeMeasurementModelPriors
+V14L2ModelPriors = IndexRelativeMeasurementModelPriors
 
 
-class IndexRelativeMeasurementModelV14L1OnlineFiltering(
+class IndexRelativeMeasurementModelV14L2OnlineFiltering(
     IndexRelativeMeasurementModelRuntime
 ):
     def __init__(
         self,
-        priors: V14L1ModelPriors | None = None,
+        priors: V14L2ModelPriors | None = None,
     ) -> None:
         super().__init__(
-            priors=priors or V14L1ModelPriors(),
+            priors=priors or V14L2ModelPriors(),
             coordinate_builder=build_index_relative_measurement_coordinates,
             group_builder=build_index_relative_observation_groups,
         )
 
 
-@register_model("index_relative_measurement_model_v14_l1_online_filtering")
-def build_index_relative_measurement_model_v14_l1_online_filtering(
+@register_model("index_relative_measurement_model_v14_l2_online_filtering")
+def build_index_relative_measurement_model_v14_l2_online_filtering(
     params: Mapping[str, Any]
 ) -> PyroModel:
-    merged_params = merge_nested_params(model_default_params_v14_l1(), params)
-    return IndexRelativeMeasurementModelV14L1OnlineFiltering(
+    merged_params = merge_nested_params(model_default_params_v14_l2(), params)
+    return IndexRelativeMeasurementModelV14L2OnlineFiltering(
         priors=build_index_relative_measurement_model_priors(
             params=merged_params,
             config_builder=build_index_relative_measurement_config,
-            label="index_relative_measurement_model_v14_l1_online_filtering",
+            label="index_relative_measurement_model_v14_l2_online_filtering",
         )
     )
 
 
 __all__ = [
-    "IndexRelativeMeasurementModelV14L1OnlineFiltering",
-    "V14L1ModelPriors",
-    "build_index_relative_measurement_model_v14_l1_online_filtering",
-    "predict_index_relative_measurement_v14_l1",
+    "IndexRelativeMeasurementModelV14L2OnlineFiltering",
+    "V14L2ModelPriors",
+    "build_index_relative_measurement_model_v14_l2_online_filtering",
+    "predict_index_relative_measurement_v14_l2",
 ]

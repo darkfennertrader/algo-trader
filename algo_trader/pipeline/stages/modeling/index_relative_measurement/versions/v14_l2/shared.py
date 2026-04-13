@@ -8,7 +8,6 @@ from algo_trader.pipeline.stages.modeling.multi_asset_block.shared_v3_l1_unified
 from algo_trader.pipeline.stages.modeling.vector_support import (
     VectorBuildConfig,
     equal_weight_vector,
-    spread_vector,
 )
 
 from ..shared_common import (
@@ -30,12 +29,7 @@ from ..shared_common import (
     standardize_index_covariance,
 )
 
-_US = ("IBUS30", "IBUS500", "IBUST100")
-_EUROPE = ("IBDE40", "IBES35", "IBEU50", "IBFR40", "IBGB100", "IBNL25")
 _LEVEL_NAMES = frozenset(("index_level",))
-_RELATIVE_NAMES = frozenset(
-    ("us_relative_index", "europe_relative_index", "us_minus_europe")
-)
 
 
 def _build_seed_entries(
@@ -45,25 +39,22 @@ def _build_seed_entries(
 ) -> tuple[SeedEntry, ...]:
     vector_config = VectorBuildConfig(device=device, dtype=dtype, strict=False)
     level = equal_weight_vector(index_names, index_names, config=vector_config)
-    return (
-        ("index_level", level),
-        (
-            "us_relative_index",
-            equal_weight_vector(index_names, _US, config=vector_config) - level,
-        ),
-        (
-            "europe_relative_index",
-            equal_weight_vector(index_names, _EUROPE, config=vector_config) - level,
-        ),
-        (
-            "us_minus_europe",
-            spread_vector(
-                index_names,
-                _US,
-                _EUROPE,
-                config=vector_config,
-            ),
-        ),
+    entries: list[SeedEntry] = [("index_level", level)]
+    for name in index_names:
+        asset_level = equal_weight_vector(
+            index_names,
+            (name,),
+            config=vector_config,
+        )
+        relative = asset_level - level
+        if bool(relative.abs().sum() > 0.0):
+            entries.append((f"index_relative_{name}", relative))
+    return tuple(entries)
+
+
+def _relative_names(coordinate_names: tuple[str, ...]) -> frozenset[str]:
+    return frozenset(
+        name for name in coordinate_names if name.startswith("index_relative_")
     )
 
 
@@ -72,7 +63,7 @@ build_index_relative_measurement_coordinates = make_coordinate_builder(
 )
 build_index_relative_observation_groups = make_group_builder(
     level_names=_LEVEL_NAMES,
-    relative_names=_RELATIVE_NAMES,
+    relative_names=_relative_names,
 )
 
 __all__ = COMMON_SHARED_EXPORTS

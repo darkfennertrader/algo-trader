@@ -12,7 +12,6 @@ from algo_trader.pipeline.stages.modeling.vector_support import (
 
 from ..shared_common import (
     BasketObservationGroup,
-    COMMON_SHARED_EXPORTS,
     IndexCoordinateTransform,
     IndexRelativeMeasurementConfig,
     IndexRelativeMeasurementCoordinates,
@@ -65,5 +64,3 @@ build_index_relative_observation_groups = make_group_builder(
     level_names=_LEVEL_NAMES,
     relative_names=_relative_names,
 )
-
-__all__ = COMMON_SHARED_EXPORTS

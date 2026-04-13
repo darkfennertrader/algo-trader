@@ -105,6 +105,25 @@ class _GroupTimeSiteInputs:
     df: float
 
 
+@dataclass(frozen=True)
+class _RuntimeObservationInputs:
+    runtime_batch: Any
+    batch: Any
+    time_count: int
+    device: torch.device
+    coordinates: IndexRelativeMeasurementCoordinates
+    group_builder: GroupBuilder
+    raw_state: "_RuntimeObservationState"
+
+
+@dataclass(frozen=True)
+class _RuntimeObservationState:
+    loc: torch.Tensor
+    cov_factor: torch.Tensor
+    cov_diag: torch.Tensor
+    full_obs_dist: dist.TorchDistribution
+
+
 @dataclass
 class IndexRelativeMeasurementModelRuntime(PyroModel):
     priors: IndexRelativeMeasurementModelPriors = field(
@@ -119,6 +138,8 @@ class IndexRelativeMeasurementModelRuntime(PyroModel):
     def __call__(self, batch: ModelBatch) -> None:
         if self.coordinate_builder is None or self.group_builder is None:
             raise ConfigError("Index relative measurement runtime is incomplete")
+        coordinate_builder = self.coordinate_builder
+        group_builder = self.group_builder
         runtime_batch = build_v3_l1_unified_runtime_batch(batch)
         context = _build_base_context(runtime_batch, self.priors.base)
         structural = _sample_base_structural_sites(context)
@@ -132,42 +153,73 @@ class IndexRelativeMeasurementModelRuntime(PyroModel):
             mix=mix,
             overlay=self.priors.index_t_copula,
         )
-        coordinates = self.coordinate_builder(
+        coordinates = coordinate_builder(
             assets=context.batch.assets,
             device=context.device,
             dtype=context.dtype,
         )
+        self._sample_observations(
+            inputs=_RuntimeObservationInputs(
+                runtime_batch=runtime_batch,
+                batch=context.batch,
+                time_count=context.shape.T,
+                device=context.device,
+                coordinates=coordinates,
+                group_builder=group_builder,
+                raw_state=_RuntimeObservationState(
+                    loc=loc,
+                    cov_factor=cov_factor,
+                    cov_diag=cov_diag,
+                    full_obs_dist=full_obs_dist,
+                ),
+            ),
+        )
+
+    def _sample_observations(
+        self,
+        *,
+        inputs: _RuntimeObservationInputs,
+    ) -> None:
         if (
             not self.priors.index_relative_measurement.enabled
-            or coordinates.coordinate_count == 0
+            or inputs.coordinates.coordinate_count == 0
         ):
-            sample_time_observations(
-                time_count=context.shape.T,
-                obs_dist=full_obs_dist,
-                y_obs=runtime_batch.observations.y_obs,
-                time_mask=runtime_batch.observations.time_mask,
-                obs_scale=runtime_batch.observations.obs_scale,
-            )
+            self._sample_full_raw_head(inputs)
             return
-        _sample_non_index_raw_observations(
-            batch=context.batch,
-            loc=loc,
-            cov_factor=cov_factor,
-            cov_diag=cov_diag,
+        sample_non_index_raw_observations(
+            batch=inputs.batch,
+            loc=inputs.raw_state.loc,
+            cov_factor=inputs.raw_state.cov_factor,
+            cov_diag=inputs.raw_state.cov_diag,
         )
-        _sample_index_relative_observations(
+        self._sample_auxiliary_observations(inputs)
+
+    def _sample_full_raw_head(self, inputs: _RuntimeObservationInputs) -> None:
+        sample_time_observations(
+            time_count=inputs.time_count,
+            obs_dist=inputs.raw_state.full_obs_dist,
+            y_obs=inputs.runtime_batch.observations.y_obs,
+            time_mask=inputs.runtime_batch.observations.time_mask,
+            obs_scale=inputs.runtime_batch.observations.obs_scale,
+        )
+
+    def _sample_auxiliary_observations(
+        self,
+        inputs: _RuntimeObservationInputs,
+    ) -> None:
+        sample_index_relative_observations(
             inputs=_IndexRelativeObservationInputs(
-                batch=context.batch,
-                loc=loc,
-                cov_factor=cov_factor,
-                cov_diag=cov_diag,
+                batch=inputs.batch,
+                loc=inputs.raw_state.loc,
+                cov_factor=inputs.raw_state.cov_factor,
+                cov_diag=inputs.raw_state.cov_diag,
                 overlay=self.priors.index_relative_measurement,
-                coordinates=coordinates,
+                coordinates=inputs.coordinates,
             ),
-            groups=self.group_builder(
+            groups=inputs.group_builder(
                 config=self.priors.index_relative_measurement,
-                coordinate_names=coordinates.coordinate_names,
-                device=context.device,
+                coordinate_names=inputs.coordinates.coordinate_names,
+                device=inputs.device,
             ),
         )
 
@@ -195,6 +247,7 @@ def build_index_relative_measurement_model_priors(
     params: Mapping[str, Any],
     config_builder: ConfigBuilder,
     label: str,
+    param_key: str = "index_relative_measurement",
 ) -> IndexRelativeMeasurementModelPriors:
     values = coerce_mapping(params, label="model.params")
     if not values:
@@ -204,7 +257,7 @@ def build_index_relative_measurement_model_priors(
         "factors",
         "regime",
         "index_t_copula",
-        "index_relative_measurement",
+        param_key,
     }
     if extra:
         raise ConfigError(
@@ -217,13 +270,11 @@ def build_index_relative_measurement_model_priors(
     return IndexRelativeMeasurementModelPriors(
         base=_build_base_model_priors(base_payload),
         index_t_copula=_build_index_t_copula_config(values.get("index_t_copula")),
-        index_relative_measurement=config_builder(
-            values.get("index_relative_measurement")
-        ),
+        index_relative_measurement=config_builder(values.get(param_key)),
     )
 
 
-def _sample_non_index_raw_observations(
+def sample_non_index_raw_observations(
     *,
     batch: Any,
     loc: torch.Tensor,
@@ -247,7 +298,7 @@ def _sample_non_index_raw_observations(
     _sample_named_time_site(time_count=int(loc.shape[0]), site=site)
 
 
-def _sample_index_relative_observations(
+def sample_index_relative_observations(
     *,
     inputs: _IndexRelativeObservationInputs,
     groups: tuple[BasketObservationGroup, ...],
@@ -255,56 +306,63 @@ def _sample_index_relative_observations(
     observed = inputs.batch.observations.y_obs
     if observed is None:
         return
-    index_obs = observed[:, inputs.coordinates.index_mask]
+    standardized = _standardize_index_relative_inputs(
+        observed=observed,
+        inputs=inputs,
+    )
+    for group in groups:
+        _sample_named_time_site(
+            time_count=int(standardized.coordinate_mean.shape[0]),
+            site=_build_group_time_site(
+                group=group,
+                inputs=standardized,
+            ),
+        )
+
+
+def _standardize_index_relative_inputs(
+    *,
+    observed: torch.Tensor,
+    inputs: _IndexRelativeObservationInputs,
+) -> _GroupTimeSiteInputs:
     coordinate_obs = project_basket_mean(
-        loc=index_obs,
+        loc=observed[:, inputs.coordinates.index_mask],
         basis=inputs.coordinates.basis,
     )
     transform = build_index_coordinate_transform(
         observations=coordinate_obs,
         config=inputs.overlay,
     )
-    index_mean = project_basket_mean(
-        loc=inputs.loc[:, inputs.coordinates.index_mask],
-        basis=inputs.coordinates.basis,
-    )
-    index_cov = project_basket_covariance(
-        cov_factor=inputs.cov_factor[:, inputs.coordinates.index_mask, :],
-        cov_diag=inputs.cov_diag[:, inputs.coordinates.index_mask],
-        basis=inputs.coordinates.basis,
-        eps=inputs.overlay.eps,
-    )
-    standardized_obs = standardize_index_coordinates(
-        values=coordinate_obs,
+    coordinate_mean = standardize_index_coordinates(
+        values=project_basket_mean(
+            loc=inputs.loc[:, inputs.coordinates.index_mask],
+            basis=inputs.coordinates.basis,
+        ),
         transform=transform,
     )
-    standardized_mean = standardize_index_coordinates(
-        values=index_mean,
+    coordinate_covariance = standardize_index_covariance(
+        covariance=project_basket_covariance(
+            cov_factor=inputs.cov_factor[:, inputs.coordinates.index_mask, :],
+            cov_diag=inputs.cov_diag[:, inputs.coordinates.index_mask],
+            basis=inputs.coordinates.basis,
+            eps=inputs.overlay.eps,
+        ),
         transform=transform,
     )
-    standardized_cov = standardize_index_covariance(
-        covariance=index_cov,
-        transform=transform,
+    return _GroupTimeSiteInputs(
+        base_obs_scale=inputs.batch.observations.obs_scale,
+        time_mask=inputs.batch.observations.time_mask,
+        coordinate_mean=coordinate_mean,
+        coordinate_obs=standardize_index_coordinates(
+            values=coordinate_obs,
+            transform=transform,
+        ),
+        coordinate_scale=coordinate_scale_from_covariance(
+            covariance=coordinate_covariance,
+            eps=inputs.overlay.eps,
+        ),
+        df=inputs.overlay.df,
     )
-    coordinate_scale = coordinate_scale_from_covariance(
-        covariance=standardized_cov,
-        eps=inputs.overlay.eps,
-    )
-    for group in groups:
-        _sample_named_time_site(
-            time_count=int(standardized_mean.shape[0]),
-            site=_build_group_time_site(
-                group=group,
-                inputs=_GroupTimeSiteInputs(
-                    base_obs_scale=inputs.batch.observations.obs_scale,
-                    time_mask=inputs.batch.observations.time_mask,
-                    coordinate_mean=standardized_mean,
-                    coordinate_obs=standardized_obs,
-                    coordinate_scale=coordinate_scale,
-                    df=inputs.overlay.df,
-                ),
-            ),
-        )
 
 
 def _build_group_time_site(
@@ -386,4 +444,6 @@ __all__ = [
     "IndexRelativeMeasurementModelPriors",
     "IndexRelativeMeasurementModelRuntime",
     "build_index_relative_measurement_model_priors",
+    "sample_index_relative_observations",
+    "sample_non_index_raw_observations",
 ]

@@ -71,10 +71,12 @@ GroupBuilder = Callable[
 ]
 
 
-def build_index_relative_measurement_config(
+def build_index_relative_config(
     raw: object,
+    *,
+    label: str,
 ) -> IndexRelativeMeasurementConfig:
-    values = coerce_mapping(raw, label="model.params.index_relative_measurement")
+    values = coerce_mapping(raw, label=label)
     if not values:
         return IndexRelativeMeasurementConfig()
     base = IndexRelativeMeasurementConfig()
@@ -98,6 +100,15 @@ def build_index_relative_measurement_config(
         ),
         mad_floor=float(values.get("mad_floor", base.mad_floor)),
         eps=float(values.get("eps", base.eps)),
+    )
+
+
+def build_index_relative_measurement_config(
+    raw: object,
+) -> IndexRelativeMeasurementConfig:
+    return build_index_relative_config(
+        raw,
+        label="model.params.index_relative_measurement",
     )
 
 
@@ -346,25 +357,3 @@ def _optional_float(raw: object) -> float | None:
     if raw is None:
         return None
     return float(cast(float, raw))
-
-
-COMMON_SHARED_EXPORTS = [
-    "BasketObservationGroup",
-    "IndexCoordinateTransform",
-    "IndexRelativeMeasurementConfig",
-    "IndexRelativeMeasurementCoordinates",
-    "IndexRelativeMeasurementWeights",
-    "build_index_coordinate_transform",
-    "build_index_relative_measurement_config",
-    "build_index_relative_measurement_coordinates",
-    "build_index_relative_observation_groups",
-    "coordinate_scale_from_covariance",
-    "make_coordinate_builder",
-    "make_group_builder",
-    "project_basket_covariance",
-    "project_basket_mean",
-    "standardize_index_coordinates",
-    "standardize_index_covariance",
-]
-
-__all__ = COMMON_SHARED_EXPORTS

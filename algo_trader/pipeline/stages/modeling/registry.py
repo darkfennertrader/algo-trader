@@ -58,6 +58,7 @@ _MODEL_MODULES = (
     "algo_trader.pipeline.stages.modeling.basket_consistency.versions.v13_l3.model",
     "algo_trader.pipeline.stages.modeling.index_relative_measurement.versions.v14_l1.model",
     "algo_trader.pipeline.stages.modeling.index_relative_measurement.versions.v14_l2.model",
+    "algo_trader.pipeline.stages.modeling.multi_output_index_relative.versions.v15_l1.model",
 )
 
 _GUIDE_MODULES = (
@@ -107,6 +108,7 @@ _GUIDE_MODULES = (
     "algo_trader.pipeline.stages.modeling.basket_consistency.versions.v13_l3.guide",
     "algo_trader.pipeline.stages.modeling.index_relative_measurement.versions.v14_l1.guide",
     "algo_trader.pipeline.stages.modeling.index_relative_measurement.versions.v14_l2.guide",
+    "algo_trader.pipeline.stages.modeling.multi_output_index_relative.versions.v15_l1.guide",
 )
 
 _PREDICTOR_MODULES = (
@@ -155,6 +157,7 @@ _PREDICTOR_MODULES = (
     "algo_trader.pipeline.stages.modeling.basket_consistency.versions.v13_l3.predict",
     "algo_trader.pipeline.stages.modeling.index_relative_measurement.versions.v14_l1.predict",
     "algo_trader.pipeline.stages.modeling.index_relative_measurement.versions.v14_l2.predict",
+    "algo_trader.pipeline.stages.modeling.multi_output_index_relative.versions.v15_l1.predict",
 )
 
 

@@ -10,6 +10,11 @@ from algo_trader.pipeline.stages.modeling.config_support import coerce_mapping
 from algo_trader.pipeline.stages.modeling.multi_asset_block.shared_v3_l1_unified import (
     RuntimeAssetMetadata,
 )
+from algo_trader.pipeline.stages.modeling.vector_support import (
+    VectorBuildConfig,
+    equal_weight_vector,
+    spread_vector,
+)
 
 _US = ("IBUS30", "IBUS500", "IBUST100")
 _EUROPE = ("IBDE40", "IBES35", "IBEU50", "IBFR40", "IBGB100", "IBNL25")
@@ -126,23 +131,39 @@ def build_basket_consistency_coordinates(
     dtype: torch.dtype,
 ) -> BasketConsistencyCoordinates:
     asset_names = assets.asset_names
+    vector_config = VectorBuildConfig(device=device, dtype=dtype, strict=True)
     entries = (
-        ("us_index", _equal_weight_vector(asset_names, _US, device=device, dtype=dtype)),
+        (
+            "us_index",
+            equal_weight_vector(
+                asset_names,
+                _US,
+                config=vector_config,
+            ),
+        ),
         (
             "europe_index",
-            _equal_weight_vector(asset_names, _EUROPE, device=device, dtype=dtype),
+            equal_weight_vector(
+                asset_names,
+                _EUROPE,
+                config=vector_config,
+            ),
         ),
         (
             "us_minus_europe",
-            _spread_vector(asset_names, _US, _EUROPE, device=device, dtype=dtype),
+            spread_vector(
+                asset_names,
+                _US,
+                _EUROPE,
+                config=vector_config,
+            ),
         ),
         (
             "index_equal_weight",
-            _equal_weight_vector(
+            equal_weight_vector(
                 asset_names,
                 tuple(name for name in asset_names if name.startswith("IB")),
-                device=device,
-                dtype=dtype,
+                config=vector_config,
             ),
         ),
     )
@@ -288,55 +309,6 @@ def build_basket_observation_groups(
         device=device,
         fallback_weight=config.obs_weight,
     )
-
-
-def _equal_weight_vector(
-    asset_names: tuple[str, ...],
-    requested: tuple[str, ...],
-    *,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    indices = _resolve_requested_indices(asset_names, requested)
-    vector = torch.zeros((len(asset_names),), device=device, dtype=dtype)
-    if not indices:
-        return vector
-    weight = 1.0 / float(len(indices))
-    for index in indices:
-        vector[index] = weight
-    return vector
-
-
-def _spread_vector(
-    asset_names: tuple[str, ...],
-    long_assets: tuple[str, ...],
-    short_assets: tuple[str, ...],
-    *,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    long_indices = _resolve_requested_indices(asset_names, long_assets)
-    short_indices = _resolve_requested_indices(asset_names, short_assets)
-    vector = torch.zeros((len(asset_names),), device=device, dtype=dtype)
-    if not long_indices or not short_indices:
-        return vector
-    long_weight = 0.5 / float(len(long_indices))
-    short_weight = -0.5 / float(len(short_indices))
-    for index in long_indices:
-        vector[index] = long_weight
-    for index in short_indices:
-        vector[index] = short_weight
-    return vector
-
-
-def _resolve_requested_indices(
-    asset_names: tuple[str, ...],
-    requested: tuple[str, ...],
-) -> tuple[int, ...]:
-    index_by_name = {name: idx for idx, name in enumerate(asset_names)}
-    if any(name not in index_by_name for name in requested):
-        return ()
-    return tuple(index_by_name[name] for name in requested)
 
 
 def _centered_covariance(values: torch.Tensor) -> torch.Tensor:

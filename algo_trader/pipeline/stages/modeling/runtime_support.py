@@ -47,6 +47,14 @@ def require_tensor_entry(payload: Mapping[str, Any], key: str) -> torch.Tensor:
     return value
 
 
+def supports_structural_predictive_summaries(guide: object) -> bool:
+    summaries = getattr(guide, "structural_predictive_summaries", None)
+    if callable(summaries):
+        return True
+    fallback = getattr(guide, "structural_posterior_means", None)
+    return callable(fallback)
+
+
 def sample_time_observations(
     *,
     time_count: int,

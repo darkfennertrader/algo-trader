@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 import torch
 
+from algo_trader.application.json_support import write_json_file
 from algo_trader.domain import SimulationError
 from algo_trader.domain.simulation import (
     CandidateSpec,
@@ -763,13 +764,7 @@ def _to_torch_payload(value: Any) -> Any:
 
 
 def _write_json(path: Path, payload: Any, *, message: str) -> None:
-    try:
-        path.write_text(
-            json.dumps(payload, indent=2),
-            encoding="utf-8",
-        )
-    except Exception as exc:
-        raise SimulationError(message, context={"path": str(path)}) from exc
+    write_json_file(path=path, payload=payload, message=message)
 
 
 def _write_csv(path: Path, frame: pd.DataFrame, *, message: str) -> None:

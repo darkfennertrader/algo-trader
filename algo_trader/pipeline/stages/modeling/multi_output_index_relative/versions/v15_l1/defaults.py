@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
-
-from algo_trader.pipeline.stages.modeling.dependence_layer.versions.v4_l1.defaults import (
-    guide_default_params_v4_l1,
-    merge_nested_params,
-    model_default_params_v4_l1,
+from algo_trader.pipeline.stages.modeling.dependence_followup_support import (
+    guide_default_params_dependence_followup,
+    make_dependence_followup_model_defaults,
 )
 
 _AUXILIARY_DEFAULTS = {
@@ -18,21 +15,14 @@ _AUXILIARY_DEFAULTS = {
     "mad_floor": 1e-4,
     "eps": 1e-6,
 }
-
-
-def guide_default_params_v15_l1() -> dict[str, Any]:
-    return guide_default_params_v4_l1()
-
-
-def model_default_params_v15_l1() -> dict[str, Any]:
-    return merge_nested_params(
-        model_default_params_v4_l1(),
-        {"multi_output_index_relative": dict(_AUXILIARY_DEFAULTS)},
-    )
+guide_default_params_v15_l1 = guide_default_params_dependence_followup
+model_default_params_v15_l1 = make_dependence_followup_model_defaults(
+    param_key="multi_output_index_relative",
+    overrides=_AUXILIARY_DEFAULTS,
+)
 
 
 __all__ = [
     "guide_default_params_v15_l1",
-    "merge_nested_params",
     "model_default_params_v15_l1",
 ]

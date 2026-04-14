@@ -238,6 +238,53 @@ def make_group_builder(
     return builder
 
 
+def make_custom_group_builder(
+    *,
+    relative_group_name: str,
+    relative_names: frozenset[str] | Callable[[tuple[str, ...]], frozenset[str]],
+    residual_group_name: str,
+) -> GroupBuilder:
+    def builder(
+        config: IndexRelativeMeasurementConfig,
+        coordinate_names: tuple[str, ...],
+        device: torch.device,
+    ) -> tuple[BasketObservationGroup, ...]:
+        resolved_relative = (
+            relative_names(coordinate_names)
+            if callable(relative_names)
+            else relative_names
+        )
+        residual_names = frozenset(
+            name for name in coordinate_names if name.startswith("index_residual_")
+        )
+        specs = (
+            (
+                relative_group_name,
+                resolved_relative,
+                resolve_basket_group_weight(
+                    configured=config.weights.relative_obs_weight,
+                    fallback=config.weights.obs_weight,
+                ),
+            ),
+            (
+                residual_group_name,
+                residual_names,
+                resolve_basket_group_weight(
+                    configured=config.weights.residual_obs_weight,
+                    fallback=config.weights.obs_weight,
+                ),
+            ),
+        )
+        return build_custom_basket_observation_groups(
+            basket_names=coordinate_names,
+            specs=specs,
+            device=device,
+            fallback_weight=config.weights.obs_weight,
+        )
+
+    return builder
+
+
 def build_index_coordinate_transform(
     *,
     observations: torch.Tensor,

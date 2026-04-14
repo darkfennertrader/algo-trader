@@ -97,3 +97,24 @@ def calibration_rmse(
     realized = calibration.loc[valid, "realized_positive_rate"].to_numpy(float)
     error = (predicted - realized) ** 2
     return float(np.sqrt(np.average(error, weights=counts[valid])))
+
+
+def nanmean(values: np.ndarray) -> float:
+    valid = values[~np.isnan(values)]
+    if valid.size == 0:
+        return float("nan")
+    return float(np.mean(valid))
+
+
+def nanstd(values: np.ndarray) -> float:
+    valid = values[~np.isnan(values)]
+    if valid.size == 0:
+        return float("nan")
+    return float(np.std(valid))
+
+
+def positive_fraction(values: np.ndarray) -> float:
+    valid = values[~np.isnan(values)]
+    if valid.size == 0:
+        return float("nan")
+    return float(np.mean(valid > 0.0))

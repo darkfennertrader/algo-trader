@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from algo_trader.application.research.posterior_signal import (
+    PosteriorPredictiveSnapshot,
     PosteriorSignalObservation,
     run_posterior_signal_slice_study,
     run_posterior_signal_study,
@@ -80,18 +81,22 @@ def _observations() -> tuple[PosteriorSignalObservation, ...]:
             outer_k=40,
             timestamp="2025-07-04",
             asset_names=("EUR.USD", "SPX", "XAU.USD", "DAX"),
-            posterior_mean=np.array([0.10, 0.06, 0.02, -0.03]),
-            posterior_std=np.array([0.04, 0.05, 0.05, 0.06]),
-            p_positive=np.array([0.90, 0.75, 0.60, 0.20]),
+            predictive=PosteriorPredictiveSnapshot(
+                posterior_mean=np.array([0.10, 0.06, 0.02, -0.03]),
+                posterior_std=np.array([0.04, 0.05, 0.05, 0.06]),
+                p_positive=np.array([0.90, 0.75, 0.60, 0.20]),
+            ),
             realized_returns=np.array([0.08, 0.05, 0.01, -0.02]),
         ),
         PosteriorSignalObservation(
             outer_k=41,
             timestamp="2025-07-11",
             asset_names=("EUR.USD", "SPX", "XAU.USD", "DAX"),
-            posterior_mean=np.array([0.07, 0.04, 0.01, -0.01]),
-            posterior_std=np.array([0.04, 0.05, 0.05, 0.05]),
-            p_positive=np.array([0.85, 0.70, 0.55, 0.35]),
+            predictive=PosteriorPredictiveSnapshot(
+                posterior_mean=np.array([0.07, 0.04, 0.01, -0.01]),
+                posterior_std=np.array([0.04, 0.05, 0.05, 0.05]),
+                p_positive=np.array([0.85, 0.70, 0.55, 0.35]),
+            ),
             realized_returns=np.array([0.06, 0.03, 0.00, -0.01]),
         ),
     )

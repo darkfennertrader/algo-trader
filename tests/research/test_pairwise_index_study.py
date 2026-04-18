@@ -10,9 +10,9 @@ from algo_trader.application.research.pairwise_index_study import (
     write_pairwise_index_plots,
 )
 from algo_trader.application.research.posterior_signal import (
-    PosteriorPredictiveSnapshot,
     PosteriorSignalObservation,
 )
+from tests.research.observation_support import build_observations
 
 
 def test_pairwise_index_study_writes_expected_outputs(tmp_path: Path) -> None:
@@ -41,7 +41,6 @@ def test_pairwise_index_study_writes_expected_outputs(tmp_path: Path) -> None:
 
 def _observations() -> tuple[PosteriorSignalObservation, ...]:
     asset_names = ("IBUS30", "IBDE40", "IBFR40", "EUR.USD")
-    observations = []
     predictive_rows = (
         (
             np.array([0.06, 0.01, -0.01, 0.0]),
@@ -62,31 +61,9 @@ def _observations() -> tuple[PosteriorSignalObservation, ...]:
             np.array([0.03, 0.00, -0.01, 0.0]),
         ),
     )
-    for week_index, (
-        posterior_mean,
-        posterior_std,
-        p_positive,
-        realized,
-    ) in enumerate(predictive_rows, start=1):
-        samples = np.vstack(
-            [
-                posterior_mean - 0.01,
-                posterior_mean,
-                posterior_mean + 0.01,
-            ]
-        )
-        observations.append(
-            PosteriorSignalObservation(
-                outer_k=40 + week_index,
-                timestamp=f"2025-07-{week_index:02d}",
-                asset_names=asset_names,
-                predictive=PosteriorPredictiveSnapshot(
-                    posterior_mean=posterior_mean,
-                    posterior_std=posterior_std,
-                    p_positive=p_positive,
-                    posterior_samples=samples,
-                ),
-                realized_returns=realized,
-            )
-        )
-    return tuple(observations)
+    return build_observations(
+        asset_names=asset_names,
+        predictive_rows=predictive_rows,
+        outer_k_start=40,
+        timestamp_prefix="2025-07",
+    )

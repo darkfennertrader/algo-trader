@@ -28,13 +28,21 @@ def rest_indices(asset_count: int, selected_idx: np.ndarray) -> np.ndarray:
 def pearson_correlation(lhs: np.ndarray, rhs: np.ndarray) -> float:
     if lhs.size < 2 or rhs.size < 2:
         return float("nan")
-    if np.allclose(lhs, lhs[0]) or np.allclose(rhs, rhs[0]):
+    if _is_constant(lhs) or _is_constant(rhs):
         return float("nan")
     return float(pd.Series(lhs).corr(pd.Series(rhs), method="pearson"))
 
 
 def spearman_correlation(lhs: np.ndarray, rhs: np.ndarray) -> float:
+    if lhs.size < 2 or rhs.size < 2:
+        return float("nan")
+    if _is_constant(lhs) or _is_constant(rhs):
+        return float("nan")
     return float(pd.Series(lhs).corr(pd.Series(rhs), method="spearman"))
+
+
+def _is_constant(values: np.ndarray) -> bool:
+    return bool(np.allclose(values, values[0]))
 
 
 def mean_spread(

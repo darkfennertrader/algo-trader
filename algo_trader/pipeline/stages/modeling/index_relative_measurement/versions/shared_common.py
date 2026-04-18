@@ -16,12 +16,17 @@ from algo_trader.pipeline.stages.modeling.config_support import coerce_mapping
 from algo_trader.pipeline.stages.modeling.multi_asset_block.shared_v3_l1_unified import (
     RuntimeAssetMetadata,
 )
+from algo_trader.pipeline.stages.modeling.vector_support import (
+    VectorBuildConfig,
+    spread_vector,
+)
 
 SeedEntry = tuple[str, torch.Tensor]
 SeedBuilder = Callable[
     [tuple[str, ...], torch.device, torch.dtype],
     tuple[SeedEntry, ...],
 ]
+PairSpec = tuple[str, tuple[str, ...], tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -109,6 +114,35 @@ def build_index_relative_measurement_config(
     return build_index_relative_config(
         raw,
         label="model.params.index_relative_measurement",
+    )
+
+
+def build_custom_relative_config(
+    raw: object,
+    *,
+    label: str,
+    relative_weight_key: str,
+) -> IndexRelativeMeasurementConfig:
+    values = coerce_mapping(raw, label=label)
+    if not values:
+        return IndexRelativeMeasurementConfig()
+    relative_weight = values.get(relative_weight_key)
+    residual_weight = values.get("residual_obs_weight")
+    return IndexRelativeMeasurementConfig(
+        enabled=bool(values.get("enabled", True)),
+        df=float(values.get("df", 8.0)),
+        weights=IndexRelativeMeasurementWeights(
+            obs_weight=float(values.get("obs_weight", 0.05)),
+            level_obs_weight=None,
+            relative_obs_weight=(
+                None if relative_weight is None else float(relative_weight)
+            ),
+            residual_obs_weight=(
+                None if residual_weight is None else float(residual_weight)
+            ),
+        ),
+        mad_floor=float(values.get("mad_floor", 1e-4)),
+        eps=float(values.get("eps", 1e-6)),
     )
 
 
@@ -349,6 +383,28 @@ def complete_basis(
         initial_basis=tuple(vector for _, vector in accepted),
     )
     return full[: len(index_names)]
+
+
+def build_pair_seed_entries(
+    *,
+    index_names: tuple[str, ...],
+    pair_specs: tuple[PairSpec, ...],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[SeedEntry, ...]:
+    vector_config = VectorBuildConfig(device=device, dtype=dtype, strict=False)
+    return tuple(
+        (
+            name,
+            spread_vector(
+                index_names,
+                long_assets=long_assets,
+                short_assets=short_assets,
+                config=vector_config,
+            ),
+        )
+        for name, long_assets, short_assets in pair_specs
+    )
 
 
 def _complete_basis(

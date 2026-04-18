@@ -7,13 +7,8 @@ import torch
 from algo_trader.pipeline.stages.modeling.basket_consistency.versions.v13_l1.shared import (
     BasketObservationGroup,
 )
-from algo_trader.pipeline.stages.modeling.config_support import coerce_mapping
 from algo_trader.pipeline.stages.modeling.multi_asset_block.shared_v3_l1_unified import (
     RuntimeAssetMetadata,
-)
-from algo_trader.pipeline.stages.modeling.vector_support import (
-    VectorBuildConfig,
-    spread_vector,
 )
 
 from algo_trader.pipeline.stages.modeling.index_relative_measurement.versions.shared_common import (
@@ -21,7 +16,10 @@ from algo_trader.pipeline.stages.modeling.index_relative_measurement.versions.sh
     IndexRelativeMeasurementConfig,
     IndexRelativeMeasurementCoordinates,
     IndexRelativeMeasurementWeights,
+    PairSpec,
     SeedEntry,
+    build_custom_relative_config,
+    build_pair_seed_entries,
     build_index_coordinate_transform,
     coordinate_scale_from_covariance,
     make_coordinate_builder,
@@ -47,26 +45,10 @@ _EUROPEAN_PRIORITY = (
 def build_pairwise_index_relative_config(
     raw: object,
 ) -> IndexRelativeMeasurementConfig:
-    values = coerce_mapping(raw, label="model.params.pairwise_index_relative")
-    if not values:
-        return IndexRelativeMeasurementConfig()
-    pairwise_weight = values.get("pairwise_obs_weight")
-    residual_weight = values.get("residual_obs_weight")
-    return IndexRelativeMeasurementConfig(
-        enabled=bool(values.get("enabled", True)),
-        df=float(values.get("df", 8.0)),
-        weights=IndexRelativeMeasurementWeights(
-            obs_weight=float(values.get("obs_weight", 0.05)),
-            level_obs_weight=None,
-            relative_obs_weight=(
-                None if pairwise_weight is None else float(pairwise_weight)
-            ),
-            residual_obs_weight=(
-                None if residual_weight is None else float(residual_weight)
-            ),
-        ),
-        mad_floor=float(values.get("mad_floor", 1e-4)),
-        eps=float(values.get("eps", 1e-6)),
+    return build_custom_relative_config(
+        raw,
+        label="model.params.pairwise_index_relative",
+        relative_weight_key="pairwise_obs_weight",
     )
 
 
@@ -75,25 +57,17 @@ def _build_seed_entries(
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[SeedEntry, ...]:
-    pair_specs = _pairwise_specs(index_names)
-    vector_config = VectorBuildConfig(device=device, dtype=dtype, strict=False)
-    return tuple(
-        (
-            name,
-            spread_vector(
-                index_names,
-                long_assets=long_assets,
-                short_assets=short_assets,
-                config=vector_config,
-            ),
-        )
-        for name, long_assets, short_assets in pair_specs
+    return build_pair_seed_entries(
+        index_names=index_names,
+        pair_specs=_pairwise_specs(index_names),
+        device=device,
+        dtype=dtype,
     )
 
 
 def _pairwise_specs(
     index_names: tuple[str, ...],
-) -> tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...]:
+) -> tuple[PairSpec, ...]:
     present = frozenset(index_names)
     specs = []
     if _US_COMPLEMENT in present and _ANCHOR_INDEX in present:

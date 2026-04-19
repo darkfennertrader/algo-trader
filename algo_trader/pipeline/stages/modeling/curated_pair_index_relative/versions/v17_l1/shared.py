@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import torch
-
+from algo_trader.pipeline.stages.modeling.curated_pair_support import (
+    make_curated_pair_seed_builder,
+)
 from algo_trader.pipeline.stages.modeling.index_relative_measurement.versions.shared_common import (
     IndexRelativeMeasurementConfig,
     PairSpec,
-    SeedEntry,
     build_custom_relative_config,
-    build_pair_seed_entries,
     make_coordinate_builder,
     make_custom_group_builder,
 )
@@ -36,51 +35,11 @@ def build_curated_pair_index_relative_config(
     )
 
 
-def _build_seed_entries(
-    index_names: tuple[str, ...],
-    device: torch.device,
-    dtype: torch.dtype,
-) -> tuple[SeedEntry, ...]:
-    pair_specs = tuple(
-        spec
-        for spec in _CURATED_PAIR_SPECS
-        if _pair_is_present(index_names, spec)
-    )
-    if not pair_specs:
-        pair_specs = _fallback_pair_specs(index_names)
-    return build_pair_seed_entries(
-        index_names=index_names,
-        pair_specs=pair_specs,
-        device=device,
-        dtype=dtype,
-    )
-
-
-def _pair_is_present(
-    index_names: tuple[str, ...],
-    pair_spec: PairSpec,
-) -> bool:
-    _, long_assets, short_assets = pair_spec
-    present = frozenset(index_names)
-    required = frozenset(long_assets + short_assets)
-    return required.issubset(present)
-
-
-def _fallback_pair_specs(index_names: tuple[str, ...]) -> tuple[PairSpec, ...]:
-    if len(index_names) < 2:
-        return ()
-    long_name, short_name = index_names[0], index_names[1]
-    return (
-        (
-            f"curated_pair_{long_name.lower()}_vs_{short_name.lower()}",
-            (long_name,),
-            (short_name,),
-        ),
-    )
-
-
 build_curated_pair_index_relative_coordinates = make_coordinate_builder(
-    _build_seed_entries
+    make_curated_pair_seed_builder(
+        pair_specs=_CURATED_PAIR_SPECS,
+        fallback_prefix="curated_pair",
+    )
 )
 build_curated_pair_index_relative_observation_groups = make_custom_group_builder(
     relative_group_name="curated_pair_index_relative_obs",

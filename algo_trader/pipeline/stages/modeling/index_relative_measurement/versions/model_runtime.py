@@ -77,7 +77,7 @@ class IndexRelativeMeasurementModelPriors:
 
 
 @dataclass(frozen=True)
-class _IndexRelativeObservationInputs:
+class IndexRelativeObservationContext:
     batch: Any
     loc: torch.Tensor
     cov_factor: torch.Tensor
@@ -96,7 +96,7 @@ class _NamedTimeSite:
 
 
 @dataclass(frozen=True)
-class _GroupTimeSiteInputs:
+class StandardizedIndexRelativeGroupInputs:
     base_obs_scale: float | None
     time_mask: torch.BoolTensor | None
     coordinate_mean: torch.Tensor
@@ -208,7 +208,7 @@ class IndexRelativeMeasurementModelRuntime(PyroModel):
         inputs: _RuntimeObservationInputs,
     ) -> None:
         sample_index_relative_observations(
-            inputs=_IndexRelativeObservationInputs(
+            inputs=IndexRelativeObservationContext(
                 batch=inputs.batch,
                 loc=inputs.raw_state.loc,
                 cov_factor=inputs.raw_state.cov_factor,
@@ -300,31 +300,36 @@ def sample_non_index_raw_observations(
 
 def sample_index_relative_observations(
     *,
-    inputs: _IndexRelativeObservationInputs,
+    inputs: IndexRelativeObservationContext,
     groups: tuple[BasketObservationGroup, ...],
 ) -> None:
     observed = inputs.batch.observations.y_obs
     if observed is None:
         return
-    standardized = _standardize_index_relative_inputs(
+    standardized = standardize_index_relative_group_inputs(
         observed=observed,
         inputs=inputs,
     )
     for group in groups:
-        _sample_named_time_site(
-            time_count=int(standardized.coordinate_mean.shape[0]),
-            site=_build_group_time_site(
-                group=group,
-                inputs=standardized,
-            ),
+        sample_index_relative_group_site(
+            group=group,
+            inputs=standardized,
+            options=IndexRelativeGroupSiteOptions(),
         )
 
 
-def _standardize_index_relative_inputs(
+@dataclass(frozen=True)
+class IndexRelativeGroupSiteOptions:
+    name: str | None = None
+    obs_weight: float | None = None
+    time_mask: torch.BoolTensor | None = None
+
+
+def standardize_index_relative_group_inputs(
     *,
     observed: torch.Tensor,
-    inputs: _IndexRelativeObservationInputs,
-) -> _GroupTimeSiteInputs:
+    inputs: IndexRelativeObservationContext,
+) -> StandardizedIndexRelativeGroupInputs:
     coordinate_obs = project_basket_mean(
         loc=observed[:, inputs.coordinates.index_mask],
         basis=inputs.coordinates.basis,
@@ -349,7 +354,7 @@ def _standardize_index_relative_inputs(
         ),
         transform=transform,
     )
-    return _GroupTimeSiteInputs(
+    return StandardizedIndexRelativeGroupInputs(
         base_obs_scale=inputs.batch.observations.obs_scale,
         time_mask=inputs.batch.observations.time_mask,
         coordinate_mean=coordinate_mean,
@@ -365,23 +370,76 @@ def _standardize_index_relative_inputs(
     )
 
 
+def standardize_runtime_index_relative_group_inputs(
+    *,
+    observed: torch.Tensor,
+    runtime_inputs: _RuntimeObservationInputs,
+    overlay: IndexRelativeMeasurementConfig,
+) -> StandardizedIndexRelativeGroupInputs:
+    return standardize_index_relative_group_inputs(
+        observed=observed,
+        inputs=IndexRelativeObservationContext(
+            batch=runtime_inputs.batch,
+            loc=runtime_inputs.raw_state.loc,
+            cov_factor=runtime_inputs.raw_state.cov_factor,
+            cov_diag=runtime_inputs.raw_state.cov_diag,
+            overlay=overlay,
+            coordinates=runtime_inputs.coordinates,
+        ),
+    )
+
+
+def sample_index_relative_group_site(
+    *,
+    group: BasketObservationGroup,
+    inputs: StandardizedIndexRelativeGroupInputs,
+    options: IndexRelativeGroupSiteOptions,
+) -> None:
+    _sample_named_time_site(
+        time_count=int(inputs.coordinate_mean.shape[0]),
+        site=_build_group_time_site(
+            group=group,
+            inputs=inputs,
+            options=options,
+        ),
+    )
+
+
 def _build_group_time_site(
     *,
     group: BasketObservationGroup,
-    inputs: _GroupTimeSiteInputs,
+    inputs: StandardizedIndexRelativeGroupInputs,
+    options: IndexRelativeGroupSiteOptions,
 ) -> _NamedTimeSite:
     mask = group.mask
     return _NamedTimeSite(
-        name=group.name,
+        name=group.name if options.name is None else options.name,
         obs_dist=dist.StudentT(
             df=inputs.df,
             loc=inputs.coordinate_mean[:, mask],
             scale=inputs.coordinate_scale[:, mask],
         ).to_event(1),
         y_obs=inputs.coordinate_obs[:, mask],
-        time_mask=inputs.time_mask,
-        obs_scale=_resolved_obs_scale(inputs.base_obs_scale, group.obs_weight),
+        time_mask=_combined_time_mask(
+            inputs.time_mask,
+            options.time_mask,
+        ),
+        obs_scale=_resolved_obs_scale(
+            inputs.base_obs_scale,
+            group.obs_weight if options.obs_weight is None else options.obs_weight,
+        ),
     )
+
+
+def _combined_time_mask(
+    base: torch.BoolTensor | None,
+    override: torch.BoolTensor | None,
+) -> torch.BoolTensor | None:
+    if base is None:
+        return override
+    if override is None:
+        return base
+    return cast(torch.BoolTensor, base & override)
 
 
 def _masked_observations(
@@ -441,9 +499,15 @@ def _managed_context(handler_obj: object) -> Iterator[None]:
 
 
 __all__ = [
+    "IndexRelativeObservationContext",
+    "IndexRelativeGroupSiteOptions",
     "IndexRelativeMeasurementModelPriors",
     "IndexRelativeMeasurementModelRuntime",
+    "StandardizedIndexRelativeGroupInputs",
     "build_index_relative_measurement_model_priors",
+    "sample_index_relative_group_site",
     "sample_index_relative_observations",
     "sample_non_index_raw_observations",
+    "standardize_index_relative_group_inputs",
+    "standardize_runtime_index_relative_group_inputs",
 ]

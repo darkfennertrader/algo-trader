@@ -61,6 +61,7 @@ _MODEL_MODULES = (
     "algo_trader.pipeline.stages.modeling.multi_output_index_relative.versions.v15_l1.model",
     "algo_trader.pipeline.stages.modeling.pairwise_index_relative.versions.v16_l1.model",
     "algo_trader.pipeline.stages.modeling.curated_pair_index_relative.versions.v17_l1.model",
+    "algo_trader.pipeline.stages.modeling.pair_state_conditioned_curated_pair.versions.v18_l1.model",
 )
 
 _GUIDE_MODULES = (
@@ -113,6 +114,7 @@ _GUIDE_MODULES = (
     "algo_trader.pipeline.stages.modeling.multi_output_index_relative.versions.v15_l1.guide",
     "algo_trader.pipeline.stages.modeling.pairwise_index_relative.versions.v16_l1.guide",
     "algo_trader.pipeline.stages.modeling.curated_pair_index_relative.versions.v17_l1.guide",
+    "algo_trader.pipeline.stages.modeling.pair_state_conditioned_curated_pair.versions.v18_l1.guide",
 )
 
 _PREDICTOR_MODULES = (
@@ -164,6 +166,7 @@ _PREDICTOR_MODULES = (
     "algo_trader.pipeline.stages.modeling.multi_output_index_relative.versions.v15_l1.predict",
     "algo_trader.pipeline.stages.modeling.pairwise_index_relative.versions.v16_l1.predict",
     "algo_trader.pipeline.stages.modeling.curated_pair_index_relative.versions.v17_l1.predict",
+    "algo_trader.pipeline.stages.modeling.pair_state_conditioned_curated_pair.versions.v18_l1.predict",
 )
 
 

@@ -15,6 +15,7 @@ from algo_trader.application.data_sources import (
     resolve_data_lake,
     resolve_feature_store,
 )
+from algo_trader.application.feature_catalog import FeatureCatalogConfig
 from algo_trader.application.exogenous.config import (
     FredFamilyConfig,
     FredRequestConfig,
@@ -58,6 +59,15 @@ _LOG_LEVEL_FAMILIES = {
     "broad_usd_factor",
     "credit_spreads_risk",
 }
+_CHANGE_1W_ALIASES = frozenset(
+    {
+        "credit_us_baa10y",
+        "ust_2y",
+        "yield_curve_slope_us",
+        "anfci",
+        "us_real_10y",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -111,6 +121,7 @@ def _run_context(request: RunRequest) -> dict[str, str]:
 
 @log_boundary("exogenous_feature_engineering.run", context=_run_context)
 def run(*, request: RunRequest) -> list[Path]:
+    feature_catalog = FeatureCatalogConfig.load()
     config = FredRequestConfig.load(request.config_path or DEFAULT_CONFIG_PATH)
     sources = _resolve_sources(config)
     returns_frame = _load_indexed_frame(
@@ -134,8 +145,13 @@ def run(*, request: RunRequest) -> list[Path]:
         config=config,
         returns_frame=aligned_returns,
         exogenous_frame=aligned_exogenous,
+        configured_feature_names=feature_catalog.exogenous.asset_features,
     )
-    global_block = _build_global_block(config=config, exogenous_frame=aligned_exogenous)
+    global_block = _build_global_block(
+        config=config,
+        exogenous_frame=aligned_exogenous,
+        configured_feature_names=feature_catalog.exogenous.global_features,
+    )
     feature_store = resolve_feature_store()
     asset_paths = _prepare_output_paths(
         feature_store, sources.version_dir.name, block_name=_ASSET_BLOCK
@@ -214,6 +230,7 @@ def _build_asset_block(
     config: FredRequestConfig,
     returns_frame: pd.DataFrame,
     exogenous_frame: pd.DataFrame,
+    configured_feature_names: Sequence[str],
 ) -> AssetFeatureBlock:
     assets = [str(column) for column in returns_frame.columns]
     currency_columns = _carry_currency_columns(config)
@@ -250,11 +267,14 @@ def _build_asset_block(
             applicability="fx_pairs_only",
         )
     ]
-    return AssetFeatureBlock(
-        frame=frame,
-        feature_names=[_CARRY_FEATURE_NAME],
-        feature_specs=specs,
-        assets=assets,
+    return _filter_asset_block(
+        AssetFeatureBlock(
+            frame=frame,
+            feature_names=[_CARRY_FEATURE_NAME],
+            feature_specs=specs,
+            assets=assets,
+        ),
+        configured_feature_names=configured_feature_names,
     )
 
 
@@ -298,44 +318,133 @@ def _split_asset_currencies(asset: str) -> tuple[str | None, str | None]:
 
 
 def _build_global_block(
-    *, config: FredRequestConfig, exogenous_frame: pd.DataFrame
+    *,
+    config: FredRequestConfig,
+    exogenous_frame: pd.DataFrame,
+    configured_feature_names: Sequence[str],
 ) -> GlobalFeatureBlock:
-    series_by_family = _global_series_by_family(config)
-    columns: dict[str, pd.Series] = {}
-    specs: list[DerivedFeatureSpec] = []
-    for family_key, series_list in series_by_family.items():
-        family = _family_by_key(config.families, family_key)
-        if family is None:
-            raise ConfigError(
-                "Configured global series requires a matching family definition",
-                context={"family_key": family_key},
-            )
-        for series in series_list:
-            column_name = _cleaned_series_name(config.provider, series)
-            raw = exogenous_frame[column_name]
-            feature_name, values, transform = _global_feature_from_series(
-                series, raw=raw
-            )
-            columns[feature_name] = values
-            specs.append(
-                DerivedFeatureSpec(
-                    feature_name=feature_name,
-                    family_key=family.key,
-                    transform=transform,
-                    source_series=(series.series_id,),
-                    future_role="global",
-                    applicability="all_assets",
-                )
-            )
+    columns, specs = _derive_global_columns_and_specs(
+        config=config, exogenous_frame=exogenous_frame
+    )
     if not columns:
         raise DataProcessingError(
             "No global exogenous features were derived from cleaned inputs"
         )
     frame = pd.DataFrame(columns, index=exogenous_frame.index)
+    return _filter_global_block(
+        GlobalFeatureBlock(
+            frame=frame,
+            feature_names=list(columns.keys()),
+            feature_specs=specs,
+        ),
+        configured_feature_names=configured_feature_names,
+    )
+
+
+def _derive_global_columns_and_specs(
+    *,
+    config: FredRequestConfig,
+    exogenous_frame: pd.DataFrame,
+) -> tuple[dict[str, pd.Series], list[DerivedFeatureSpec]]:
+    columns: dict[str, pd.Series] = {}
+    specs: list[DerivedFeatureSpec] = []
+    for family_key, series_list in _global_series_by_family(config).items():
+        family = _require_global_family(config.families, family_key)
+        family_columns, family_specs = _derive_family_global_outputs(
+            config=config,
+            exogenous_frame=exogenous_frame,
+            family=family,
+            series_list=series_list,
+        )
+        columns.update(family_columns)
+        specs.extend(family_specs)
+    return columns, specs
+
+
+def _require_global_family(
+    families: Sequence[FredFamilyConfig], family_key: str
+) -> FredFamilyConfig:
+    family = _family_by_key(families, family_key)
+    if family is None:
+        raise ConfigError(
+            "Configured global series requires a matching family definition",
+            context={"family_key": family_key},
+        )
+    return family
+
+
+def _derive_family_global_outputs(
+    *,
+    config: FredRequestConfig,
+    exogenous_frame: pd.DataFrame,
+    family: FredFamilyConfig,
+    series_list: Sequence[FredSeriesConfig],
+) -> tuple[dict[str, pd.Series], list[DerivedFeatureSpec]]:
+    columns: dict[str, pd.Series] = {}
+    specs: list[DerivedFeatureSpec] = []
+    for series in series_list:
+        feature_name, values, transform = _global_feature_from_series(
+            series,
+            raw=exogenous_frame[_cleaned_series_name(config.provider, series)],
+        )
+        columns[feature_name] = values
+        specs.append(
+            DerivedFeatureSpec(
+                feature_name=feature_name,
+                family_key=family.key,
+                transform=transform,
+                source_series=(series.series_id,),
+                future_role="global",
+                applicability="all_assets",
+            )
+        )
+    return columns, specs
+
+
+def _filter_asset_block(
+    block: AssetFeatureBlock,
+    *,
+    configured_feature_names: Sequence[str],
+) -> AssetFeatureBlock:
+    feature_names = [
+        name for name in configured_feature_names if name in block.feature_names
+    ]
+    if not feature_names:
+        raise DataProcessingError(
+            "No configured asset-level exogenous features remain after filtering"
+        )
+    filtered_frame = block.frame.loc[:, pd.IndexSlice[:, feature_names]]
+    filtered_specs = [
+        spec for spec in block.feature_specs if spec.feature_name in feature_names
+    ]
+    return AssetFeatureBlock(
+        frame=filtered_frame,
+        feature_names=feature_names,
+        feature_specs=filtered_specs,
+        assets=block.assets,
+    )
+
+
+def _filter_global_block(
+    block: GlobalFeatureBlock,
+    *,
+    configured_feature_names: Sequence[str],
+) -> GlobalFeatureBlock:
+    feature_names = [
+        name for name in configured_feature_names if name in block.feature_names
+    ]
+    if not feature_names:
+        raise DataProcessingError(
+            "No configured global exogenous features remain after filtering"
+        )
+    filtered_frame = block.frame.loc[:, feature_names]
+    filtered_specs = [
+        spec for spec in block.feature_specs if spec.feature_name in feature_names
+    ]
     return GlobalFeatureBlock(
-        frame=frame,
-        feature_names=list(columns.keys()),
-        feature_specs=specs,
+        frame=filtered_frame,
+        feature_names=feature_names,
+        feature_specs=filtered_specs,
     )
 
 
@@ -369,9 +478,27 @@ def _global_feature_from_series(
     series: FredSeriesConfig, *, raw: pd.Series
 ) -> tuple[str, pd.Series, str]:
     alias = series.alias or series.series_id.lower()
-    if (series.family_key or "") in _LOG_LEVEL_FAMILIES:
+    transform = _resolve_global_feature_transform(series, alias)
+    if transform == "log_level":
         return f"log_{alias}", _log_series(raw, alias), "log_level"
+    if transform == "change_1w":
+        return (
+            f"{alias}_change_1w",
+            _change_1w_series(raw, alias),
+            "change_1w",
+        )
     return alias, raw.astype(float), "level"
+
+
+def _resolve_global_feature_transform(
+    series: FredSeriesConfig, alias: str
+) -> str:
+    family_key = series.family_key or ""
+    if alias in _CHANGE_1W_ALIASES:
+        return "change_1w"
+    if family_key in _LOG_LEVEL_FAMILIES:
+        return "log_level"
+    return "level"
 
 
 def _log_series(raw: pd.Series, alias: str) -> pd.Series:
@@ -387,6 +514,16 @@ def _log_series(raw: pd.Series, alias: str) -> pd.Series:
         index=values.index,
         dtype=float,
         name=f"log_{alias}",
+    )
+
+
+def _change_1w_series(raw: pd.Series, alias: str) -> pd.Series:
+    values = raw.astype(float)
+    return pd.Series(
+        values.diff().to_numpy(dtype=float),
+        index=values.index,
+        dtype=float,
+        name=f"{alias}_change_1w",
     )
 
 

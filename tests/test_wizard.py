@@ -61,57 +61,13 @@ def test_build_feature_commands_skips_empty_random_groups() -> None:
     ]
 
 
-def test_feature_engineering_command_random_exact(monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        wizard, "_prompt_feature_groups", lambda: ["momentum", "breakout"]
-    )
-    monkeypatch.setattr(
-        wizard, "_prompt_feature_selection_mode", lambda groups: "random_count"
-    )
-    monkeypatch.setattr(wizard, "_prompt_required_int", lambda label: 3)
-    monkeypatch.setattr(wizard, "_prompt_optional_int", lambda label: 13)
-    monkeypatch.setattr(
-        wizard,
-        "_key_feature_pool",
-        lambda groups: [
-            _option("momentum", "vol_scaled_momentum", "z_mom_4w"),
-            _option("breakout", "brk_dn", "brk_dn_4w", "brk_dn_26w"),
-        ],
-    )
-    monkeypatch.setattr(
-        wizard,
-        "_print_random_selection",
-        lambda selected_keys, seed, target_count: None,
-    )
-
+def test_feature_engineering_command_uses_config_driven_all() -> None:
     command = wizard._feature_engineering_command()
 
-    assert command.commands == [
-        [
-            "algotrader",
-            "feature_engineering",
-            "--group",
-            "momentum",
-            "--feature",
-            "vol_scaled_momentum",
-        ],
-        [
-            "algotrader",
-            "feature_engineering",
-            "--group",
-            "breakout",
-            "--feature",
-            "brk_dn",
-        ],
-    ]
+    assert command.commands == [["algotrader", "feature_engineering", "--group", "all"]]
 
 
-def test_feature_engineering_command_all_shortcut(monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.setattr(wizard, "_prompt_feature_groups", lambda: ["all"])
-    monkeypatch.setattr(
-        wizard, "_prompt_feature_selection_mode", lambda groups: "all"
-    )
-
+def test_feature_engineering_command_all_shortcut() -> None:
     command = wizard._feature_engineering_command()
 
     assert command.commands == [["algotrader", "feature_engineering", "--group", "all"]]

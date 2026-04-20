@@ -12,12 +12,19 @@ from typing import Callable, Protocol, Sequence, TypeVar
 import pandas as pd
 
 from algo_trader.domain import ConfigError, DataProcessingError, DataSourceError
+from algo_trader.application.feature_catalog import FeatureCatalogConfig
 from algo_trader.infrastructure import log_boundary, resolve_latest_week_dir
 from algo_trader.infrastructure.data import require_utc_hourly_index
 from algo_trader.pipeline.stages.features import (
+    BREAKOUT_FEATURES,
+    CROSS_SECTIONAL_FEATURES,
     FeatureGroup,
     FeatureInputs,
     HorizonSpec,
+    MEAN_REV_FEATURES,
+    REGIME_FEATURES,
+    SEASONAL_FEATURES,
+    VOLATILITY_FEATURES,
     ordered_assets,
 )
 from algo_trader.pipeline.stages.features.cross_sectional import (
@@ -38,6 +45,7 @@ from algo_trader.pipeline.stages.features.mean_reversion import (
 from algo_trader.pipeline.stages.features.momentum import (
     DEFAULT_EPSILON,
     DEFAULT_HORIZON_DAYS,
+    SUPPORTED_FEATURES as MOMENTUM_FEATURES,
     MomentumConfig,
     MomentumFeatureGroup,
 )
@@ -57,7 +65,6 @@ from algo_trader.pipeline.stages.features.regime import (
     RegimeConfig,
     RegimeFeatureGroup,
 )
-from algo_trader.pipeline.stages.features.registry import default_registry
 from .constants import (
     _ALL_GROUP,
     _CROSS_SECTIONAL_GROUP,
@@ -300,10 +307,16 @@ def _log_run_duration(groups: Sequence[str], start_time: float) -> None:
 
 
 def _resolve_run_config(request: RunRequest) -> RunConfig:
+    if request.features:
+        raise ConfigError(
+            "feature selection is config-driven; edit config/features.yml"
+        )
+    catalog = FeatureCatalogConfig.load()
     horizon_days = _normalize_horizon_days(request.horizons)
     data_lake = resolve_data_lake()
     feature_store = resolve_feature_store()
-    groups = _resolve_groups(request.groups)
+    groups = _resolve_groups(request.groups, catalog)
+    features_by_group = _resolve_features_by_group(groups, catalog)
     return RunConfig(
         settings=FeatureSettings(
             return_type="log",
@@ -312,7 +325,7 @@ def _resolve_run_config(request: RunRequest) -> RunConfig:
         ),
         selection=FeatureSelection(
             groups=groups,
-            features=request.features,
+            features_by_group=features_by_group,
         ),
         paths=FeaturePaths(
             data_lake=data_lake,
@@ -321,9 +334,10 @@ def _resolve_run_config(request: RunRequest) -> RunConfig:
     )
 
 
-def _resolve_groups(groups: Sequence[str] | None) -> list[str]:
-    registry = default_registry()
-    available = registry.list_names()
+def _resolve_groups(
+    groups: Sequence[str] | None, catalog: FeatureCatalogConfig
+) -> list[str]:
+    available = list(catalog.technical.ordered_group_names())
     if not groups:
         return available
     normalized = [_normalize_group_name(name) for name in groups]
@@ -341,6 +355,32 @@ def _resolve_groups(groups: Sequence[str] | None) -> list[str]:
             context={"groups": ",".join(unknown)},
         )
     return normalized
+
+
+def _resolve_features_by_group(
+    groups: Sequence[str], catalog: FeatureCatalogConfig
+) -> dict[str, tuple[str, ...]]:
+    supported = _supported_feature_keys_by_group()
+    resolved: dict[str, tuple[str, ...]] = {}
+    for group_name in groups:
+        supported_features = supported.get(group_name)
+        if supported_features is None:
+            raise ConfigError(
+                "Configured feature group is not implemented",
+                context={"group": group_name},
+            )
+        configured = catalog.technical.features_for_group(group_name)
+        unknown = sorted(set(configured).difference(supported_features))
+        if unknown:
+            raise ConfigError(
+                "Configured feature keys are not supported",
+                context={
+                    "group": group_name,
+                    "features": ",".join(unknown),
+                },
+            )
+        resolved[group_name] = configured
+    return resolved
 
 
 def _normalize_group_name(name: str) -> str:
@@ -579,7 +619,7 @@ def _build_momentum_group(
     momentum_config = MomentumConfig(
         horizons=momentum_horizons,
         eps=config.settings.eps,
-        features=config.selection.features,
+        features=_features_for_group(config, "momentum"),
     )
     return MomentumFeatureGroup(momentum_config)
 
@@ -591,7 +631,7 @@ def _build_mean_reversion_group(
     mean_rev_config = MeanReversionConfig(
         horizons=mean_rev_horizons,
         eps=config.settings.eps,
-        features=config.selection.features,
+        features=_features_for_group(config, "mean_reversion"),
     )
     return MeanReversionFeatureGroup(mean_rev_config)
 
@@ -602,7 +642,7 @@ def _build_breakout_group(
     breakout_horizons = _build_horizon_specs_for_group(horizons)
     breakout_config = BreakoutConfig(
         horizons=breakout_horizons,
-        features=config.selection.features,
+        features=_features_for_group(config, "breakout"),
     )
     return BreakoutFeatureGroup(breakout_config)
 
@@ -614,7 +654,7 @@ def _build_cross_sectional_group(
     cross_sectional_config = CrossSectionalConfig(
         horizons=cross_sectional_horizons,
         eps=config.settings.eps,
-        features=config.selection.features,
+        features=_features_for_group(config, "cross_sectional"),
     )
     return CrossSectionalFeatureGroup(cross_sectional_config)
 
@@ -626,7 +666,7 @@ def _build_volatility_group(
     volatility_config = VolatilityConfig(
         horizons=volatility_horizons,
         eps=config.settings.eps,
-        features=config.selection.features,
+        features=_features_for_group(config, "volatility"),
     )
     return VolatilityFeatureGroup(volatility_config)
 
@@ -637,7 +677,7 @@ def _build_seasonal_group(
     seasonal_horizons = _build_horizon_specs_for_group(horizons)
     seasonal_config = SeasonalConfig(
         horizons=seasonal_horizons,
-        features=config.selection.features,
+        features=_features_for_group(config, "seasonal"),
     )
     return SeasonalFeatureGroup(seasonal_config)
 
@@ -649,6 +689,30 @@ def _build_regime_group(
     regime_config = RegimeConfig(
         horizons=regime_horizons,
         eps=DEFAULT_REGIME_EPSILON,
-        features=config.selection.features,
+        features=_features_for_group(config, "regime"),
     )
     return RegimeFeatureGroup(regime_config)
+
+
+def _features_for_group(
+    config: RunConfig, group_name: str
+) -> Sequence[str]:
+    features = config.selection.features_by_group.get(group_name)
+    if features is None:
+        raise ConfigError(
+            "Configured feature group is missing",
+            context={"group": group_name},
+        )
+    return features
+
+
+def _supported_feature_keys_by_group() -> dict[str, tuple[str, ...]]:
+    return {
+        "momentum": tuple(MOMENTUM_FEATURES),
+        "mean_reversion": tuple(MEAN_REV_FEATURES),
+        "breakout": tuple(BREAKOUT_FEATURES),
+        "cross_sectional": tuple(CROSS_SECTIONAL_FEATURES),
+        "volatility": tuple(VOLATILITY_FEATURES),
+        "seasonal": tuple(SEASONAL_FEATURES),
+        "regime": tuple(REGIME_FEATURES),
+    }

@@ -10,7 +10,7 @@ from algo_trader.application.research.curated_pair_stability_study import (
     write_curated_pair_stability_plots,
 )
 from algo_trader.application.research.posterior_signal import PosteriorSignalObservation
-from tests.research.observation_support import build_observations
+from tests.research.observation_support import build_august_observations
 
 
 def test_curated_pair_stability_study_writes_expected_outputs(
@@ -87,9 +87,7 @@ def _observations(scale: float) -> tuple[PosteriorSignalObservation, ...]:
             np.array([0.03, 0.00, -0.01, 0.00, -0.01, 0.0]) * scale,
         ),
     )
-    return build_observations(
+    return build_august_observations(
         asset_names=asset_names,
         predictive_rows=predictive_rows,
-        outer_k_start=10,
-        timestamp_prefix="2025-08",
     )

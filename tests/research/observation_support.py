@@ -47,3 +47,19 @@ def build_observations(
             )
         )
     return tuple(observations)
+
+
+def build_august_observations(
+    *,
+    asset_names: tuple[str, ...],
+    predictive_rows: tuple[
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+        ...,
+    ],
+) -> tuple[PosteriorSignalObservation, ...]:
+    return build_observations(
+        asset_names=asset_names,
+        predictive_rows=predictive_rows,
+        outer_k_start=10,
+        timestamp_prefix="2025-08",
+    )

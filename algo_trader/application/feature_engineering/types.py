@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from algo_trader.infrastructure.data import ReturnType
 
@@ -17,7 +17,7 @@ class FeatureSettings:
 @dataclass(frozen=True)
 class FeatureSelection:
     groups: Sequence[str]
-    features: Sequence[str] | None
+    features_by_group: Mapping[str, Sequence[str]]
 
 
 @dataclass(frozen=True)

@@ -6,8 +6,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-import yaml
-
+from algo_trader.application.yaml_support import load_yaml_mapping
 from algo_trader.domain import ConfigError
 
 _DIR_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -183,19 +182,13 @@ class FredRequestConfig:
 
 
 def _load_yaml_mapping(config_path: Path) -> Mapping[str, Any]:
-    if not config_path.exists():
-        raise ConfigError(f"FRED config not found at {config_path}")
-    try:
-        with config_path.open("r", encoding="utf-8") as handle:
-            loaded: Any = yaml.safe_load(handle)
-    except yaml.YAMLError as exc:
-        raise ConfigError(f"Invalid YAML content in {config_path}") from exc
-    raw_config = loaded if loaded is not None else {}
-    if not isinstance(raw_config, Mapping):
-        raise ConfigError(
+    return load_yaml_mapping(
+        config_path,
+        missing_message=f"FRED config not found at {config_path}",
+        invalid_mapping_message=(
             f"FRED config must be a mapping in {config_path}"
-        )
-    return raw_config
+        ),
+    )
 
 
 def _normalize_provider(

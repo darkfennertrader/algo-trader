@@ -160,16 +160,9 @@ def _data_processing_command() -> WizardCommand:
 
 
 def _feature_engineering_command() -> WizardCommand:
-    groups = _prompt_feature_groups()
-    mode = _prompt_feature_selection_mode(groups)
-    if mode == "all" and (not groups or groups == ["all"]):
-        return WizardCommand(
-            commands=[["algotrader", "feature_engineering", "--group", "all"]]
-        )
-    selected_groups = _resolve_feature_groups(groups)
-    features_by_group = _select_features_by_group(selected_groups, mode)
-    commands = _build_feature_commands(selected_groups, features_by_group)
-    return WizardCommand(commands=commands)
+    return WizardCommand(
+        commands=[["algotrader", "feature_engineering", "--group", "all"]]
+    )
 
 
 def _simulation_command() -> WizardCommand:
